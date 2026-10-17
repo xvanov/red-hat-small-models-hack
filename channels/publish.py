@@ -14,7 +14,14 @@ import argparse
 import json
 import sys
 
-from .adapters import api
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# OPERATOR_* from the repo's .env (gitignored); values go into the process env, never printed
+load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
+
+from .adapters import api  # noqa: E402
 
 SAMPLE_LISTING = {
     "listing_id": "L-demo-appling",

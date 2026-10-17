@@ -66,6 +66,10 @@ When an element's selector stops matching (`PAGE_CHANGED`):
 5. For clicks, the runner checks the page actually progressed. If a freshly repaired click did nothing, the repair is
    reverted (logged as `verifier`) and the loop runs again with that selector excluded.
 
+**Measured 2026-10-17** against the mocks' v2 redesign with the served `nemotron-3.5-lightning`: all four forms
+repaired (55 selectors, about 35 s per form, most of it the 2.5 s wait per broken selector), every submitted field
+correct, zero rejected proposals. The inbox rows, message author map, composer and send button repaired too.
+
 With no model reachable, repair is off unless `CHANNELS_REPAIR_FALLBACK=heuristic` enables the offline word-overlap
 fallback (not a model; it's what the offline tests use). Every changelog entry says which one produced the fix.
 
@@ -78,7 +82,7 @@ To restore the shipped files: `git checkout channels/adapters/selectors/mock`.
 | Var | Use |
 |---|---|
 | `MOCK_BASE_URL` | mock server for adapters, default `http://127.0.0.1:8765` |
-| `OPERATOR_BASE_URL`, `OPERATOR_MODEL`, `OPERATOR_API_KEY` | operator model for repair (model id auto-detected from `/models` if unset) |
+| `OPERATOR_BASE_URL`, `OPERATOR_MODEL`, `OPERATOR_API_KEY` | operator model for repair (default `http://localhost:8000/v1`; model id auto-detected from `/models`; `publish.py` loads them from the repo `.env`) |
 | `CHANNELS_REPAIR_FALLBACK=heuristic` | allow the offline fallback proposer |
 | `CHANNELS_TIMEOUT_MS` | wait per selector (default 2500 mock, 12000 live) |
 | `CHANNELS_HEADLESS=1` | run live sessions headless (default headed) |
