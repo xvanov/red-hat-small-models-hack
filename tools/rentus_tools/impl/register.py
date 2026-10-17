@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import re
+import unicodedata
 from datetime import date
 
 from ..core import tool
@@ -92,8 +93,17 @@ def gate_missing(renter: dict) -> list[str]:
     return miss
 
 
+# Letters NFKD does not decompose into an ASCII base letter plus accents.
+_TRANSLIT = str.maketrans({"ß": "ss", "æ": "ae", "Æ": "ae", "œ": "oe", "Œ": "oe", "ø": "o", "Ø": "o", "đ": "d",
+                           "Đ": "d", "ð": "d", "Ð": "d", "þ": "th", "Þ": "th", "ł": "l", "Ł": "l", "ı": "i"})
+
+
 def _slug(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-") or "renter"
+    """Name -> id slug. Accents are transliterated (María -> maria); letters with no ASCII form (e.g. CJK)
+    are kept as-is rather than dropped; only separators and punctuation become '-'."""
+    s = unicodedata.normalize("NFKD", (s or "").translate(_TRANSLIT))
+    s = "".join(c for c in s if not unicodedata.combining(c)).lower()
+    return re.sub(r"[\W_]+", "-", s).strip("-") or "renter"
 
 
 @tool("upsert_renter")

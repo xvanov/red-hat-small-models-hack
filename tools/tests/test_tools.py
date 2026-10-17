@@ -262,6 +262,18 @@ def test_upsert_renter_validation(world):
     assert "move_in" in vague["gate_missing"]
 
 
+def test_renter_id_slug_transliterates_accents(world):
+    from rentus_tools.impl.register import _slug
+    assert _slug("María") == "maria"
+    assert _slug("José Núñez-Peña") == "jose-nunez-pena"
+    assert _slug("Zoë Strauß") == "zoe-strauss"
+    assert _slug("Łukasz Øvergård") == "lukasz-overgard"
+    assert _slug("李 Wei") == "李-wei"  # no ASCII form: kept, not dropped
+    assert _slug("  ") == "renter"
+    d = call_ok(world, "upsert_renter", {"thread_id": "T001", "fields": {"name": "María"}})
+    assert d["renter"]["renter_id"] == "renter:maria"
+
+
 def test_match_renters(world):
     world.threads.append({"thread_id": "T002", "channel": "sms", "renter_name": "Ben", "messages": []})
     call_ok(world, "upsert_renter", {"thread_id": "T001", "fields": {"gate": COMPLETE_GATE, "wants": {"budget": 800, "area": "Durham"}}})
