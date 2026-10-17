@@ -125,9 +125,10 @@ function attach(runId) {
 function onEvent(ev) {
   addTrace(ev);
   const d = ev.data || {};
-  if (ev.type === "owner_message" && !d.esc_id) chatBubble("owner", "Owner", d.text);
+  if (ev.type === "owner_message" && ev.actor !== "owner" && d.summary) chatBubble("op", opLabel(d) + " · report", d.summary);
   else if (ev.type === "owner_message" && d.esc_id) sysChat(d.text);
-  else if (ev.type === "model_message" && (d.to === "owner" || !d.thread_id)) chatBubble("op", opLabel(d), d.text);
+  else if (ev.type === "owner_message" && d.text) chatBubble("owner", "Owner", d.text);
+  else if (ev.type === "model_message" && d.text && !(d.tool_calls || []).length && !d.thread_id) chatBubble("op", opLabel(d), d.text);
   else if (ev.type === "fault_injected") { /* already confirmed in chat */ }
   else if (ev.type === "escalation") sysChat("Needs you: " + (d.reason || ""));
   if (["tool_result", "renter_message", "escalation", "owner_message", "model_message"].includes(ev.type)) scheduleView(150);
@@ -178,6 +179,9 @@ function opLabel(d) {
 }
 function actorLabel(ev) {
   const a = ev.actor || "system", d = ev.data || {};
+  if ((ev.type === "tool_call" || ev.type === "tool_result") && (d.tool === "read_reply"))
+    return [`reader · ${d.model && d.model !== "stub" ? d.model : S.readerLabel}`, "reader"];
+  if (ev.type === "tool_result" && a === "system") return ["tools · sandbox", "system"];
   if (a === "operator") return [opLabel(d), "operator"];
   if (a === "reader") return [`reader · ${d.model || S.readerLabel}`, "reader"];
   if (a === "verifier") return ["verifier · code", "verifier"];
@@ -200,18 +204,27 @@ function summarize(ev) {
     case "tool_result": {
       const ok = d.ok ?? d.result?.ok;
       const err = d.error || d.result?.error;
-      if (ok === false) return ["err", `✗ ${d.tool || ""} ${err?.code || ""}: ${err?.message || ""}`];
-      return ["ok", `✓ ${d.tool || ""} ${short(d.data ?? d.result?.data ?? "", 90)}`];
+      const f = d.fault ? ` [injected ${typeof d.fault === "string" ? d.fault : d.fault.kind || "fault"}]` : "";
+      if (ok === false) return ["err", `✗ ${d.tool || ""} ${err?.code || ""}: ${err?.message || ""}${f}`];
+      return [f ? "err" : "ok", `✓ ${d.tool || ""}${f} ${short(d.data ?? d.result?.data ?? "", 90)}`];
     }
-    case "verifier": return [d.ok === false ? "vfail" : "vok", `${d.ok === false ? "✗ caught" : "✓ pass"} ${d.check || ""}${d.tool ? " on " + d.tool : ""}${d.detail ? ": " + d.detail : ""}`];
-    case "retry": return ["retry", `↻ retry ${d.tool || ""} attempt ${d.attempt ?? "?"} after ${d.reason || ""}${d.backoff_s ? ` (backoff ${d.backoff_s}s)` : ""}`];
+    case "verifier": {
+      const what = d.check || d.stage || "";
+      const extra = d.detail || [].concat(d.problems || [], d.repaired || [], d.errors || []).join("; ");
+      return [d.ok === false ? "vfail" : "vok", `${d.ok === false ? "✗ caught" : "✓ pass"} ${what}${d.tool ? " on " + d.tool : ""}${extra ? ": " + extra : ""}`];
+    }
+    case "retry": return ["retry", `↻ retry ${d.tool || ""} attempt ${d.attempt ?? "?"} after ${d.reason || d.error || d.code || ""}${d.backoff_s ? ` (backoff ${d.backoff_s}s)` : ""}`];
     case "fallback": return ["fb", `⤳ fallback ${d.tool ? d.tool + ": " : ""}${d.from ? d.from + " → " : ""}${d.to || ""} ${d.reason ? "(" + d.reason + ")" : ""}`];
     case "escalation": return ["esc", `⚑ escalate: ${d.reason || ""}`];
     case "fault_injected": return ["fault", `💥 injected ${d.kind} on next ${d.tool} (x${d.times || 1})`];
     case "scenario": return ["msg", `scenario ${d.scenario_id} loaded: ${d.counterparts} renters, ${(d.faults || []).length} scripted faults`];
     case "renter_message": return ["msg", `${d.name || ""} [${d.channel || ""}]: “${d.text || ""}”`];
-    case "owner_message": return ["msg", `owner: ${d.text || ""}`];
-    case "model_message": return ["msg", `${d.thread_id ? "to " + d.thread_id : "to owner"}: ${d.text || ""}`];
+    case "owner_message": return ["msg", d.summary ? `report to owner: ${d.summary}` : `owner: ${d.text || ""}`];
+    case "model_message": {
+      const calls = d.tool_calls || [];
+      if (calls.length) return ["msg", `decides: ${calls.join(", ")}${d.text ? " · " + d.text : ""}`];
+      return ["msg", `${d.thread_id ? "to " + d.thread_id : "says"}: ${d.text || ""}`];
+    }
     case "score": return ["ok", `score ${short(d, 120)}`];
     default: return ["msg", `${ev.type}: ${short(d, 120)}`];
   }
@@ -225,7 +238,13 @@ function addTrace(ev) {
   const ts = (ev.ts || "").slice(11, 19);
   row.innerHTML = `<span class="ts">${esc(ts)}</span><span class="actor a-${acls}">${esc(label)}</span><span class="s" title="${esc(text)}">${esc(text)}</span>`;
   const box = $("trace");
-  box.appendChild(row);
+  row.dataset.ts = ev.ts || "";
+  // console notes come from a second file; keep the trace in time order on replay
+  let before = null;
+  if (ev.ts && box.lastElementChild && box.lastElementChild.dataset.ts > ev.ts) {
+    for (const el of box.children) { if (el.dataset.ts > ev.ts) { before = el; break; } }
+  }
+  box.insertBefore(row, before);
   while (box.childElementCount > 600) box.removeChild(box.firstChild);
   if ($("followTrace").checked) box.parentElement.scrollTop = 1e9;
 }
@@ -245,18 +264,18 @@ function renderLanes(lanes) {
     if (!lane) {
       lane = document.createElement("div");
       lane.className = "lane"; lane.id = "lane-" + ch;
-      lane.innerHTML = `<div class="lane-h"><span>${esc(LANE_NAMES[ch] || ch)}</span><span class="n"></span></div><div class="lane-b"></div>`;
+      lane.innerHTML = `<div class="lane-h"><span>${esc(LANE_NAMES[ch] || ch)}</span><span class="n"></span></div><div class="lane-posts"></div><div class="lane-b"></div>`;
       box.appendChild(lane);
     }
     const L = lanes[ch] || { posts: [], threads: [] };
     lane.querySelector(".n").textContent = `${L.posts.length} post${L.posts.length === 1 ? "" : "s"} · ${L.threads.length} thread${L.threads.length === 1 ? "" : "s"}`;
     const body = lane.querySelector(".lane-b");
     const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
-    let html = "";
+    let html = "", posts = "";
     for (const p of L.posts) {
       const src = imgSrc(p.screenshot);
       const st = p.status || "draft";
-      html += `<div class="card">${src ? `<a href="${esc(src)}" target="_blank"><img src="${esc(src)}" alt="screenshot"></a>` : ""}
+      posts += `<div class="card">${src ? `<a href="${esc(src)}" target="_blank"><img src="${esc(src)}" alt="screenshot"></a>` : ""}
         <div><div class="t">${esc(p.title)}</div><div class="small muted">$${esc(p.price)} <span class="chip ${st === "live" ? "live" : st.includes("ready") ? "ready" : ""}">${esc(st)}</span></div></div></div>`;
     }
     for (const t of L.threads) {
@@ -268,7 +287,9 @@ function renderLanes(lanes) {
       });
       html += "</div>";
     }
-    body.innerHTML = html || `<div class="empty">nothing yet</div>`;
+    const pbox = lane.querySelector(".lane-posts");
+    if (pbox.innerHTML !== posts) pbox.innerHTML = posts;
+    body.innerHTML = html || `<div class="empty">${L.posts.length ? "no threads yet" : "nothing yet"}</div>`;
     if (nearBottom) body.scrollTop = 1e9;
   }
 }
@@ -278,7 +299,7 @@ function renderRegister(reg) {
     <td><b>${esc(r.name)}</b>${r.channel ? `<span class="v">${esc(r.channel)}</span>` : ""}</td>
     ${GATE.map((g) => { const c = r.gate[g] || { state: "none" };
       return `<td title="${esc(c.value ?? "")}"><span class="tick ${c.state}">${TICK[c.state] || "·"}</span>${c.value != null && c.value !== "" ? `<span class="v">${esc(c.value)}</span>` : ""}</td>`; }).join("")}
-    <td class="status">${esc(r.status || "")}</td></tr>`).join("")
+    <td class="status">${esc((r.status || "").replace(/_/g, " "))}</td></tr>`).join("")
     : `<tr><td colspan="7" class="empty">no renters yet</td></tr>`;
 }
 

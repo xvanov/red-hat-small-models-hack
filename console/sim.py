@@ -282,7 +282,7 @@ class SimRun:
 
     def raw_call(self, tool: str, args: dict, actor: str = "operator") -> dict:
         call_id = self._nid("c")
-        model = {"operator": "stub", "reader": "fallback (code)"}.get(actor, actor)
+        model = {"operator": "stub", "reader": "deterministic fallback (code)"}.get(actor, actor)
         self.log.emit("tool_call", actor, {"tool": tool, "args": args, "call_id": call_id, "model": model})
         self.pause(0.35)
         fault = self._take_fault(tool)
@@ -619,6 +619,15 @@ class SimRun:
                                                                          "deny": (thread_id, "The price is firm at "
                                                                                   f"${room.get('rent', 750)}.")}
         missing = [g for g in GATE if reg["gate"][g].get("status") not in ("answered", "exception")]
+        if not missing and reg["status"] in ("showing_proposed", "showing_confirmed"):
+            if reg["status"] == "showing_proposed" and "hard_no" not in intents:
+                reg["status"] = "showing_confirmed"
+                for ev in self.world["calendar"]:
+                    if ev.get("renter_id") == reg["renter_id"]:
+                        ev["status"] = "confirmed"
+                self.operator_say(thread_id, "Great, see you then." if lang == "en" else "Perfecto, nos vemos.")
+                self.call("report_to_owner", {"summary": f"Showing confirmed with {reg['name']}"})
+            return
         if not missing:
             slots = self.call("find_showing_slots", {"room_id": room.get("room_id", ""), "date_from": "2026-10-20",
                                                      "date_to": "2026-10-27"})

@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import integration as integ
 from .events import Tail, utc_now
+from .operator_run import OperatorRun
 from .sim import SimRun
 from .view import build_view
 
@@ -42,12 +43,23 @@ def _console_note(run_id: str, type_: str, data: dict, actor: str = "system"):
                            ensure_ascii=False) + "\n")
 
 
-def _mode() -> str:
+def _mode(badge: dict | None = None) -> str:
+    """operator: real operator on vLLM. operator-stub: real operator + tools, scripted model.
+    stub: the console's own driver (no operator package, or forced for rehearsal)."""
     if os.environ.get("CONSOLE_FORCE_STUB") == "1":
         return "stub"
     op, _ = integ.try_import("rentus_operator")
     tools, _ = integ.try_import("rentus_tools")
-    return "operator" if (op and tools) else "stub"
+    if not (op and tools):
+        return "stub"
+    badge = badge or integ.probe_backend()
+    if badge.get("backend_up"):
+        return "operator"
+    return "operator-stub" if os.environ.get("CONSOLE_STUB") == "operator" else "stub"
+
+
+MODE_LABEL = {"operator": integ.LIVE_LABEL, "operator-stub": "stub model (rentus_operator scripted, real tools)",
+              "stub": "stub (console driver)"}
 
 
 def _get_run(run_id: str):
@@ -64,14 +76,17 @@ def index():
 
 @app.get("/api/status")
 def status():
-    badge = integ.probe_backend()
-    pkgs = {n: integ.try_import(n)[0] is not None for n in ("rentus_operator", "rentus_tools", "rentus_gym")}
+    badge = dict(integ.probe_backend())
+    pkgs = {n: integ.try_import(n)[0] is not None for n in ("rentus_operator", "rentus_tools", "rentus_env")}
     active = STATE["active"]
     run = RUNS.get(active) if active else None
-    return {"badge": badge, "mode": _mode(), "packages": pkgs, "active_run": active,
+    mode = getattr(run, "mode", None) if run and getattr(run, "status", "") not in ("stopped",) else _mode(badge)
+    badge["label"] = MODE_LABEL.get(mode, mode)
+    badge["live"] = mode == "operator"
+    return {"badge": badge, "mode": mode, "packages": pkgs, "active_run": active,
             "run_status": getattr(run, "status", None), "run_mode": getattr(run, "mode", None),
             "speed": getattr(run, "speed", None), "fault_kinds": FAULT_KINDS, "default_fault_tool": DEFAULT_FAULT_TOOL,
-            "reader_label": os.environ.get("READER_LABEL", "reader (<=1.5B, fine-tuned)")}
+            "reader_label": os.environ.get("READER_LABEL", "deterministic fallback (code)")}
 
 
 @app.get("/api/scenarios")
@@ -111,13 +126,12 @@ def start_run(body: dict = Body(default={})):
     run_dir.mkdir(parents=True, exist_ok=True)
     if STATE["active"] and STATE["active"] in RUNS:
         RUNS[STATE["active"]].stop()
-    mode = _mode()
+    badge = integ.probe_backend(force=True)
+    mode = _mode(badge)
     run = None
-    if mode == "operator":
+    if mode in ("operator", "operator-stub"):
         try:
-            op, _ = integ.try_import("rentus_operator")
-            tools, _ = integ.try_import("rentus_tools")
-            run = integ.OperatorRun(run_id, run_dir, goal, scenario, speed, op, tools)
+            run = OperatorRun(run_id, run_dir, goal, scenario, speed, live=mode == "operator", badge=badge)
         except Exception as e:
             _console_note(run_id, "fallback", {"from": "rentus_operator", "to": "console stub driver",
                                                "reason": f"{type(e).__name__}: {e}"})

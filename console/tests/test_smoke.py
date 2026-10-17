@@ -120,3 +120,43 @@ def test_bad_inputs(base):
     assert httpx.post(base + f"/api/runs/{rid}/faults", json={"kind": "meteor"}).status_code == 400
     assert httpx.post(base + f"/api/runs/{rid}/escalations/X1", json={"decision": "maybe"}).status_code == 400
     assert httpx.get(base + "/api/file", params={"path": "../.env"}).status_code == 404
+
+
+def _ok(u):
+    try:
+        return httpx.get(u, timeout=0.5).status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
+def test_operator_stub_mode(tmp_path):
+    """Real rentus_operator + rentus_tools + gym session, with the operator's scripted stub model."""
+    port = _free_port()
+    env = {**os.environ, "CONSOLE_STUB": "operator", "OPERATOR_BASE_URL": "http://127.0.0.1:9/v1",
+           "CONSOLE_RUNS_DIR": str(tmp_path)}
+    env.pop("CONSOLE_FORCE_STUB", None)
+    proc = subprocess.Popen([sys.executable, "-m", "uvicorn", "console.app:app", "--port", str(port),
+                             "--log-level", "warning"], cwd=REPO, env=env)
+    url = f"http://127.0.0.1:{port}"
+    try:
+        assert _wait(lambda: _ok(url + "/api/status"), 10)
+        s = httpx.get(url + "/api/status").json()
+        if s["mode"] != "operator-stub":
+            pytest.skip(f"operator packages not importable here: {s['packages']}")
+        rid = httpx.post(url + "/api/runs", json={"goal": "Appling Way room free Nov 1, $750, private bath",
+                                                  "speed": 10}).json()["run_id"]
+        view = lambda: httpx.get(url + f"/api/runs/{rid}/view").json()  # noqa: E731
+        v = _wait(lambda: (lambda v: v if v["lanes"]["marketplace"]["posts"] else None)(view()), 20)
+        assert v and v["mode"] == "operator-stub"
+        assert _wait(lambda: any(l["threads"] for l in view()["lanes"].values()), 20), "renters never arrived"
+        sc = httpx.get(url + "/api/scenarios").json()
+        if sc:
+            r = httpx.post(url + "/api/runs", json={"scenario_id": sc[0]["id"], "speed": 10})
+            assert r.status_code == 200
+            rid2 = r.json()["run_id"]
+            assert _wait(lambda: (tmp_path / rid2 / "events.jsonl").exists(), 10)
+            f = httpx.post(url + f"/api/runs/{rid2}/faults", json={"kind": "page_changed", "tool": "publish_listing"})
+            assert f.status_code == 200
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
