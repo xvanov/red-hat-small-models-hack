@@ -20,3 +20,8 @@ Answers, verbatim:
 > 3. Technically yes, but I think its unlikely that you will add so many parameters to where it significantly increases parameter count.
 
 Impact: simulators, graders and offline data generators don't count, so the Gym may use a model-driven renter simulator and a larger model may generate synthetic data. One loaded model counts once however many agents use it, so the multi-agent backup on Lightning is viable. LoRA weights count but are tiny.
+
+## 2026-10-17 ~14:35 ET — organizer "How to" page (Discord)
+Source: https://expensive-date-2f9.notion.site/How-to-3fc213393e85808a83bad6f6cda8b544
+Summary: a getting-started guide, not a rule change. Create a Brev account and add credits; suggested instance NVIDIA L40S (48GB); `brev login` then `brev shell <instance>`; create a uv venv and `uv pip install -U vllm` (nightly wheels index for the matching CUDA version, older vLLM for older GPUs/drivers); pick a model on Hugging Face; serve with `vllm serve <model> --port 8001` and call `/v1/chat/completions` (example uses google/gemma-4-12B-it).
+Impact: none on our design. We already serve Lightning on vLLM (container image v0.27.1) on a larger RTX Pro 6000. It confirms any Hugging Face model is acceptable; nothing says the models must be NVIDIA's.
