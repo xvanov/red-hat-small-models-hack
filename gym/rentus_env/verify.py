@@ -4,9 +4,10 @@ Each check passes or fails. reward = passed / total; a task passes when every ch
 
 Check types
   state         a value in the final world state      {"path", "equals"|"in"|"exists"|"absent"|"contains"|
-                                                        "count_gte"|"count_eq"|"gte"|"lte", "normalize"?}
+                                                        "not_contains"|"count_gte"|"count_eq"|"gte"|"lte", "normalize"?}
   never         a tool is never ATTEMPTED (optionally  {"tool", "before"?: "gate_complete"|"tool:<name>",
-                only before a condition)                "thread"?}
+                only before a condition), or an item    "thread"?}   or   {"asked": "<item>", "thread"}
+                is never asked on a thread
   style         every message the operator attempted   {"rule": "max_two_sentences"|"one_question"|
                 to a renter obeys a style rule          "no_long_dash"|"language"|"first_person",
                                                         "thread"?, "language"?, "scope"?: "attempted"|"sent"}
@@ -22,6 +23,8 @@ from __future__ import annotations
 
 import re
 from typing import Any
+
+from .counterparts import classify_question
 
 CHECK_TYPES = ("state", "never", "style", "tool_called", "escalated", "budget", "message")
 
@@ -130,6 +133,9 @@ def check_state(c: dict, ctx: dict) -> tuple[bool, str]:
         return _norm(v, how) == _norm(c["equals"], how), f"{c['path']}={_short(v)}"
     if "in" in c:
         return _norm(v, how) in [_norm(x, how) for x in c["in"]], f"{c['path']}={_short(v)}"
+    if "not_contains" in c:
+        hay = " ".join(map(str, v)) if isinstance(v, list) else str(v)
+        return str(c["not_contains"]).lower() not in hay.lower(), f"{c['path']}={_short(v)}"
     if "contains" in c:
         hay = " ".join(map(str, v)) if isinstance(v, list) else str(v)
         return str(c["contains"]).lower() in hay.lower(), f"{c['path']}={_short(v)}"
@@ -145,6 +151,13 @@ def check_state(c: dict, ctx: dict) -> tuple[bool, str]:
 
 # --------------------------------------------------------------------------------- trace ones
 def check_never(c: dict, ctx: dict) -> tuple[bool, str]:
+    if "asked" in c:  # the operator never asks this item on this thread (e.g. info already volunteered)
+        for e in ctx["trace"]:
+            if e["tool"] == "send_message" and isinstance(e.get("args"), dict) \
+                    and e["args"].get("thread_id") == c.get("thread") \
+                    and classify_question(str(e["args"].get("text", ""))) == c["asked"]:
+                return False, f"asked {c['asked']} again at step {e['i']}"
+        return True, "ok"
     tool, before = c["tool"], c.get("before")
     for e in ctx["trace"]:
         if e["tool"] != tool:

@@ -67,6 +67,8 @@ class Counterpart:
         self.name = spec.get("name") or self.id.split(":", 1)[-1].replace("_", " ").title()
         self.thread_id = spec.get("thread_id") or "t_" + self.id.split(":", 1)[-1]
         self.script = list(spec.get("script", []))
+        self.room_id = spec.get("room_of_interest")
+        self.listing_id = spec.get("listing_id")
         self.used: set[int] = set()
         self.replies_sent = 0
 

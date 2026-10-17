@@ -37,10 +37,6 @@ def renter_for_thread(st: dict, thread_id: str) -> dict | None:
     return None
 
 
-def _threads(st: dict) -> list:
-    return st.setdefault("threads", [])
-
-
 class RolloutSession:
     def __init__(self, task: dict, backend: Backend | None = None, surface_replies: bool = True,
                  max_tool_calls: int | None = None):
@@ -60,27 +56,32 @@ class RolloutSession:
 
     # ---------------------------------------------------------------------------------- setup
     def _seed_threads(self):
-        st = state(self.world)
-        ts = _threads(st)
+        ts = self.backend.coll(self.world, "threads")
+        channels = self.backend.coll(self.world, "channels") if not isinstance(self.world, dict) \
+            else self.world.get("channels") or {}
         for tid, cp in self.counterparts.items():
             msgs = [self._msg("renter", text) for text in cp.opening()]
             existing = next((t for t in ts if t.get("thread_id") == tid), None)
             if existing:
                 existing.setdefault("messages", []).extend(msgs)
                 continue
-            ts.append({"thread_id": tid, "channel": cp.channel, "renter_name": cp.name,
-                       "language": cp.language, "messages": msgs})
-            ch = (st.get("channels") or {}).get(cp.channel)
-            if isinstance(ch, dict) and isinstance(ch.get("threads"), list):
+            t = {"thread_id": tid, "channel": cp.channel, "renter_name": cp.name, "language": cp.language,
+                 "messages": msgs}
+            if cp.room_id:
+                t["room_id"] = cp.room_id
+            if cp.listing_id:
+                t["listing_id"] = cp.listing_id
+            ts.append(t)
+            ch = channels.get(cp.channel)
+            if isinstance(ch, dict) and isinstance(ch.get("threads"), list) and tid not in ch["threads"]:
                 ch["threads"].append(tid)
             for m in msgs:
                 self.transcript.append({"thread_id": tid, "from": "renter", "text": m["text"]})
 
     def _msg(self, who: str, text: str) -> dict:
-        st = state(self.world)
-        seq = st.setdefault("_gym_seq", 0) + 1
-        st["_gym_seq"] = seq
-        return {"id": f"G{seq:03d}", "from": who, "text": text, "attachments": [], "ts": st.get("clock")}
+        self._seq = getattr(self, "_seq", 0) + 1
+        return {"id": f"gym-m{self._seq:03d}", "from": who, "text": text, "attachments": [],
+                "ts": self.backend.now(self.world)}
 
     # ----------------------------------------------------------------------------------- tools
     @property
@@ -88,10 +89,14 @@ class RolloutSession:
         return self.backend.TOOLS
 
     def gate_status(self) -> dict[str, bool]:
-        st = state(self.world)
-        return {tid: gate_complete(renter_for_thread(st, tid) or {}) for tid in self.counterparts}
+        reg = {"register": self.backend.coll(self.world, "register")}
+        out = {}
+        for tid in self.counterparts:
+            r = renter_for_thread(reg, tid)
+            out[tid] = bool(r) and self.backend.gate_complete(self.world, r)
+        return out
 
-    def call(self, name: str, args: Any) -> dict:
+    def call(self, name: str, args: Any, **call_kw) -> dict:
         if not isinstance(args, dict):
             try:
                 args = json.loads(args) if isinstance(args, str) else {}
@@ -105,7 +110,7 @@ class RolloutSession:
             env = {"ok": False, "error": {"code": "POLICY_BLOCKED", "message": "tool-call budget for this task is spent",
                                           "retryable": False, "hint": "stop and summarize"}}
         else:
-            env = self.backend.call(self.world, name, args)
+            env = self.backend.call(self.world, name, args, **(call_kw or {}))
         entry["ok"] = bool(env.get("ok"))
         entry["error"] = None if env.get("ok") else (env.get("error") or {}).get("code")
         if env.get("ok") and name == "send_message":
@@ -126,8 +131,7 @@ class RolloutSession:
         asked, say = cp.respond(text)
         if say is None:
             return None
-        st = state(self.world)
-        t = next((t for t in _threads(st) if t.get("thread_id") == thread_id), None)
+        t = next((t for t in self.backend.coll(self.world, "threads") if t.get("thread_id") == thread_id), None)
         if t is not None:
             t.setdefault("messages", []).append(self._msg("renter", say))
         self.transcript.append({"thread_id": thread_id, "from": "renter", "text": say})
@@ -150,7 +154,7 @@ class RolloutSession:
 
     def world_facts(self) -> dict:
         st = state(self.world)
-        clock = str(st.get("clock") or "")
+        clock = self.backend.now(self.world)
         pol = st.get("policy") or {}
         return {"today": clock[:10] or None, "spend_limit_usd": pol.get("spend_limit_usd"),
                 "showing_hours": pol.get("showing_hours")}

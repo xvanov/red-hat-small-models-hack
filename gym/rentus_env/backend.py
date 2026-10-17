@@ -46,45 +46,62 @@ class Backend:
 
     # ---- world -------------------------------------------------------------------------------
     def new_world(self, patch: dict | None):
-        m = self.mod
         patch = copy.deepcopy(patch or {})
         if self.name == "shim":
-            return _apply_patch(m.new_world({}), patch)
-        W = getattr(m, "World", None)
-        if W is not None:
-            for ctor in ("from_scenario", "load"):
-                f = getattr(W, ctor, None)
-                if f is None:
-                    continue
-                try:
-                    return f(patch) if ctor == "from_scenario" else _apply_patch(f(INVENTORY), patch)
-                except TypeError:
-                    continue
-            try:
-                return _apply_patch(W(), patch)
-            except TypeError:
-                pass
-        if hasattr(m, "new_world"):
-            return m.new_world(patch)
-        raise RuntimeError("cannot construct a World from rentus_tools")
+            patch = _unwrap_replace(patch)
+            if isinstance(patch.get("clock"), dict):
+                patch["clock"] = patch["clock"].get("now")
+            return _apply_patch(self.mod.new_world({}), patch)
+        return self.mod.load(patch=patch)
 
-    def call(self, world, name: str, args: dict) -> dict:
-        return self.mod.call(world, name, args)
+    def call(self, world, name: str, args: dict, **kw) -> dict:
+        if self.name == "shim":
+            return self.mod.call(world, name, args)
+        return self.mod.call(world, name, args, **kw)
 
     def tool_names(self) -> list[str]:
         return [t["function"]["name"] if "function" in t else t["name"] for t in self.TOOLS]
+
+    def tool_schemas(self, variant: str = "verbose") -> list[dict]:
+        fn = getattr(self.mod, "tool_schemas", None)
+        if callable(fn) and self.name != "shim":
+            return fn(variant)
+        return copy.deepcopy(self.TOOLS)
+
+    # live (mutable) views of world collections
+    @staticmethod
+    def coll(world, key: str):
+        return world.setdefault(key, []) if isinstance(world, dict) else getattr(world, key)
+
+    @staticmethod
+    def now(world) -> str:
+        c = world.get("clock") if isinstance(world, dict) else world.clock
+        return c.get("now") if isinstance(c, dict) else str(c or "")
+
+    def gate_complete(self, world, renter: dict) -> bool:
+        fn = getattr(self.mod, "gate_complete", None)
+        if fn is not None and self.name != "shim" and renter.get("renter_id"):
+            return bool(fn(world, renter["renter_id"]))
+        from .session import gate_complete
+        return gate_complete(renter)
+
+
+def _unwrap_replace(v):
+    if isinstance(v, dict):
+        if set(v) == {"$replace"}:
+            return _unwrap_replace(v["$replace"])
+        return {k: _unwrap_replace(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_unwrap_replace(x) for x in v]
+    return v
 
 
 def state(world) -> dict:
     """The world's JSON document, whatever object wraps it."""
     if isinstance(world, dict):
         return world
-    for attr in ("state", "data", "doc", "_state"):
-        v = getattr(world, attr, None)
-        if isinstance(v, dict):
-            return v
     if hasattr(world, "to_dict"):
-        return world.to_dict()
+        return world.to_dict()  # a copy: read-only use
     raise TypeError(f"cannot read world state from {type(world).__name__}")
 
 
@@ -93,8 +110,8 @@ def snapshot(world) -> dict:
     return json.loads(json.dumps({k: v for k, v in s.items() if not str(k).startswith("_")}, default=str))
 
 
-def _apply_patch(world, patch: dict):
-    s = state(world)
+def _apply_patch(world: dict, patch: dict):
+    s = world
     for k, v in patch.items():
         if isinstance(v, dict) and isinstance(s.get(k), dict) and k != "policy":
             s[k].update(v)
