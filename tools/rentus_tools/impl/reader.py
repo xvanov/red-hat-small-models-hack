@@ -488,6 +488,8 @@ def read_reply_fallback(text: str, pending_item: str | None = None, context: lis
         out["lease"] = {"status": "vague", "value": None}
     elif LEASE_YES.search(low):
         out["lease"] = {"status": "answered", "value": True}
+    elif (gl := _generic_lease(low)) is not None:
+        out["lease"] = gl
     elif "lease" in pend and len(re.split(r"[,.!?\n]", core)[0].split()) <= 3:
         c = re.split(r"[,.!?\n]", core)[0].lower().strip()
         if YES_WORDS.search(c):
@@ -544,6 +546,8 @@ def read_reply_fallback(text: str, pending_item: str | None = None, context: lis
         else:
             if REASON_VAGUE.search(low):
                 out["reason"] = {"status": "vague", "value": None}
+            elif (gm := GENERIC_REASON.search(msg)) and len(gm.group(1).split()) >= 2:
+                out["reason"] = {"status": "answered", "value": gm.group(1).strip().rstrip(".")}
 
     # bare "I'd rather not say" / "prefiero no decir": attribute to what was asked
     if re.search(r"\b(?:prefiero no decir|i'?d rather not say|rather not say|prefer not to say)\b(?!\s+(?:why|por qué|por que|when|cuándo|cuando|how many))", low):
@@ -564,6 +568,11 @@ def read_reply_fallback(text: str, pending_item: str | None = None, context: lis
             intents.append(name)
     if "question" in intents and "scheduling" in intents and not re.search(r"\?", msg.split("?")[0] + "?"):
         pass
+    if "question" not in intents and "?" in msg:
+        qpart = " ".join(seg for seg in re.split(r"(?<=[?.!\n])", msg) if "?" in seg)
+        if ROOM_TOPIC.search(qpart) and not INTENT_RULES["scheduling"].search(qpart) and not INTENT_RULES["price_negotiation"].search(qpart) \
+                and not INTENT_RULES["shorter_lease"].search(qpart) and not re.search(r"\b(?:find|search|look for|busca)\b", qpart, re.I):
+            intents.append("question")
     if "shorter_lease" not in intents and re.search(r"\b(?:only need it|solo lo necesito) (?:for|por) (?:the |el )?(?:semester|semestre|summer|verano)", low):
         intents.append("shorter_lease")
     fields_hit = any(out[f]["status"] != "absent" for f in FIELDS)
@@ -579,6 +588,32 @@ def read_reply_fallback(text: str, pending_item: str | None = None, context: lis
         intents.append("small_talk")
     out["intents"] = [i for i in INTENTS if i in intents]
     return out
+
+
+TERM = r"(?:(?:a|one|1|full|whole|un|1-)\s?[- ]?(?:year|yr|año)|12[- ]?(?:months?|meses|mo)|twelve months|one[- ]year|year[- ]long)"
+POS = r"(?:fine|ok|okay|good|great|perfect|works?|sure|yes|no problem|happy|cool|sounds good|totally|absolutely|definitely|deal|agree|"\
+      r"bien|perfecto|sí|funciona|de acuerdo|claro|sin problema|vale|acepto|me sirve|está bien|no hay bronca)"
+NEG = r"(?:can'?t|cannot|don'?t|won'?t|too long|not|no puedo|no quiero|demasiado|es mucho|no me sirve|nope|rather not|prefer not)"
+
+
+def _generic_lease(low: str) -> dict | None:
+    for m in re.finditer(TERM, low):
+        win = low[max(0, m.start() - 30):m.end() + 30]
+        if re.search(r"\b(?:maybe|probably|perhaps|not sure|tal vez|quizás|quizas|a lo mejor|depends|depende)\b", win):
+            return {"status": "vague", "value": None}
+        if re.search(rf"\b{NEG}\b", win):
+            return {"status": "no", "value": False}
+        if re.search(rf"\b{POS}\b", win):
+            return {"status": "answered", "value": True}
+    return None
+
+
+GENERIC_REASON = re.compile(r"(?:i'?m moving because|im moving because|moving because|the reason is|me mudo porque|la razón es|la razon es)\s+(?:i'?m\s+|im\s+)?(.+?)(?=$|[.!?;\n]|,| and | y | also| también| thanks| gracias)", re.I)
+QUESTION_TOPICS = re.compile(r"\?.*$|^.*\?", re.S)
+ROOM_TOPIC = re.compile(r"\b(?:furnished|furniture|utilit\w*|parking|laundry|washer|dryer|pets?|dogs?|cats?|deposit|wifi|internet|kitchen|"
+                        r"bath(?:room)?|include[sd]?|ac|a/c|air|heat\w*|bus|close to|how far|distance|neighborhood|roommates?|quiet|"
+                        r"smok\w*|guests?|application|fee|amueblado|servicios|estacionamiento|lavadora|mascotas?|depósito|deposito|"
+                        r"cocina|baño|incluye|internet|compañeros|ruido|fumar|visitas|solicitud|cuota|available|disponible)\b", re.I)
 
 
 def _overlaps(a, b) -> bool:
