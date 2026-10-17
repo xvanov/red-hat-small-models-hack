@@ -13,13 +13,32 @@ HOST=${BREV_HOST:-rentus-operator}
 if [ -f "$ROOT/.env" ]; then set -a; . "$ROOT/.env"; set +a; export BREV_API_KEY; fi
 URL="${OPERATOR_BASE_URL:-http://localhost:8000/v1}/models"
 
+MODEL=${OPERATOR_MODEL:-nemotron-3.5-lightning}
+# A hung engine still answers /v1/models, so every 4th poll (~2 min) also asks for one token.
+gen_check() {
+  curl -s -o /dev/null -w '%{http_code}' -m 90 -H "Authorization: Bearer ${OPERATOR_API_KEY:-}" \
+    -H 'Content-Type: application/json' "${OPERATOR_BASE_URL:-http://localhost:8000/v1}/chat/completions" \
+    -d "{\"model\":\"$MODEL\",\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}" | grep -q 200
+}
 check() { [ "$(curl -s -o /dev/null -w '%{http_code}' -m 10 -H "Authorization: Bearer ${OPERATOR_API_KEY:-}" "$URL")" = 200 ]; }
 log() { echo "$(date '+%F %T %Z') $*" | tee -a "$LOG"; }
 
 loop() {
-  misses=0
+  misses=0; tick=0; gen_misses=0
   log "watchdog up, polling $URL"
   while true; do
+    tick=$((tick + 1))
+    if check && [ $((tick % 4)) -eq 0 ]; then
+      if gen_check; then gen_misses=0
+      else
+        gen_misses=$((gen_misses + 1)); log "generation probe failed ($gen_misses) while /v1/models answers"
+        if [ "$gen_misses" -ge 2 ]; then
+          log "engine looks hung: restarting vllm-operator on the instance"
+          timeout 120 ssh -o BatchMode=yes "$HOST" 'sudo docker restart vllm-operator' >>"$LOG" 2>&1 || log "restart over ssh failed"
+          gen_misses=0
+        fi
+      fi
+    fi
     if check; then
       [ "$misses" -gt 0 ] && log "recovered after $misses miss(es)"
       misses=0
