@@ -1,0 +1,93 @@
+# W6 — Reader
+
+The reader is a small fine-tuned model that the operator calls as the `read_reply` tool. It turns
+(thread so far + latest renter message) into the exact reader JSON in `data/reader_schema.md`:
+which qualifying items the message answers (one-year lease, move-in date, phone, occupants,
+reason) and how (`answered | vague | no | exception | absent`), plus intents and language.
+The operator never decides on its own whether "next month" is a move-in date. It asks the reader.
+
+## Files
+
+| File | What it does |
+|---|---|
+| `prompt.py` | One system prompt + user-message format used by every backend, the canonical JSON target, a lenient output parser, and a schema check. W3's `rentus_tools` HTTP backend imports it too. |
+| `eval.py` | Scores any backend on a split: exact match, per-field status/value accuracy, JSON and schema validity, intent F1 (micro, macro, per label), language accuracy, **vague-date trap** (share of gold-vague move-in answers predicted `answered`/`exception`), plus latency. Backends: `fallback` (W3's deterministic `read_reply_fallback`, given the row's `today` and thread context) and `endpoint` (any OpenAI-compatible chat endpoint). |
+| `train.py` | Full-parameter SFT with TRL `SFTTrainer`, prompt-completion format, loss on the JSON only, eval loss on 400 dev rows every 100 steps, early stopping (patience 3), best checkpoint restored. Writes a plain HF checkpoint (no adapter to merge) whose chat template defaults to thinking off. |
+| `serve_reader.sh`, `serve.md` | Second vLLM container on the same GPU as Lightning (port 8001, `--gpu-memory-utilization 0.12`). |
+| `publish.py` | Writes the Hugging Face model card (task, provenance, CC BY-SA 4.0, eval table) into the checkpoint. Dry run by default; `--push` only after the owner approves. |
+| `requirements-train.txt` | Pinned training stack, every version released 2+ weeks before Oct 17 2026. |
+| `results/` | Metrics and per-row predictions for each system on the held-out test split. |
+| `.env.example` | `READER_BASE_URL`, `READER_MODEL`, `READER_API_KEY`, `HF_TOKEN`. |
+
+## Base model: Qwen3-0.6B
+
+Requirements: ≤1.5B parameters by the official model card, public on Hugging Face 2+ weeks before
+Oct 17 2026, license allowing commercial use, and preferably NVIDIA Nemotron.
+
+- **No Nemotron model fits.** We checked NVIDIA's Hugging Face listing on Oct 17. The small
+  Nemotron models are embedders, rerankers, ASR or audio (Nemotron-3.5-Embed-1B, Audex-2B,
+  speech 0.6B), all excluded or not text generators. The smallest Nemotron chat model is
+  Nemotron-3-Nano-4B, which is over budget. OpenReasoning-Nemotron-1.5B is a math-reasoning model
+  with 1.54B parameters, also over 1.5B.
+- **Qwen2.5-1.5B-Instruct is excluded.** Its card says 1.54B, which is over the 1.5B cap. With
+  Lightning's raw 31.58B weight count, the total would also go over 33B.
+- **Qwen3-0.6B** (Apache 2.0, released Apr 2025, 0.6B by its card, 0.75B in the weights including
+  tied embeddings) is ungated, so we need no HF token to train. It is a standard architecture that
+  vLLM and TRL support well, it has a no-thinking chat mode, and it is multilingual, which covers
+  the Spanish rows. It also leaves the most headroom in the 33B budget: 30B + 0.6B by the cards.
+  We passed over the others for these reasons: Llama-3.2-1B and Gemma-3-1B are gated and have
+  custom licenses; Granite-4.0-H-1B (1.46B) is a hybrid Mamba model, a riskier overnight fine-tune
+  without its custom kernels; Qwen3.5-0.8B is a vision-language architecture.
+
+## Results (held-out test, 1,419 rows, never used for training or prompt tuning)
+
+All model backends get the same system prompt (`prompt.py`), temperature 0, thinking off.
+Field columns are status-and-value accuracy (move-in compares status and the resolved date).
+Exact match means every field, the intent set and the language are all right. Most of the fine-tuned model's
+remaining misses are `reason` paraphrases ("house sale" for "landlord selling"); its reason *status* accuracy is 0.985.
+Latency p50: fine-tuned reader 0.58 s per call at concurrency 32, Lightning 2.7 s at concurrency 8.
+
+| System | Exact match | JSON valid | Lease | Move-in | Phone | Occupants | Reason | Intent F1 (micro) | Language | Vague-date trap (lower is better) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Deterministic regex fallback (no model) | 0.575 | 1.000 | 0.886 | 0.994 | 0.998 | 0.977 | 0.877 | 0.772 | 0.998 | 0.012 |
+| Qwen3-0.6B base, same prompt | 0.000 | 0.910 | 0.106 | 0.023 | 0.011 | 0.028 | 0.004 | 0.105 | 0.699 | 0.082 |
+| **This model** (Qwen3-0.6B + SFT) | 0.791 | 1.000 | 0.991 | 0.977 | 0.997 | 0.999 | 0.865 | 0.951 | 1.000 | 0.012 |
+| Nemotron 3.5 Lightning 30B-A3B (operator), same prompt | 0.106 | 0.985 | 0.569 | 0.554 | 0.827 | 0.721 | 0.534 | 0.450 | 0.944 | 0.365 |
+
+`fallback` is W3's rule-based reader. It was tuned on train/dev templates (0.93 exact match on
+dev), so its drop on test shows how much the held-out phrasing differs. Base Qwen3-0.6B follows the
+JSON shape (91% parseable) but mislabels nearly every field. Lightning, prompted, does better but
+marks over a third of vague move-in dates as answered, the failure the reader exists to prevent.
+
+## Reproduce
+
+```bash
+python reader/eval.py --backend fallback                                  # no GPU
+# on the Brev instance (see serve.md), inside reader/.venv-train for training:
+MODEL=Qwen/Qwen3-0.6B SERVED=qwen3-0.6b-base bash reader/serve_reader.sh
+python3 reader/eval.py --backend endpoint --base-url http://127.0.0.1:8001/v1 --model qwen3-0.6b-base \
+    --api-key-env VLLM_API_KEY --no-thinking --label base
+python3 reader/eval.py --backend endpoint --base-url http://127.0.0.1:8000/v1 --model nemotron-3.5-lightning \
+    --api-key-env VLLM_API_KEY --no-thinking --label lightning --concurrency 8
+bash reader/serve_reader.sh stop
+python reader/train.py --model Qwen/Qwen3-0.6B --out reader/checkpoints/rentus-reader --grad-checkpointing
+MODEL=/ckpt/rentus-reader bash reader/serve_reader.sh
+python3 reader/eval.py --backend endpoint --base-url http://127.0.0.1:8001/v1 --model rentus-reader \
+    --api-key-env VLLM_API_KEY --label finetuned
+python reader/publish.py --repo <namespace>/rentus-reader-qwen3-0.6b      # dry run, writes the model card
+```
+
+## Data and license
+
+Training data: `data/processed/reader/train.jsonl`, 12,000 bilingual synthetic rows plus 2,000
+relabelled SGD Homes turns (method in `data/reader_schema.md` and `docs/data-provenance.md`).
+SGD is CC BY-SA 4.0, so the published weights inherit **CC BY-SA 4.0**.
+
+## Limitations
+
+- Most rows come from synthetic templates. The test split holds out templates, but it is still
+  closer to the training data than real renter texts would be.
+- `reason.value` is compared after normalizing case and spacing. A correct reason in other words
+  counts as wrong.
+- The Lightning numbers use thinking off, the setting that makes it a fast tool. With reasoning on
+  it might do better, at much higher latency.

@@ -159,7 +159,7 @@ def main():
     api = HfApi(token=token)
     api.create_repo(a.repo, private=a.private, exist_ok=True, repo_type="model")
     api.upload_folder(folder_path=str(ckpt), repo_id=a.repo, repo_type="model",
-                      ignore_patterns=["*-trainer/*", "optimizer.pt", "rng_state*"],
+                      ignore_patterns=["*-trainer/*", "optimizer.pt", "rng_state*", "training_args.bin"],
                       commit_message="Rentus reader: fine-tuned weights, model card, eval table")
     print(f"pushed https://huggingface.co/{a.repo}")
 
