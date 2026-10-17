@@ -87,19 +87,19 @@ DATE_PATTERNS = [
     ("es_day_month", re.compile(rf"\b(?:el\s+)?(\d{{1,2}}|primero)\s+de\s+({MON})\b", re.I)),
     ("this_weekday", re.compile(rf"\b(?:this|next|este|esta|el próximo|el proximo|próximo|proximo)\s+({WD})\b", re.I)),
     ("relative", re.compile(r"\b(tomorrow|today|tonight|mañana mismo|pasado mañana|hoy)\b|(?<!la )(?<!en la )(?<!por la )\bmañana\b(?! (?:en|por) la)", re.I)),
-    ("bare_day", re.compile(r"\b(?:on\s+)?the\s+(\d{1,2})(?:st|nd|rd|th)\b|\bel\s+(\d{1,2})(?!\s*(?:de|/|:|\d|personas|meses|años|días|%))\b", re.I)),
+    ("bare_day", re.compile(r"\b(?:on\s+)?the\s+(\d{1,2})(?:st|nd|rd|th)\b|\bel (primero)\b(?!\s+de)|\bel\s+(\d{1,2})(?!\s*(?:de|/|:|\d|personas|meses|años|días|%))\b", re.I)),
 ]
 
 VAGUE_DATE = _rx(
     r"\b(?:beginning|start|end|middle) of (?:next|the|this) month\b", r"\bnext month\b", r"\bel mes que viene\b",
     r"\bel próximo mes\b|\bel proximo mes\b", r"\bas soon as possible\b", r"\basap\b", r"\blo antes posible\b",
-    r"\bcuanto antes\b", r"\b(?:moving|move|mudo|mudaría|mudarme)\s+soon\b|\bsoon\b(?!er)", r"\bpronto\b(?! cambio)",
+    r"\bcuanto antes\b", r"\b(?:soon|pronto)\b(?! cambio)",
     r"\baround (?:the )?\d{1,2}(?:st|nd|rd|th)?\b", r"\balrededor del \d{1,2}\b", r"\baround (?:" + MON + r")\b",
     r"\b(?:early|mid|late|end of|beginning of)[- ](?:" + MON + r")\b", r"\ba (?:principios|mediados|fines|finales) de (?:" + MON + r"|mes)\b",
     r"\b(?:a )?fines de mes\b|\ba finales de mes\b", r"\bend of the month\b|\bend of month\b",
     r"\bin the next (?:couple|few) (?:of )?weeks\b|\bin a (?:few|couple) (?:of )?weeks\b|\ben unas semanas\b|\ben un par de semanas\b",
     r"\bcuando esté listo\b|\bcuando este listo\b|\bwhenever it'?s ready\b",
-    r"\b(?:in|en|by|para)\s+(?:" + MON + r")\b(?!\s+\d)",
+    r"\b(?:in|en|by|para)\s+(?:" + MON + r")\b(?!\.?\s*\d)",
 )
 MOVE_NO = _rx(r"don'?t have a move[- ]in date", r"todavía no tengo fecha|todavia no tengo fecha", r"no sé cuándo me mudo|no se cuando me mudo",
               r"not sure when i'?m moving", r"rather not say when", r"prefiero no decir cuándo|prefiero no decir cuando",
@@ -108,8 +108,8 @@ MOVE_COND = _rx(r"unless my (?:current )?lease", r"a menos que me extiendan", r"
                 r"if the room is ready", r"depends on my closing", r"hopefully,? depends", r"could slip a week",
                 r"podría ser una semana después|podria ser una semana despues", r"if my job start moves", r"unless .* extended",
                 r"depende de mi cierre", r"si todo sale bien")
-VISIT_CTX = _rx(r"\b(?:see|view|tour|visit|look at|take a look|showing|viewing|appointment|schedule|come by|stop by|ver(?:lo|la)?|visita|visitar|cita|agendar)\b")
-MOVE_CTX = _rx(r"\bmov(?:e|ing)\b|\bmove[- ]in\b|\bmud(?:o|ar|arme|aría|aria|anza)\b|\bcome in\b|\bstart\b|\bneed (?:a|the) (?:place|room)\b",
+VISIT_CTX = _rx(r"\bsee (?:it|the|you|them|that)\b|\b(?:view|tour|visit|look at|take a look|showing|viewing|appointment|schedule|come by|stop by|ver(?:lo|la)?|visita|visitar|cita|agendar)\b")
+MOVE_CTX = _rx(r"\bmov(?:e|es|ing)\b|\bmove[- ]in\b|\bmud(?:o|ar|arme|aría|aria|anza)\b|\bcome in\b|\bstart\b|\bneed (?:a|the) (?:place|room)\b",
                r"\bnecesito el cuarto\b|\blista para\b|\bby\b|\bplanning\b|\bentrar\b")
 
 
@@ -198,7 +198,7 @@ def find_dates(text: str, today: date) -> list[dict]:
             elif kind == "this_weekday":
                 wd = WEEKDAYS[g[0].lower()]
                 delta = (wd - today.weekday()) % 7
-                if m.group(0).lower().startswith(("next", "el próximo", "el proximo", "próximo", "proximo")) and delta == 0:
+                if delta == 0:
                     delta = 7
                 add(m, today + timedelta(days=delta), kind=kind)
             elif kind == "relative":
@@ -210,7 +210,7 @@ def find_dates(text: str, today: date) -> list[dict]:
                 else:
                     add(m, today + timedelta(days=1), kind=kind)
             elif kind == "bare_day":
-                day = int(g[0] or g[1])
+                day = 1 if (g[1] or "").lower() == "primero" else int(g[0] or g[2])
                 d = _next_day_of_month(today, day) if 1 <= day <= 31 else None
                 if d:
                     add(m, d, kind=kind)
@@ -223,8 +223,8 @@ def _is_visit(text: str, span: dict) -> bool:
     lo = max(0, span["start"] - 45)
     hi = min(len(text), span["end"] + 35)
     window = text[lo:hi]
-    clause_start = max(text.rfind(c, 0, span["start"]) for c in ".!?\n")
-    clause_end = min([i for i in (text.find(c, span["end"]) for c in ".!?\n") if i >= 0] or [len(text)])
+    clause_start = max(text.rfind(c, 0, span["start"]) for c in ".!?\n,")
+    clause_end = min([i for i in (text.find(c, span["end"]) for c in ".!?\n,") if i >= 0] or [len(text)])
     clause = text[clause_start + 1:clause_end + 1]
     if VISIT_CTX.search(clause) and not MOVE_CTX.search(clause):
         return True
@@ -257,8 +257,11 @@ LEASE_YES = _rx(
     r"(?:can|could|will) do a (?:full )?year", r"(?:good|fine|ok|okay) with a (?:full )?year", r"yes to a year",
     r"one[- ]year lease is (?:totally )?fine", r"(?:12|twelve)[- ]month lease is (?:totally )?fine", r"(?:looking for )?long term so a year",
     r"a largo plazo", r"puedo (?:hacer )?un año", r"un año perfecto", r"i can do 12 months", r"a year is (?:totally )?fine",
-    r"happy to sign (?:for )?a year", r"sign a (?:12[- ]month|one[- ]year|year) lease")
-YES_WORDS = _rx(r"^(?:yes|yeah|yep|yup|ya|sure|of course|totally|definitely|absolutely|correct|that'?s fine|that works|sounds good|ok(?:ay)?|sí|si|claro|por supuesto|de acuerdo|está bien|esta bien|perfecto|vale|totalmente)\b")
+    r"happy to sign (?:for )?a year", r"sign a (?:12[- ]month|one[- ]year|year) lease",
+    r"(?:ok|okay|fine|good|happy|cool)(?: with)? (?:a |an )?(?:one[- ]year|1[- ]year|12[- ]month|year)(?: lease)?",
+    r"(?:un año|12 meses|el contrato de un año)(?: me)? (?:está|esta|es|parece) (?:perfecto|bien|ok|buen[oa])",
+    r"acepto (?:el contrato de )?(?:un año|12 meses)", r"(?:year|12[- ]month) lease (?:works|sounds good|is ok)")
+YES_WORDS = _rx(r"^(?:yes|yeah|yep|yup|ya|sure|of course|totally|definitely|absolutely|correct|that'?s fine|that works|sounds good|sí|si|claro|por supuesto|de acuerdo|está bien|esta bien|perfecto|vale|totalmente)\b")
 NO_WORDS = _rx(r"^(?:no|nope|nah|not really|no thanks|no gracias|la verdad no)\b")
 
 PHONE_NO = _rx(r"rather not (?:share|give) (?:my|a) (?:number|phone)", r"prefiero no dar (?:mi|el) (?:número|numero|teléfono|telefono)",
@@ -321,11 +324,11 @@ def _count_people(text: str) -> int | None:
     return None
 
 
-REASON_NO = _rx(r"rather not say why", r"prefiero no decir por qué|prefiero no decir por que", r"that'?s personal", r"es personal",
+REASON_NO = _rx(r"rather not say why", r"prefiero no decir por qué|prefiero no decir por que", r"that'?s personal", r"\bes personal\b",
                 r"prefer not to say why", r"no quiero decir por qué")
-REASON_VAGUE = _rx(r"need a change", r"personal reasons", r"razones personales", r"time for something new", r"it'?s complicated",
+REASON_VAGUE = _rx(r"need a change", r"personal reasons", r"razones personales", r"necesito un cambio", r"time for something new", r"it'?s complicated",
                    r"es complicado", r"un cambio", r"algo nuevo", r"just because", r"porque sí", r"ready for a change")
-CAP_STOP = r"(?=$|[.!?,;\n]| and | y | so | por eso| thanks| thank| gracias| saludos| also| también| tambien| lmk| but | pero |\s+[\U0001F300-\U0001FAFF])"
+CAP_STOP = r"(?=$|[.!?,;\n]| and | y | so | in the (?:spring|fall|summer|winter)| this (?:spring|fall)| en (?:la )?(?:primavera|otoño)| por eso| thanks| thank| gracias| muchas| saludos| also| también| tambien| lmk| but | pero |\s+[\U0001F300-\U0001FAFF])"
 ENTITY = rf"(.+?){CAP_STOP}"
 REASON_RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(rf"\btravel nurse on a \d+[- ]week contract at {ENTITY}", re.I), "travel nurse contract at {0}"),
@@ -337,8 +340,8 @@ REASON_RULES: list[tuple[re.Pattern, str]] = [
     (re.compile(rf"\bempiezo (?:la )?maestría en {ENTITY}|\bempiezo el posgrado en {ENTITY}", re.I), "grad school at {0}"),
     (re.compile(rf"\bvoy a estudiar en {ENTITY}", re.I), "studying at {0}"),
     (re.compile(rf"\b(?:i'?m |im )?(?:starting school|studying|going to school) at {ENTITY}", re.I), "studying at {0}"),
-    (re.compile(rf"\brelocating from {ENTITY} for work", re.I), "relocating from {0} for work"),
-    (re.compile(rf"\bme mudo desde {ENTITY} por trabajo", re.I), "relocating from {0} for work"),
+    (re.compile(r"\brelocating from (.+?) for work", re.I), "relocating from {0} for work"),
+    (re.compile(r"\bme mudo desde (.+?) por trabajo", re.I), "relocating from {0} for work"),
     (re.compile(rf"\bjust moved here from {ENTITY}", re.I), "moved from {0}"),
     (re.compile(rf"\bacabo de (?:llegar|mudarme) (?:aquí )?(?:de|desde) {ENTITY}", re.I), "moved from {0}"),
     (re.compile(r"\b(?:my )?(?:current )?lease is ending\b|\blease ending\b|\bse me termina el contrato\b|\bmi contrato (?:actual )?se termina\b|\bmy lease is up\b", re.I), "current lease ending"),
@@ -364,8 +367,8 @@ def _entity_case(s: str) -> str:
 
 INTENT_RULES: dict[str, re.Pattern] = {
     "price_negotiation": _rx(r"wiggle room", r"negociar", r"me lo deja en", r"would (?:u|you) take \$?\d", r"can you do \$?\d",
-                             r"puede ser \$?\d", r"es mucho", r"is a bit steep|too (?:expensive|much|high)", r"discount", r"descuento",
-                             r"lo puede bajar|bajar(?:le)? (?:un poco|el precio)", r"go down to", r"can you match", r"best price",
+                             r"puede ser \$?\d", r"\$\d+ es mucho", r"is a bit steep|(?:rent|price) is too (?:expensive|much|high)|too expensive for me", r"discount", r"descuento",
+                             r"lo puede bajar|bajar(?:le)? (?:un poco|el precio)", r"go down to", r"can (?:you|u) match", r"best price",
                              r"lower (?:the )?(?:rent|price)", r"cheaper", r"más barato|mas barato", r"any deal", r"negotiable",
                              r"rebaja", r"deal on (?:the )?rent", r"\bknock\b.*\boff\b"),
     "scheduling": _rx(r"come see it", r"(?:to|can i) see (?:it|the room|the place)", r"\bshowing\b", r"\bviewing\b", r"ir a ver(?:lo|la)?",
@@ -381,8 +384,8 @@ INTENT_RULES: dict[str, re.Pattern] = {
                    r"ya encontré|ya encontre", r"stop texting", r"no me escriba más|no me escriba mas", r"remove me",
                    r"no thanks,? too far", r"no gracias,? queda", r"go with another place", r"went with another", r"stop contacting",
                    r"unsubscribe", r"don'?t contact me", r"decidimos ir con otro|ya rentamos otro|nos quedamos con otro"),
-    "shorter_lease": _rx(r"\b\d{1,2}[- ]month leases?\b(?!\s+is fine)", r"month[- ]to[- ]month", r"mes a mes", r"for the semester",
-                         r"por el semestre", r"contratos? de \d{1,2} meses", r"shorter lease", r"short[- ]term", r"contrato más corto|contrato mas corto",
+    "shorter_lease": _rx(r"\b(?:[1-9]|1[01])[- ]month leases?\b", r"month[- ]to[- ]month", r"mes a mes", r"for the semester",
+                         r"por el semestre", r"contratos? de (?:[1-9]|1[01]) meses", r"shorter lease", r"short[- ]term", r"contrato más corto|contrato mas corto",
                          r"less than (?:a year|12 months)", r"only need it for \d", r"solo por \d+ meses", r"\b\d{1,2} months? only\b",
                          r"menos de un año"),
     "question": _rx(r"is it furnished", r"amueblado", r"utilities included", r"incluye los servicios", r"servicios incluidos",
@@ -393,7 +396,8 @@ INTENT_RULES: dict[str, re.Pattern] = {
                     r"sigue disponible|todavía está disponible|todavia esta disponible", r"what'?s the address|cuál es la dirección",
                     r"(?:your|the) (?:phone )?number\??$|what number (?:can|should) i call|número de la propiedad|su número",
                     r"is there a (?:private )?bath", r"baño privado", r"what'?s included", r"qué incluye|que incluye",
-                    r"break clause", r"how much is (?:the )?rent|cuánto es la renta|cuanto es la renta", r"is (?:the )?room big"),
+                    r"pets?(?: are)? allowed|allow(?:s)? pets|permit pets|pets policy|furnished|furniture",
+                    r"(?:contact|phone) number|their number|how do i contact", r"how much is (?:the )?rent|cuánto es la renta|cuanto es la renta", r"is (?:the )?room big"),
 }
 SMALL_TALK = _rx(r"^(?:thanks|thank you|thx|ty|gracias|mil gracias|muchas gracias|ok|okay|okey|cool|great|perfect|perfecto|got it|entendido|"
                  r"lol|haha|jaja|nice|love it|you'?re awesome|appreciate|muy amable|qué bien|que bien|have a great|buen fin|"
@@ -404,6 +408,26 @@ SIGNOFF = re.compile(r"(?:\s*(?:thanks|thank you|thank u|thx|gracias|muchas grac
 EMOJI = re.compile(r"[\U0001F000-\U0001FAFF☀-➿⭐✨️‍]+")
 
 
+AFFIRM = _rx(r"^(?:that'?s (?:right|correct|great|it|about it)|that is (?:right|correct)|yes,? (?:that|now|please|i)|sounds (?:good|great|right)|works for me|i need that|perfect)")
+PLEASANTRY = re.compile(
+    r"\b(?:thanks?(?:'s)?|thank (?:you|u)|thx|ty|very much|so much|a lot|gracias|mil|muchas|ok(?:ay)?|okey|cool|great|perfect(?:o)?|"
+    r"got it|entendido|lol|haha|jaja|nice|love it|you'?re|u'?re|awesome|appreciate(?: you| it)?|muy amable|qué bien|que bien|"
+    r"have a (?:great|good|nice) (?:weekend|day)|buen fin de semana|hello|hola|hi|hey|you guys are so nice|sounds|really|good|"
+    r"genial|excelente|bueno|yes|yeah|sure|no|this is fine|fine|for me|that is|that'?s|correct|it is|right|great apartment|"
+    r"like a|for the quick reply|the|and|i|it|is|so|a|un|una|de|el|la|for|me|you|u|much|bunch|works?|that|all|need|help|now|"
+    r"this|should|what|wanted|exactly|already|everything|anything|else|today|bye|goodbye|adiós|adios|wonderful|amazing|"
+    r"helpful|of|my|to|very|lot|alright|all right|please|noted|great job|good job|apartment|place)\b", re.I)
+
+
+def is_small_talk(core: str) -> bool:
+    c = core.lower()
+    if not re.search(r"[a-záéíóúñ]", c):
+        return True
+    rest = PLEASANTRY.sub(" ", c)
+    rest = re.sub(r"[^a-záéíóúñ]+", " ", rest).strip()
+    return len(rest.split()) == 0
+
+
 def _core(text: str) -> str:
     t = EMOJI.sub(" ", text)
     t = GREETING.sub("", t.strip())
@@ -412,7 +436,7 @@ def _core(text: str) -> str:
 
 
 PENDING_RX = {
-    "lease": re.compile(r"lease|12[- ]month|year|contrato|un año", re.I),
+    "lease": re.compile(r"lease|12[- ]month|one[- ]year|a year|contrato|un año", re.I),
     "move_in": re.compile(r"move[- ]in|move in|moving|date|mudar|mudanza|fecha", re.I),
     "phone": re.compile(r"phone|number|teléfono|telefono|número|numero|celular", re.I),
     "occupants": re.compile(r"how many|people|occupants|cuántas personas|cuantas personas|living with|vivirían|vivirian", re.I),
@@ -464,8 +488,8 @@ def read_reply_fallback(text: str, pending_item: str | None = None, context: lis
         out["lease"] = {"status": "vague", "value": None}
     elif LEASE_YES.search(low):
         out["lease"] = {"status": "answered", "value": True}
-    elif "lease" in pend:
-        c = core.lower()
+    elif "lease" in pend and len(re.split(r"[,.!?\n]", core)[0].split()) <= 3:
+        c = re.split(r"[,.!?\n]", core)[0].lower().strip()
         if YES_WORDS.search(c):
             out["lease"] = {"status": "answered", "value": True}
         elif NO_WORDS.search(c):
@@ -473,6 +497,13 @@ def read_reply_fallback(text: str, pending_item: str | None = None, context: lis
 
     # ---- move-in (dates near showing words are visits, not move-in)
     dates = [d for d in find_dates(msg, today) if not _is_visit(msg, d)]
+    ctx_text = " ".join(c.get("text", "") for c in (context or []))
+    if dates and "move_in" not in pend and not MOVE_CTX.search(msg) and VISIT_CTX.search(ctx_text) \
+            and not re.search(r"move[- ]?in|mudar|mudanza|fecha de", ctx_text, re.I):
+        dates = []  # a bare date answering a visit-scheduling thread is a showing date
+        visit_date = True
+    else:
+        visit_date = False
     vague = VAGUE_DATE.search(msg)
     if MOVE_NO.search(low):
         out["move_in"] = {"status": "no", "date": None, "raw": None}
@@ -536,10 +567,16 @@ def read_reply_fallback(text: str, pending_item: str | None = None, context: lis
     if "shorter_lease" not in intents and re.search(r"\b(?:only need it|solo lo necesito) (?:for|por) (?:the |el )?(?:semester|semestre|summer|verano)", low):
         intents.append("shorter_lease")
     fields_hit = any(out[f]["status"] != "absent" for f in FIELDS)
-    if not fields_hit and not intents:
+    last_op = (context[-1]["text"] if context and context[-1].get("role") == "operator" else "")
+    visit_asked = bool(re.search(r"\b(?:visit|schedule|appointment|tour|see the|viewing|showing|ver el|visita|cita)\b", last_op, re.I))
+    if visit_date and "scheduling" not in intents:
+        intents.append("scheduling")
+    if visit_asked and not fields_hit and not intents:
         c = core.lower()
-        if not c or SMALL_TALK.search(c) or not re.search(r"[a-záéíóúñ]", c) or len(c) <= 3:
-            intents.append("small_talk")
+        if YES_WORDS.search(c) or AFFIRM.search(c) or find_dates(msg, today):
+            intents.append("scheduling")
+    if not fields_hit and not intents and is_small_talk(core):
+        intents.append("small_talk")
     out["intents"] = [i for i in INTENTS if i in intents]
     return out
 
@@ -553,6 +590,8 @@ def _vague_is_other(text: str, m: re.Match) -> bool:
     s = m.group(0).lower()
     before = text[max(0, m.start() - 30):m.start()].lower()
     if re.search(r"lease ends|contrato termina|not moving until|no me mudo hasta|reach out|grad school|start", before):
+        return True
+    if s in ("soon", "pronto") and re.search(r"number|número|numero|ending|termina|cambio|getting|reply|hear", before):
         return True
     return bool(re.match(r"(?:in|en|by|para)\s", s) and re.search(r"\b(?:visit|see|showing|ver)\b", before))
 
