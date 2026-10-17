@@ -15,6 +15,9 @@ class RunConfig:
     tool_descriptions: str = "verbose"    # "verbose" | "terse"
     verifier: bool = True                 # deterministic verifier on/off
     reader: bool = True                   # expose read_reply + reader rules in prompt
+    renter_guard: bool = False            # P2.1 (a): a renter-facing run may not end on plain text while the
+                                          # renter's last message is unanswered; the harness bounces it back
+    renter_guard_rounds: int = 3          # max bounces per run
 
     # model / endpoint
     model: str = field(default_factory=lambda: os.environ.get("OPERATOR_MODEL", "nemotron"))
@@ -36,8 +39,15 @@ class RunConfig:
         return replace(self, **kw)
 
     def label(self) -> str:
-        return (f"prompt={self.prompt_version} tools={self.tool_descriptions} "
-                f"verifier={'on' if self.verifier else 'off'} reader={'on' if self.reader else 'off'}")
+        out = (f"prompt={self.prompt_version} tools={self.tool_descriptions} "
+               f"verifier={'on' if self.verifier else 'off'} reader={'on' if self.reader else 'off'}")
+        if self.renter_guard:
+            out += " renter_guard=on"
+        if self.keep_reasoning_in_history:
+            out += " reasoning_history=on"
+        if self.reasoning is not None:
+            out += f" reasoning={'on' if self.reasoning else 'off'}"
+        return out
 
 
 def load_prompt(cfg: RunConfig, world_facts: dict) -> str:

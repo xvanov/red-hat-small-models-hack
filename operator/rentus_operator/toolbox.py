@@ -31,8 +31,34 @@ def backend(name: str | None = None) -> ModuleType:
     return shim
 
 
+# P2.1 (c): description variant "v2" = the verbose set with these overrides. Lives here, not in tools/,
+# so the tools package stays fixed; it applies to the local loop and the NeMo rollouts alike.
+DESCRIPTIONS_V2 = {
+    "send_message": ("The ONLY way a renter or tenant sees anything you write: plain assistant text is never "
+                     "delivered. Every reply to a renter is one send_message call. Style rules are enforced: at most "
+                     "2 sentences (a greeting like 'Hi Sam!' counts as one), at most one question mark, no em or en "
+                     "dashes, no dollar figure or lease term that is not in the room or listing record. Ask for one "
+                     "missing item at a time; the renter's answer comes back in data.replies."),
+    "check_listing_compliance": ("Required before create_listing and before any publish_listing: check the exact "
+                                 "title and body against fair-housing advertising rules (24 CFR 100.75). Returns "
+                                 "findings with a suggested rewrite for each problem phrase; use the rewrites."),
+    "request_quote": ("Ask one vendor for a quote on a job. Ask at least two vendors. Returns TIMEOUT if the vendor "
+                      "does not respond; then ask another vendor."),
+    "upsert_renter": ("Create or update the renter record for a thread. Call it after every renter answer (and for "
+                      "facts the renter volunteered in the first message). Put gate answers from read_reply under "
+                      "fields.gate (lease, move_in, phone, occupants, reason) and preferences under fields.wants."),
+}
+
+
 def tool_schemas(be: ModuleType, variant: str = "verbose", reader: bool = True) -> list[dict]:
     """OpenAI tool schemas with the description variant applied."""
+    if variant == "v2":
+        tools = tool_schemas(be, "verbose", reader)
+        for t in tools:
+            f = t["function"]
+            if f["name"] in DESCRIPTIONS_V2:
+                f["description"] = DESCRIPTIONS_V2[f["name"]]
+        return tools
     tools = None
     fn = getattr(be, "tool_schemas", None)
     if callable(fn) and be is not shim:

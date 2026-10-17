@@ -32,6 +32,46 @@ FACTORS = {
 }
 
 
+# P2.1 named variants: RunConfig overrides on top of RunConfig() + the reader backend, pinned per run.
+# reader_backend "fallback" = rule-based read_reply (what the committed baselines used), "model" = the
+# fine-tuned reader at $READER_BASE_URL. Tasks and scorer are untouched by every variant.
+VARIANTS = {
+    "base": {},
+    "guard": {"renter_guard": True},                                   # (a) harness: renter turn ends with send_message
+    "prompt2": {"prompt_version": "v2"},                               # (b) system prompt v2, workflow per scenario
+    "tools2": {"tool_descriptions": "v2"},                             # (c) tool-description variant
+    "rhist": {"keep_reasoning_in_history": True},                      # (g) reasoning kept in history, like NeMo's
+    "think_off": {"reasoning": False},                                 # (e) reasoning off
+    "noverif": {"verifier": False},                                    # verifier off
+    "noreader": {"reader": False},                                     # (f) reader out of the loop
+    "readermodel": {"_reader_backend": "model"},                       # (f) fine-tuned reader instead of fallback
+}
+
+
+def variant_config(a, spec: str):
+    """spec = 'guard+prompt2' -> (cfg, reader_backend). Later parts override earlier ones."""
+    over = {}
+    for part in spec.split("+"):
+        over.update(VARIANTS[part])
+    backend = over.pop("_reader_backend", "fallback")
+    return run_eval.make_config(a).with_(**over), backend
+
+
+def run_variant(a, spec: str, run_name: str, reader_url: str | None) -> dict:
+    import os
+    cfg, backend = variant_config(a, spec)
+    if backend == "model" and not reader_url:
+        raise SystemExit("variant wants the model reader but READER_BASE_URL is not set in .env")
+    os.environ["READER_BASE_URL"] = reader_url if backend == "model" else ""   # "" = rule-based fallback
+    va = argparse.Namespace(**vars(a))
+    va.run_name = run_name
+    s = run_eval.evaluate(va, cfg)
+    d = run_eval.RESULTS / run_name
+    s["variant"] = {"spec": spec, "reader_backend": backend}
+    (d / "summary.json").write_text(json.dumps(s, indent=1) + "\n")
+    return s
+
+
 def alt_prompt(base: str) -> str | None:
     versions = sorted(p.stem.split("_", 1)[1] for p in PROMPTS.glob("system_*.md"))
     others = [v for v in versions if v != base]
@@ -74,7 +114,19 @@ def main():
     ap.add_argument("--prefix", default="ablate-")
     ap.add_argument("--baseline-from", default=None, help="existing results dir to use as the baseline")
     ap.add_argument("--out", default=str(run_eval.RESULTS / "ablations.md"))
+    ap.add_argument("--variants", default=None,
+                    help="comma list of named variants, '+' combines, e.g. base,guard,guard+prompt2")
+    ap.add_argument("--seed-tag", default="", help="suffix for run names, e.g. -s2 for a repeat")
     a = ap.parse_args()
+    if a.variants:
+        import os
+        run_eval.load_env_file()
+        reader_url = os.environ.get("READER_BASE_URL") or None
+        for spec in [x.strip() for x in a.variants.split(",") if x.strip()]:
+            name = f"{a.prefix}{spec}{a.seed_tag}"
+            s = run_variant(a, spec, name, reader_url)
+            print(f"VARIANT {name}: pass {s['pass_rate']} reward {s['mean_reward']}", flush=True)
+        return
     if a.split != "heldout":
         print("note: ablations are meant for the held-out split", file=sys.stderr)
 

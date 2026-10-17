@@ -123,6 +123,34 @@ def _opening(goal) -> tuple[str, str | None]:
     return json.dumps(g), None
 
 
+def _thread_messages(st: dict, thread_id: str) -> list[dict]:
+    threads = list(st.get("threads", []) or [])
+    for ch in (st.get("channels") or {}).values():
+        if isinstance(ch, dict):
+            threads += [t for t in ch.get("threads", []) or [] if isinstance(t, dict)]
+    if isinstance(st.get("threads"), dict):
+        threads = list(st["threads"].values())
+    for t in threads:
+        if isinstance(t, dict) and t.get("thread_id") == thread_id:
+            return list(t.get("messages", []) or [])
+    return []
+
+
+def renter_unanswered(world, thread_id: str | None) -> bool:
+    """True when the thread's last message is from the renter (nothing the operator sent answers it)."""
+    if not thread_id:
+        return False
+    msgs = _thread_messages(toolbox.state(world), thread_id)
+    return bool(msgs) and msgs[-1].get("from") not in ("operator", "owner")
+
+
+def renter_guard_feedback(thread_id: str) -> str:
+    return (f"[harness] Plain text is not delivered: the renter on thread {thread_id} never sees it, and their last "
+            f"message is still unanswered. Send your reply now with send_message (thread_id \"{thread_id}\"), "
+            "keeping every style rule. Finish with plain text, a short summary for the owner, only after the renter "
+            "has your reply.")
+
+
 class _Runner:
     def __init__(self, world, client, cfg: RunConfig, sink, be, sleep):
         self.world, self.client, self.cfg, self.sink, self.be, self.sleep = world, client, cfg, sink, be, sleep
@@ -293,6 +321,8 @@ def run(world, goal_or_inbound, client=None, model: str | None = None, max_steps
     before = toolbox.snapshot(world)
 
     status, final_text, checks, rounds_left, steps = "max_steps", "", [], cfg.self_check_rounds, 0
+    renter_thread = goal_or_inbound.get("thread_id") if (who is None and isinstance(goal_or_inbound, dict)) else None
+    guard_left = cfg.renter_guard_rounds if cfg.renter_guard else 0
     while steps < cfg.max_steps:
         steps += 1
         kw = {"model": cfg.model, "messages": messages, "tools": R.tools, "tool_choice": "auto",
@@ -336,6 +366,12 @@ def run(world, goal_or_inbound, client=None, model: str | None = None, max_steps
             continue
 
         final_text = m["content"]
+        if guard_left > 0 and renter_unanswered(world, renter_thread):
+            guard_left -= 1
+            R.emit("verifier", "harness", {"stage": "renter-guard", "ok": False, "thread_id": renter_thread,
+                                           "problems": ["run ended on plain text with the renter unanswered"]})
+            messages.append({"role": "user", "content": renter_guard_feedback(renter_thread)})
+            continue
         if not cfg.verifier:
             status = "done"
             break
