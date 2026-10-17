@@ -10,8 +10,10 @@ ROOT="$(dirname "$HERE")"
 HOST=${BREV_HOST:-rentus-operator}
 LPORT=${LPORT:-8000}
 RPORT=${RPORT:-8000}
-PIDFILE="$HERE/.tunnel.pid"
-LOG="$HERE/.tunnel.log"
+# One pid/log per local port, so the operator tunnel (8000) and the reader tunnel (8001) don't kill each other:
+#   LPORT=8001 RPORT=8001 serving/tunnel.sh
+if [ "$LPORT" = 8000 ]; then PIDFILE="$HERE/.tunnel.pid"; LOG="$HERE/.tunnel.log"
+else PIDFILE="$HERE/.tunnel-${LPORT}.pid"; LOG="$HERE/.tunnel-${LPORT}.log"; fi
 
 # brev's ssh_config mints a cert with `brev mint-cert`, which reads BREV_API_KEY from env.
 if [ -f "$ROOT/.env" ]; then set -a; . "$ROOT/.env"; set +a; export BREV_API_KEY; fi
