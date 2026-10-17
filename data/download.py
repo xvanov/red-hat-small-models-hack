@@ -135,6 +135,28 @@ def airbnb() -> None:
     print(f"  snapshot {snap}, ~{n} lines")
 
 
+STREAM_SETS = {"nvidia/Nemotron-RL-Agentic-Conversational-Tool-Use-Pivot-v1": "train.jsonl"}
+
+
+def stream_jsonl_head(repo: str, filename: str, max_rows: int = 20000) -> list[dict]:
+    from huggingface_hub import hf_hub_url
+
+    url = hf_hub_url(repo, filename, repo_type="dataset")
+    rows: list[dict] = []
+    with requests.get(url, headers=UA, stream=True, timeout=120) as r:
+        r.raise_for_status()
+        for line in r.iter_lines():
+            if not line:
+                continue
+            row = json.loads(line)
+            row["_config"], row["_split"] = None, "train"
+            rows.append(row)
+            if len(rows) >= max_rows:
+                break
+    print(f"  {repo}: streamed first {len(rows)} rows of {filename}")
+    return rows
+
+
 def hf() -> None:
     print("[hf]")
     from datasets import get_dataset_config_names, load_dataset
@@ -152,6 +174,11 @@ def hf() -> None:
             print(f"  {repo}: config lookup failed ({e}); trying default")
             configs = [None]
         rows: list[dict] = []
+        if repo in STREAM_SETS:
+            # 1.75 GB single jsonl whose card uses a feature type our pinned
+            # `datasets` cannot parse: stream the head and sample from it.
+            rows = stream_jsonl_head(repo, STREAM_SETS[repo])
+            configs = []
         for cfg in configs:
             ds = load_dataset(repo, cfg, cache_dir=str(RAW / "hf_cache"))
             for split, part in ds.items():
