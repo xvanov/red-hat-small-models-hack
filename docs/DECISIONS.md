@@ -1,0 +1,19 @@
+# Decisions log
+
+Append-only. Newest at the bottom. Each entry: date/time ET, decision, why, who decided.
+
+| # | When (ET) | Decision | Why | By |
+|---|---|---|---|---|
+| D1 | Oct 17 ~10:30 | Product: an autonomous leasing operator for a room-rental company ("Rentus Operator"), extendable to property ops (vendors, quotes). | Real business need (owner runs ~50 rooms in Durham); reach across channels and fewer escalations are the bottlenecks. | Owner |
+| D2 | Oct 17 ~11:00 | Main track bet: **Tool-Calling**. Backups kept buildable: Fine-Tuned, Multi-Agent. Final track picked Sun 9:00 based on what works. | Track definition matches the operator exactly; all three bounties anchor on the same model. | Owner |
+| D3 | Oct 17 ~11:00 | Operator = Nemotron 3.5 Lightning (30B) on vLLM. Reader = fine-tuned model ≤1.5B called as a tool. Verifier = deterministic code. | 33B budget summed across all generative models; card says 30B, HF weights count 31.58B, so the reader stays ≤1.5B. | Claude, accepted by owner |
+| D4 | Oct 17 ~11:00 | Simulated renters/vendors in the Gym are scripted from open datasets, not a model, until organizers confirm a simulator model doesn't count toward 33B. | Avoid budget ambiguity. | Claude |
+| D5 | Oct 17 ~11:00 | No private data: owner's tenant texts are not used in the submission. A "write like the owner" style set may be created at the event by the owner and published. | Open-data rule; tenant privacy. | Owner + Claude |
+| D6 | Oct 17 ~11:00 | Build fresh in this repo; no code from rental-management / rental-media / rentus-room-agent. Their docs/rules may inform the spec. Integration with those apps happens after the event. | "All code written during the hackathon" rule. | Organizers / Owner |
+| D7 | Oct 17 ~11:05 | Real platform automations (Roomies, Marketplace, Craigslist, PadSplit) are allowed to be brittle, with a self-repair loop where the operator itself fixes broken selectors. Stop-before-submit by default. Gym trains against local mock copies of those pages. | Recovery is a judging criterion; any runtime repair model would count toward 33B. | Owner + Claude |
+| D8 | Oct 17 ~11:10 | No pitch deck. The interactive console is the demo; a 3–5 min recorded walkthrough is still required for submission. | Owner preference; submission requirement. | Owner |
+| D9 | Oct 17 ~11:15 | Kickoff slide transcriptions and the rules summary built from them stay local (gitignored); pages 15–18 are marked NVIDIA CONFIDENTIAL and the repo is public. | Respect distribution marking. | Claude |
+| D10 | Oct 17 ~11:20 | Datasets: SGD Homes, NVIDIA Pivot tool-use, When2Call, UCI apartments, Zillow ZORI, HUD/ACS where keys allow, Inside Airbnb Asheville, 24 CFR 100.75 + HUD ad guidance; Spanish via our own published translation. xLAM excluded (research-only). | Open licenses; coverage of dialogue, tool use, pricing, compliance. | Owner + Claude |
+| D11 | Oct 17 ~11:25 | GPU: one Brev RTX Pro 6000 96GB (Blackwell, $2.63/hr, ~$63 for 24h), kept until code freeze. No other paid instances without owner approval. | Native NVFP4, room for operator + reader + LoRA. | Owner |
+| D12 | Oct 17 ~11:25 | NeMo Gym bounty: first improvement via prompts/tool descriptions/harness (allowed per slides), weight training (reader SFT, operator LoRA) as stretch. | De-risks the bounty; training may not finish overnight. | Claude |
+| D13 | Oct 17 ~11:25 | Join the NVIDIA friction-log program ($25 Brev credits, first 20); notes kept locally in `.agent-logs/` (gitignored). | Owner request. | Owner |
