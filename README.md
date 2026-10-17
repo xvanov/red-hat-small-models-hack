@@ -54,7 +54,7 @@ flowchart LR
 | Model | Role | Params (model card) |
 |---|---|---|
 | [NVIDIA-Nemotron-3.5-Lightning-30B-A3B](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16) (served as NVFP4) | operator, selector repair, Gym policy | 30B total (3B active) |
-| [Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) + our SFT (`rentus-reader`) | reader tool | 0.6B |
+| [Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) + our SFT: [**xvanov/rentus-reader-qwen3-0.6b**](https://huggingface.co/xvanov/rentus-reader-qwen3-0.6b) | reader tool | 0.6B |
 | **Total** | | **30.6B ≤ 33B** |
 
 The verifier, the scripted renters/vendors and the compliance checks are code, not models. We use no separate speculative-decoding draft (DSpark/DFlash would count toward the budget). Hugging Face's raw weight counts are 31.58B (Lightning) and 0.75B (Qwen3-0.6B with tied embeddings), 32.3B in total, which is still under 33B.
@@ -172,7 +172,7 @@ We excluded the Salesforce xLAM datasets (research-only license). All code was w
 - **Operator reliability is the open problem, and the numbers show it.** The held-out baseline pass rate is 3–13%. In the live listing run above, the operator wrote lease as `{"answer": "yes"}` instead of the reader's `{"value": true}`. `propose_showing` was refused, the operator repeated the refused call, and the verifier escalated it after 3 tries. The operator also answered two renters in its final text instead of with `send_message`, so the console shows those replies in the owner's chat. The Gym improvements are aimed at exactly these failures, and their held-out results are pending.
 - **MTP is disabled.** Lightning's built-in multi-token prediction loaded and accepted about 3 tokens per step. But on vLLM 0.27.1 with this GPU it crashed the engine (CUDA illegal memory access) at 4 concurrent requests, so it's off. The GPU uses Marlin NVFP4 kernels (4-bit weights, 16-bit math), not native FP4 tensor cores.
 - **One shared GPU.** The operator, the reader, the Gym rollouts and reader training all share one card. Under that load, per-request speed dropped about 8x. On 2026-10-17 at 12:17 ET the operator engine stalled silently (15 requests "running", zero tokens generated, `/v1/models` still answering), and it needed a container restart. The watchdog only checks `/v1/models`, so it didn't catch this. A generation-level health probe is a next step.
-- **Reader:** the training data is mostly synthetic templates, and the test split holds out templates but is still close to training. The weights are not yet pushed to Hugging Face: `reader/publish.py` is a dry run until the owner approves.
+- **Reader:** the training data is mostly synthetic templates, and the test split holds out templates but is still close to training. Weights are public on Hugging Face ([xvanov/rentus-reader-qwen3-0.6b](https://huggingface.co/xvanov/rentus-reader-qwen3-0.6b)) and as a GitHub release (`reader-v1`).
 - **Verifier self-check** reads English claims only.
 - **Next:** a held-out run of the improved config, an operator LoRA from Gym rollouts (stretch goal), a generation-level watchdog, and live platform runs with the owner logged in.
 
