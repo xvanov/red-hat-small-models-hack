@@ -154,26 +154,28 @@ class World:
 
 # ---- patch / merge ---------------------------------------------------------
 
-def _id_key_for(items: list) -> str | None:
+def _id_key_for(items: list, name: str | None = None) -> str | None:
     if not items or not all(isinstance(x, dict) for x in items):
         return None
+    if name in ID_KEYS:
+        return ID_KEYS[name] if all(ID_KEYS[name] in x for x in items) else None
     for k in ID_KEYS.values():
         if all(k in x for x in items):
             return k
     return None
 
 
-def merge(base: Any, patch: Any) -> Any:
+def merge(base: Any, patch: Any, name: str | None = None) -> Any:
     if isinstance(patch, dict) and set(patch) == {"$replace"}:
         return copy.deepcopy(patch["$replace"])
     if isinstance(base, dict) and isinstance(patch, dict):
         out = dict(base)
         for k, v in patch.items():
-            out[k] = merge(base.get(k), v) if k in base else merge(None, v)
+            out[k] = merge(base.get(k), v, k) if k in base else merge(None, v, k)
         return out
     if isinstance(base, list) and isinstance(patch, list):
-        key = _id_key_for(patch)
-        if key and _id_key_for(base) in (key, None):
+        key = _id_key_for(patch, name)
+        if key and _id_key_for(base, name) in (key, None):
             out = [copy.deepcopy(x) for x in base]
             index = {x.get(key): i for i, x in enumerate(out)}
             for item in patch:
@@ -220,7 +222,7 @@ def load_file(path: str | Path) -> World:
 
 # ---- diff --------------------------------------------------------------------
 
-def diff(before: dict | World, after: dict | World, path: str = "") -> list[dict]:
+def diff(before: dict | World, after: dict | World, path: str = "", name: str | None = None) -> list[dict]:
     """Structural diff. Record lists are compared by id, so a path looks like
     `register[renter:maria].gate.move_in.date` (the same syntax scenario checks use)."""
     if isinstance(before, World):
@@ -236,10 +238,10 @@ def diff(before: dict | World, after: dict | World, path: str = "") -> list[dict
             elif k not in after:
                 out.append({"path": p, "op": "remove", "before": before[k]})
             else:
-                out.extend(diff(before[k], after[k], p))
+                out.extend(diff(before[k], after[k], p, str(k)))
         return out
     if isinstance(before, list) and isinstance(after, list):
-        key = _id_key_for(before + after) if (before or after) else None
+        key = _id_key_for(before + after, name) if (before or after) else None
         if key:
             b = {x[key]: x for x in before}
             a = {x[key]: x for x in after}
@@ -263,6 +265,7 @@ def get_path(state: dict | World, path: str) -> Any:
     if isinstance(state, World):
         state = state.to_dict()
     cur: Any = state
+    name = None
     for part in re.findall(r"[^.\[\]]+|\[[^\]]*\]", path):
         if cur is None:
             return None
@@ -273,10 +276,11 @@ def get_path(state: dict | World, path: str) -> Any:
                     i = int(ident)
                     cur = cur[i] if -len(cur) <= i < len(cur) else None
                 else:
-                    key = _id_key_for(cur)
+                    key = _id_key_for(cur, name)
                     cur = next((x for x in cur if key and x.get(key) == ident), None)
             else:
                 cur = cur.get(ident) if isinstance(cur, dict) else None
         else:
             cur = cur.get(part) if isinstance(cur, dict) else None
+            name = part
     return cur
