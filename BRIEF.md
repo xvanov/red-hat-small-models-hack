@@ -37,8 +37,12 @@ Tell it "the Appling Way room is free Nov 1, $750, private bath" and it runs the
 | Model | Role | Total params |
 |---|---|---|
 | Nemotron 3.5 Lightning 30B-A3B | operator | 30B |
-| Reader (TBD, ≤3B) | message reader | ≤3B |
-| **Total** | | **≤33B** |
+| Reader (TBD, target ≤1.5B) | message reader | ≤1.5B |
+| **Total** | | **≤31.5B by the card, ≤33.1B by the raw weight count** |
+
+Lightning's card says 30B, but Hugging Face counts 31.58B in the weights. The rule uses the card's number, but we keep the reader at 1.5B or less so we stay under 33B by either count. Lightning's draft models for speculative decoding (DSpark, DFlash) count toward the limit, so we don't use them. Its built-in MTP speed-up is free.
+
+**NeMo Gym improvement doesn't require training** (kickoff slides): a measured change to prompts, tool descriptions, the harness or routing qualifies, with tasks and scorer held fixed and one change at a time. Weight training is the stretch goal, not the requirement.
 
 Simulated renters and vendors in the Gym are scripted from open datasets, not a model, until the organizers confirm a simulator model doesn't count. Any self-repair of broken site automations at runtime uses the operator itself, never an extra model.
 
