@@ -5,7 +5,8 @@ those sites for the Gym and the demo, an operator-driven selector self-repair lo
 
 **Safety defaults.** Browser adapters fill the whole form, upload photos, screenshot, and stop before the final
 button (`status: ready_to_submit`). `submit=True` only works against mocks. Inbox reading and sending only work
-against mocks. Facebook posts are created with `published=false`. See `LOGIN.md` for how the owner logs in.
+against mocks. Facebook posts are created with `published=false`, except the one owner-approved pilot post (D20,
+`pilot_post.py`). See `LOGIN.md` for how the owner logs in.
 
 ## Quick start
 
@@ -30,8 +31,29 @@ channels/.venv/bin/python -m pytest -q channels/tests               # 27 tests, 
 | `adapters/values.py` | Contract listing + room -> per-platform values (e.g. PadSplit weekly price = monthly x 12 / 52). |
 | `repair/` | Self-repair loop (below). |
 | `facebook_page.py` | Graph API: unpublished photo post, Page check, conversation count. |
+| `pilot_post.py`, `pilot_shadow.py` | D20 pilot: operator-written published post; shadow inbox (drafts only). |
 | `login.py`, `publish.py` | Owner CLIs. |
 | `../tools/rentus_tools/live/channels_adapter.py` | `LiveAdapter` for W3's tools: `register_all("mock"|"live")` routes `publish_listing`/`send_message` here when `world.mode == "live"`. Live `send_message` only returns a draft. |
+
+## Real-world pilot (D20)
+
+The owner approved one real, published Page post for the Appling Way room. The operator wrote it; replies stay with the owner.
+
+```bash
+operator/.venv/bin/python -m channels.pilot_post draft                          # live operator -> runs/pilot/operator_listing.json
+channels/.venv/bin/python -m channels.pilot_post publish runs/pilot/post_final.txt PHOTO...   # PUBLISHED post, <=4 photos, EXIF stripped
+channels/.venv/bin/python -m channels.pilot_post delete POST_ID
+
+# shadow inbox: polls Page conversations every 180 s, runs the operator in a sandbox per conversation,
+# writes drafts to runs/pilot/shadow.jsonl and counters to runs/pilot/stats.json. GET requests only, never sends.
+nohup operator/.venv/bin/python -m channels.pilot_shadow > runs/pilot/shadow.log 2>&1 &
+operator/.venv/bin/python -m channels.pilot_shadow --selftest "Is the room still available?"   # synthetic, no Graph
+```
+
+**Stop the shadow reader:** `pkill -f "channels.pilot_shadow"`
+
+`runs/pilot/shadow.jsonl` and `runs/pilot/threads/` hold real renter text: gitignored, never commit them.
+The shadow config is the best held-out Gym row (prompt v3, renter guard, style pre-check, reasoning history).
 
 ## Mock switches ("page changed", "login wall")
 
