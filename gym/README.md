@@ -9,7 +9,8 @@ rentus_env/            pure-Python core (3.12+), shared by both runners and the 
   verify.py            the scorer: 7 check types, reward = fraction of checks passed
   backend.py           finds rentus_tools (W3), falling back to the operator shim
 resources_servers/rentus/   the NeMo Gym resources server (tool routes, seed_session, verify) + config + data
-tasks/{train,heldout}.jsonl  51 train + 31 held-out tasks; stats.json
+tasks/{train,heldout}.jsonl  v1: 51 train + 31 held-out tasks; stats.json (every committed result used v1)
+tasks/v2/                    v2: 54 train + 33 held-out, fixes from docs/task-review.md (docs/task-v2-changes.md)
 build_tasks.py         regenerates tasks/ (seeded, reproducible)
 oracle.py              privileged reference policy: proves every task is solvable (31/31, 51/51)
 run_eval.py            score one config on one split, local loop or NeMo Gym rollout collection
@@ -38,6 +39,8 @@ gym/.venv/bin/python gym/ablate.py --baseline-from gym/results/baseline         
 gym/.venv/bin/python gym/run_eval.py --split heldout --run-name stub --stub [--via nemo]
 
 gym/.venv/bin/python gym/oracle.py --split heldout      # every task solvable, scorer awards 1.0
+gym/.venv/bin/python gym/oracle.py --split heldout --tasks-version v2   # same for task set v2
+# run_eval.py / ablate.py take --tasks-version v1|v2 (default v1)
 gym/.venv/bin/python -m pytest -q gym/tests
 ```
 

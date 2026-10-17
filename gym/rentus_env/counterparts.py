@@ -9,6 +9,17 @@ A counterpart's script is a list of lines:
 Lines are consumed in order, once each. If nothing matches, the counterpart stays silent.
 
 <item> is one of: lease, move_in, phone, reason, occupants, showing, other.
+
+Task set v2 additions (all opt-in, so v1 tasks replay exactly as before):
+  "when_asked" may be a list of items ("other" or "move_in" for a not-now timeframe).
+  {"...", "reuse": true}     a line that is never consumed. Reusable lines are tried only after every
+                             unused one-shot line for the same item, so they act as fallbacks: a
+                             confirmation of an answer already given ("yes, Nov 1 is my date"), or a
+                             generic "what else do you need?" for a question no line covers. A reusable
+                             "any" line answers only a message that asks something.
+  spec "classifier": "v2"    a question the v1 rules call "other" but that is about the room's
+                             availability or a different date ("it's available from Jan 1, would that
+                             work?") counts as a move_in question.
 """
 from __future__ import annotations
 
@@ -35,6 +46,13 @@ _PATTERNS = [
 ]
 
 
+# v2 only: an "other" question about availability / a different date is a move_in question.
+_AVAIL_V2 = re.compile(r"availab|earliest|instead|later date|different date|that date|this date|work for you|"
+                       r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.? \d{1,2}\b|\b\d{1,2}/\d{1,2}\b|"
+                       r"disponible|en su lugar|en vez|esa fecha|otra fecha|te funciona|"
+                       r"\b(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b")
+
+
 def last_question(text: str) -> str | None:
     """The last sentence of `text` that ends with '?', or None."""
     if not text or "?" not in text:
@@ -47,7 +65,7 @@ def last_question(text: str) -> str | None:
     return q[q.find("¿"):] if "¿" in q else q
 
 
-def classify_question(text: str) -> str | None:
+def classify_question(text: str, version: str = "v1") -> str | None:
     """Which qualifying item the operator's message asks for. None if it asks nothing."""
     q = last_question(text)
     if q is None:
@@ -56,7 +74,14 @@ def classify_question(text: str) -> str | None:
     for item, pat in _PATTERNS:
         if re.search(pat, low):
             return item
+    if version == "v2" and _AVAIL_V2.search(low):
+        return "move_in"
     return "other"
+
+
+def _asks(line: dict, item: str) -> bool:
+    w = line.get("when_asked")
+    return item in w if isinstance(w, list) else w == item
 
 
 class Counterpart:
@@ -69,6 +94,7 @@ class Counterpart:
         self.script = list(spec.get("script", []))
         self.room_id = spec.get("room_of_interest")
         self.listing_id = spec.get("listing_id")
+        self.classifier = spec.get("classifier", "v1")
         self.used: set[int] = set()
         self.replies_sent = 0
 
@@ -82,17 +108,29 @@ class Counterpart:
 
     def respond(self, operator_text: str) -> tuple[str | None, str | None]:
         """Returns (asked_item, reply_text or None)."""
-        item = classify_question(operator_text)
+        item = classify_question(operator_text, self.classifier)
         if item is not None:
-            for i, line in enumerate(self.script):
-                if i not in self.used and line.get("when_asked") == item:
-                    self.used.add(i)
-                    self.replies_sent += 1
-                    return item, line["say"]
+            hit = self._take(item, reuse=False) or self._take(item, reuse=True)
+            if hit is not None:
+                return item, hit
         if item is not None or self.replies_sent == 0:
-            for i, line in enumerate(self.script):
-                if i not in self.used and line.get("when_asked") == "any":
-                    self.used.add(i)
-                    self.replies_sent += 1
-                    return item, line["say"]
+            hit = self._take("any", reuse=False)
+            if hit is not None:
+                return item, hit
+        if item is not None:
+            hit = self._take("any", reuse=True)
+            if hit is not None:
+                return item, hit
         return item, None
+
+    def _take(self, item: str, reuse: bool) -> str | None:
+        for i, line in enumerate(self.script):
+            if bool(line.get("reuse")) != reuse or not _asks(line, item):
+                continue
+            if not reuse and i in self.used:
+                continue
+            if not reuse:
+                self.used.add(i)
+            self.replies_sent += 1
+            return line["say"]
+        return None

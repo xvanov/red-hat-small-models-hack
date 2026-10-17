@@ -127,3 +127,11 @@ These pin down details the sections above left open. None changes a shape anothe
 - **Hidden truth.** `find_vendors`, `web_search` and `fetch_page` never expose `responds` or `quote_range`.
 - **Faults.** Optional `match` (args subset) narrows a fault to some calls; `"tool": "*"` matches any tool. Counters `_seen`/`_fired` are stored on each fault dict. Invalid args never consume a fault.
 - **Compliance findings** also carry `severity` (`violation` blocks; `caution` is advisory) and `citation`.
+
+## 9. Task set v2 additions (Oct 17)
+
+Additive and opt-in; v1 tasks (`gym/tasks/*.jsonl`) do not use them and replay unchanged. v2 tasks live in `gym/tasks/v2/`. Details and reasons: `docs/task-v2-changes.md`.
+
+- **Counterpart lines.** `"reuse": true` marks a line that is never consumed (a fallback: a confirmation of an answer already given, or a generic reply). Reusable lines are tried after the one-shot lines for the same item; a reusable `"any"` line answers only a message that asks something. `when_asked` may be a list of items.
+- **Counterpart spec.** `"classifier": "v2"` counts an operator question about availability or a different date as a `move_in` question. `"name"` sets the renter's display name.
+- **Task.** `"version": "v2"`. `initial_state.rooms` may set a room's `available_from` or `max_occupants` for that task only.

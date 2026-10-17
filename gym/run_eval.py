@@ -105,8 +105,11 @@ def start_stub() -> str:
     return f"http://127.0.0.1:{port}/v1"
 
 
-def load_tasks(split: str, ids: list[str] | None = None, limit: int | None = None) -> list[dict]:
-    tasks = [json.loads(l) for l in open(HERE / "tasks" / f"{split}.jsonl")]
+def load_tasks(split: str, ids: list[str] | None = None, limit: int | None = None,
+               version: str = "v1") -> list[dict]:
+    """v1 = gym/tasks/{split}.jsonl (the set every committed result used); v2 = gym/tasks/v2/{split}.jsonl."""
+    path = HERE / "tasks" / (f"{split}.jsonl" if version == "v1" else f"{version}/{split}.jsonl")
+    tasks = [json.loads(l) for l in open(path)]
     if ids:
         tasks = [t for t in tasks if t["id"] in ids]
     return tasks[:limit] if limit else tasks
@@ -332,7 +335,8 @@ def evaluate(args, cfg=None) -> dict:
                 model=cfg.model, messages=[{"role": "user", "content": "ping"}], max_tokens=1)
         except Exception as e:  # noqa: BLE001
             raise SystemExit(f"model endpoint {cfg.base_url} cannot generate: {type(e).__name__}: {e}")
-    tasks = load_tasks(args.split, args.ids.split(",") if args.ids else None, args.limit)
+    tasks = load_tasks(args.split, args.ids.split(",") if args.ids else None, args.limit,
+                       getattr(args, "tasks_version", "v1"))
     run_dir = RESULTS / args.run_name
     if run_dir.exists() and not args.keep:
         shutil.rmtree(run_dir)
@@ -355,7 +359,8 @@ def evaluate(args, cfg=None) -> dict:
         for r in results:
             f.write(json.dumps(r, ensure_ascii=False, default=str) + "\n")
     cfg_d = {k: v for k, v in asdict(cfg).items() if k != "api_key"}
-    meta = {"run_name": args.run_name, "split": args.split, "via": args.via, "stub": stub,
+    meta = {"run_name": args.run_name, "split": args.split, "tasks_version": getattr(args, "tasks_version", "v1"),
+            "via": args.via, "stub": stub,
             "model": cfg.model, "base_url": cfg.base_url, "config_label": cfg.label(), "config": cfg_d,
             "tools_backend": Backend().name, "git": git_head(),
             "nemo_gym_version": "0.6.0" if args.via == "nemo" else None,
@@ -381,6 +386,8 @@ def evaluate(args, cfg=None) -> dict:
 def build_parser():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--split", default="heldout", choices=["train", "heldout"])
+    ap.add_argument("--tasks-version", default="v1", choices=["v1", "v2"],
+                    help="task set: v1 (all committed results) or v2 (docs/task-v2-changes.md)")
     ap.add_argument("--run-name", required=True)
     ap.add_argument("--via", default="local", choices=["local", "nemo"])
     ap.add_argument("--stub", action="store_true", help="use gym/stub_endpoint.py instead of a model (plumbing only)")

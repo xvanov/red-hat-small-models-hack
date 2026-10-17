@@ -75,7 +75,7 @@ def lease_task(s: RolloutSession, t: dict):
     for item in ITEMS:
         if item in volunteered:
             continue
-        n_lines = sum(1 for ln in script if ln.get("when_asked") == item)
+        n_lines = sum(1 for ln in script if ln.get("when_asked") == item and not ln.get("reuse"))
         for k in range(max(1, n_lines)):
             text = q[item]
             if item == "lease" and sub == "shorter_lease" and k == 1:
@@ -183,6 +183,10 @@ def malformed_task(s: RolloutSession, t: dict):
     s.call("send_message", {"thread_id": tid, "text": f"Rent is ${room['rent']} a month and the deposit is ${room['deposit']}."})
 
 
+def task_file(split: str, version: str = "v1") -> Path:
+    return HERE / "tasks" / (f"{split}.jsonl" if version == "v1" else f"{version}/{split}.jsonl")
+
+
 def play(task: dict, backend=None) -> dict:
     s = RolloutSession(task, backend=backend)
     sub = task.get("subcategory")
@@ -201,8 +205,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--split", default="heldout")
     ap.add_argument("--id")
+    ap.add_argument("--tasks-version", default="v1", choices=["v1", "v2"])
     a = ap.parse_args()
-    tasks = [json.loads(l) for l in open(HERE / "tasks" / f"{a.split}.jsonl")]
+    tasks = [json.loads(l) for l in open(task_file(a.split, a.tasks_version))]
     bad = 0
     for t in tasks:
         if a.id and t["id"] != a.id:

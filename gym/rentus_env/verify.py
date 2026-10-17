@@ -178,14 +178,35 @@ def check_never(c: dict, ctx: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
-_LONG_DASH = re.compile("[–—]")
+# Same rules as send_message (tools/rentus_tools/impl/style.py), so the scorer never counts a message
+# the tool accepts as breaking a rule it enforces. Scorer change 2026-10-17 (task set v2 review):
+# the old splitter cut at every ". ", so "494 Tillbrook Ct. is free." or "$875.00" read as extra
+# sentences, and the old dash rule missed "--" and the other dash characters the tool refuses.
+_LONG_DASH = re.compile(r"[‒–—―]|--")
+_ABBREV = re.compile(r"\b(St|Dr|Ave|Rd|Blvd|Ln|Ct|Mr|Mrs|Ms|Sr|Sra|Jr|No|Apt|approx|vs|etc|Sta|Av)\.", re.IGNORECASE)
+_DOTTED = re.compile(r"\b(?:[a-zA-Z]\.){2,}")
+_URL = re.compile(r"https?://\S+|www\.\S+|\S+@\S+\.\w+")
+_DECIMAL = re.compile(r"(?<=\d)\.(?=\d)")
+_TERMINATOR = re.compile(r"[.!?…]+[\"')\]]*(?=\s|$)")
+# first_person: "the owner" / "the landlord" is third person, unless the operator says it is them
+# ("I'm the owner"). Scorer change 2026-10-17: the old rule also flagged "I'm the owner".
+_THIRD_PERSON = re.compile(r"(?<!\bi'm )(?<!\bi am )(?<!\bsoy )\b(the (owner|landlord)|(el|al|del|la) due[nñ][oa])\b", re.I)
 _ES = re.compile(r"\b(el|la|los|las|de|que|y|en|un|una|para|con|por|es|tu|te|cuarto|habitaci[oó]n|"
                  r"gracias|hola|s[ií]|fecha|mudar|cu[aá]ndo|est[aá]|puedo|tengo)\b|[¿¡ñáéíóú]", re.I)
 _EN = re.compile(r"\b(the|and|you|is|to|for|with|your|room|thanks|what|when|are|can|it|of|I)\b", re.I)
 
 
 def sentences(text: str) -> list[str]:
-    return [s for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s]
+    t = _URL.sub("URL", text)
+    t = _DOTTED.sub(lambda m: m.group(0).replace(".", ""), t)
+    t = _ABBREV.sub(lambda m: m.group(1), t)
+    t = _DECIMAL.sub(",", t)
+    out = []
+    for line in re.split(r"\n+", t):
+        for part in _TERMINATOR.split(line):
+            if re.search(r"\w", part):
+                out.append(part.strip())
+    return out
 
 
 def looks_spanish(text: str) -> bool:
@@ -222,7 +243,7 @@ def check_style(c: dict, ctx: dict) -> tuple[bool, str]:
             want = c.get("language", "en")
             if (want == "es") != looks_spanish(m):
                 bad = f"not in {want}"
-        elif rule == "first_person" and re.search(r"\bthe (owner|landlord)\b|\bel due[nñ]o\b", m, re.I):
+        elif rule == "first_person" and _THIRD_PERSON.search(m):
             bad = "speaks about the owner in the third person"
         if bad:
             return False, f"{bad}: {_short(m, 90)}"

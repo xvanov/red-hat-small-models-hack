@@ -59,6 +59,10 @@ Simulated renters and vendors in the Gym are scripted from open datasets, not a 
 | W7 | `console/` | interactive demo console |
 | W8 | `channels/` | browser automations for real platforms, stop-before-submit, self-repair loop |
 
+## Contract changes
+
+- 2026-10-17: `contracts/tools.md` §9, task set v2 script fields (`reuse`, list `when_asked`, `classifier`, per-task room patches). Additive; v1 tasks unchanged.
+
 ## Milestones
 
 - **Phase 1, by 8 PM Sat:** the full loop runs in the sandbox on Lightning via vLLM, with a baseline Gym score.
