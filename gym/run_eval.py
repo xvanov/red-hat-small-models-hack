@@ -23,6 +23,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -211,14 +212,17 @@ def run_nemo(tasks, cfg, run_dir: Path, workers: int) -> list[dict]:
         p.unlink()
     env = {**os.environ, "PATH": f"{NEMO_VENV / 'bin'}:{os.environ.get('PATH', '')}", "VIRTUAL_ENV": str(NEMO_VENV),
            "MLFLOW_DISABLE_AGENT_HINT": "1"}
+    # The vLLM key goes in a 0600 temp config (NeMo Gym merges every --config into the global config, where
+    # `policy_api_key` is what --model-api-key sets), so it never appears in the process list or command.txt.
+    key_fd, key_cfg = tempfile.mkstemp(prefix="rentus-nemo-key-", suffix=".yaml")
+    with os.fdopen(key_fd, "w") as f:
+        f.write(f"policy_api_key: {json.dumps(cfg.api_key or 'EMPTY')}\n")
     start = [str(gym_bin), "env", "start", "--config", "resources_servers/rentus/configs/rentus.yaml",
-             "--model-type", "vllm_model", "--model", cfg.model, "--model-url", cfg.base_url,
-             "--model-api-key", cfg.api_key or "EMPTY"]
+             "--config", key_cfg, "--model-type", "vllm_model", "--model", cfg.model, "--model-url", cfg.base_url]
     collect = [str(gym_bin), "eval", "run", "--no-serve", "--agent", "rentus_simple_agent",
                "--input", str(inp), "--output", str(out), "--num-repeats", "1", "--concurrency", str(workers),
                "--no-health-check"]
-    redact = lambda argv: " ".join("****" if i and argv[i - 1] == "--model-api-key" else x for i, x in enumerate(argv))
-    (nd / "command.txt").write_text(redact(start) + "\n" + redact(collect) + "\n")
+    (nd / "command.txt").write_text(" ".join(start).replace(key_cfg, "<0600 key config>") + "\n" + " ".join(collect) + "\n")
     t0 = time.time()
     env_log = open(nd / "gym_env.log", "w")
     server = subprocess.Popen(start, cwd=HERE, env=env, stdout=env_log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -243,6 +247,7 @@ def run_nemo(tasks, cfg, run_dir: Path, workers: int) -> list[dict]:
             except Exception:  # noqa: BLE001
                 pass
         env_log.close()
+        Path(key_cfg).unlink(missing_ok=True)
     if rc != 0 or not out.exists():
         tail = (nd / "gym_eval.log").read_text()[-3000:]
         raise SystemExit(f"gym eval run failed (rc={rc}); see {nd / 'gym_eval.log'}\n{tail}")
