@@ -19,14 +19,20 @@ import httpx
 REPO = Path(__file__).resolve().parent.parent
 RUNS = Path(os.environ.get("CONSOLE_RUNS_DIR") or REPO / "runs")
 RESULTS = REPO / "results"
+RESULTS_DIRS = (REPO / "results", REPO / "gym" / "results")
 TASKS = REPO / "gym" / "tasks"
-LIVE_LABEL = "live: Nemotron 3.5 Lightning on vLLM"
+LIVE_LABEL = "live: Nemotron 3.5 Lightning (vLLM)"
+READER_LIVE_LABEL = "reader: rentus-reader 0.6B (vLLM)"
+READER_FALLBACK_LABEL = "reader: rules fallback"
+DEFAULT_OPERATOR_URL = "http://localhost:8000/v1"
 
 try:
     from dotenv import load_dotenv
     load_dotenv(REPO / ".env", override=False)
 except Exception:
     pass
+# The operator, gym and channels all default to the local tunnel; so does the console.
+os.environ.setdefault("OPERATOR_BASE_URL", DEFAULT_OPERATOR_URL)
 
 # Package folders from contract section 1; append (not insert) so nothing shadows stdlib.
 for sub in ("tools", "operator", "gym"):
@@ -75,6 +81,28 @@ def probe_backend(force: bool = False) -> dict:
     return value
 
 
+_reader_cache: dict = {"at": 0.0, "value": None}
+
+
+def probe_reader(force: bool = False) -> dict:
+    """Is READER_BASE_URL serving? rentus_tools' read_reply posts there and falls back to rules otherwise."""
+    if not force and _reader_cache["value"] and time.time() - _reader_cache["at"] < 10:
+        return _reader_cache["value"]
+    base = os.environ.get("READER_BASE_URL", "").rstrip("/")
+    value = {"live": False, "label": READER_FALLBACK_LABEL, "models": []}
+    if base:
+        key = os.environ.get("READER_API_KEY") or os.environ.get("OPERATOR_API_KEY") or "none"
+        try:
+            r = httpx.get(base + "/models", timeout=1.5, headers={"Authorization": "Bearer " + key})
+            if r.status_code == 200:
+                ids = [m.get("id") for m in r.json().get("data", [])]
+                value = {"live": True, "label": READER_LIVE_LABEL, "models": ids}
+        except Exception:
+            pass
+    _reader_cache.update(at=time.time(), value=value)
+    return value
+
+
 # ---------------- scenarios ----------------
 def list_scenarios() -> list[dict]:
     out = []
@@ -111,9 +139,9 @@ def _rate(d: dict):
 
 def scoreboard() -> list[dict]:
     rows = []
-    if not RESULTS.is_dir():
-        return rows
-    for f in sorted(RESULTS.glob("*/summary.json")):
+    files = sorted(f for d in RESULTS_DIRS if d.is_dir() for f in d.glob("*/summary.json")
+                   if not f.parent.name.startswith("_"))
+    for f in files:
         try:
             d = json.loads(f.read_text())
         except Exception as e:
@@ -123,7 +151,10 @@ def scoreboard() -> list[dict]:
         if isinstance(checks, list):
             checks = {c.get("type") or c.get("name"): _rate(c) for c in checks if isinstance(c, dict)}
         name = f.parent.name
-        rows.append({"name": name, "label": d.get("label") or d.get("variant") or name,
+        label = d.get("label") or d.get("variant") or name
+        if not isinstance(label, str):  # e.g. ablation summaries carry the variant as a dict
+            label = name
+        rows.append({"name": name, "label": label,
                      "kind": "baseline" if "baseline" in name.lower() or d.get("baseline") else "improved",
                      "split": d.get("split"), "model": d.get("model"),
                      "pass_rate": _rate(d), "n_tasks": d.get("n_tasks") or d.get("total"),

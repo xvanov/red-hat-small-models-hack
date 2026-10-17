@@ -83,10 +83,13 @@ def status():
     mode = getattr(run, "mode", None) if run and getattr(run, "status", "") not in ("stopped",) else _mode(badge)
     badge["label"] = MODE_LABEL.get(mode, mode)
     badge["live"] = mode == "operator"
+    reader = dict(integ.probe_reader())
+    if os.environ.get("READER_LABEL"):
+        reader["label"] = os.environ["READER_LABEL"]
     return {"badge": badge, "mode": mode, "packages": pkgs, "active_run": active,
             "run_status": getattr(run, "status", None), "run_mode": getattr(run, "mode", None),
             "speed": getattr(run, "speed", None), "fault_kinds": FAULT_KINDS, "default_fault_tool": DEFAULT_FAULT_TOOL,
-            "reader_label": os.environ.get("READER_LABEL", "deterministic fallback (code)")}
+            "reader": reader, "reader_label": reader["label"].removeprefix("reader: ")}
 
 
 @app.get("/api/scenarios")

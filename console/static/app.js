@@ -34,6 +34,12 @@ async function refreshStatus() {
     b.className = "badge " + (s.badge.live ? "live" : "stub");
     b.title = s.badge.live ? "models: " + (s.badge.models || []).join(", ")
       : (s.badge.operator_import_error || "OPERATOR_BASE_URL not reachable");
+    if (s.reader) {
+      const r = $("readerBadge");
+      r.textContent = s.reader.label;
+      r.className = "badge " + (s.reader.live ? "live" : "stub");
+      r.title = s.reader.live ? "models: " + (s.reader.models || []).join(", ") : "READER_BASE_URL not reachable";
+    }
     if (!S.faultsBuilt) buildFaultMenu(s.fault_kinds, s.default_fault_tool);
     if (s.active_run && !S.runId) attach(s.active_run);
     $("runinfo").textContent = S.runId ? `${S.runId} · ${s.run_mode || ""} · ${s.run_status || ""}` : "no run yet";

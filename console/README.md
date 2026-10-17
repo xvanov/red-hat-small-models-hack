@@ -7,8 +7,9 @@ The live demo: one page where the owner types an instruction and watches the ope
 From the repo root (Python 3.12):
 
 ```bash
-pip install -r console/requirements.txt   # fastapi, uvicorn, httpx, plus jsonschema (rentus_tools) and openai (live client)
-uvicorn console.app:app --port 8080
+scripts/setup.sh          # root .venv with tools, operator, console, channels
+scripts/demo.sh           # tunnels if needed + console on :8080
+# or by hand: .venv/bin/python -m uvicorn console.app:app --port 8080
 # open http://localhost:8080
 ```
 
@@ -16,11 +17,12 @@ Environment (read from `.env` if present, never printed):
 
 | Variable | Effect |
 |---|---|
-| `OPERATOR_BASE_URL` | vLLM OpenAI endpoint, e.g. `http://localhost:8000/v1`. If `GET /models` answers, runs use the real operator on it and the badge reads **live: Nemotron 3.5 Lightning on vLLM**. |
+| `OPERATOR_BASE_URL` | vLLM OpenAI endpoint (default `http://localhost:8000/v1`). If `GET /models` answers, runs use the real operator on it and the badge reads **live: Nemotron 3.5 Lightning (vLLM)**. |
+| `READER_BASE_URL`, `READER_MODEL`, `READER_API_KEY` | the reader endpoint `read_reply` posts to (`http://localhost:8011/v1`). If `GET /models` answers, the second badge reads **reader: rentus-reader 0.6B (vLLM)**, else **reader: rules fallback**. |
 | `OPERATOR_MODEL`, `OPERATOR_API_KEY` | passed through to the operator's `RunConfig`; the model defaults to the first id vLLM lists. |
 | `CONSOLE_STUB=operator` | with no endpoint, run the real `rentus_operator` loop and real `rentus_tools`, using the operator's scripted stub model (listing flow only). |
 | `CONSOLE_FORCE_STUB=1` | always use the console's own stub driver (rehearsal, or if the operator breaks on stage). |
-| `READER_LABEL` | label shown on reader steps in the trace (default "deterministic fallback (code)"; set it to the reader model name once it is served). |
+| `READER_LABEL` | overrides the reader badge text. |
 | `CONSOLE_RUNS_DIR` | where runs are written (default `runs/`). |
 
 Test: `python -m pytest console/tests -q` starts the app under uvicorn on a free port and hits every endpoint, in both stub modes.
@@ -38,7 +40,7 @@ Scenarios (`gym/tasks/*.jsonl`) run through the gym's own `RolloutSession`, so s
 - **Owner** (left): chat. The first message starts a run; later messages go to the running operator.
 - **Channels** (middle): one lane each for marketplace, roomies, craigslist, padsplit, sms, email. Listing cards on top (with a screenshot thumbnail when a live adapter returns `screenshot`), threads below as messages arrive.
 - **Right**: demand register with gate ticks (lease, move-in, phone, reason, occupants: ✓ answered, ~ vague, ✗ no), owner escalations with Approve / Deny, ops jobs, quotes and spend vs limit.
-- **Bottom**: live trace, color-coded by kind, each row labeled with who acted (operator + model, reader, verifier = code, scripted renter, owner); scoreboard from `results/*/summary.json` (baseline vs improved, with delta).
+- **Bottom**: live trace, color-coded by kind, each row labeled with who acted (operator + model, reader, verifier = code, scripted renter, owner); scoreboard from `results/*/summary.json` and `gym/results/*/summary.json` (baseline vs improved, with delta).
 - **Header**: Run scenario picker, speed (0.5× to 10×, paces tool calls and renter arrivals), **Break something** (timeout, page changed, rate limited, malformed result, login required) which appends a contract §5 fault to the running world's `faults` for the next call of the chosen tool.
 
 ## API
