@@ -686,6 +686,8 @@ def main() -> None:
     ap.add_argument("--sgd-train", type=int, default=2000, help="max SGD renter turns in train")
     ap.add_argument("--sgd-eval", type=int, default=300, help="max SGD renter turns in dev and in test")
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--with-sgd-es", action="store_true",
+                    help="append processed/reader/sgd_es_{split}.jsonl from translate_es.py")
     a = ap.parse_args()
 
     sgd = sgd_examples()
@@ -697,6 +699,10 @@ def main() -> None:
         pool = sgd.get(split, [])
         rng.shuffle(pool)
         rows += pool[:n_sgd]
+        es_file = OUT_PROC / f"sgd_es_{split}.jsonl"
+        if a.with_sgd_es and es_file.exists():
+            ids = {r["id"] for r in rows}
+            rows += [r for r in map(json.loads, open(es_file)) if r["meta"]["translated_from"] in ids]
         rng.shuffle(rows)
         splits[split] = rows
 
