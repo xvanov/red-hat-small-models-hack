@@ -63,14 +63,20 @@ def variant_config(a, spec: str):
 def run_variant(a, spec: str, run_name: str, reader_url: str | None) -> dict:
     import os
     cfg, backend = variant_config(a, spec)
+    models = run_eval.probe_models(cfg.base_url, cfg.api_key) or []
+    if not a.model and models and cfg.model not in models:
+        cfg = cfg.with_(model=models[0])   # same resolution evaluate() does
     if backend == "model" and not reader_url:
         raise SystemExit("variant wants the model reader but READER_BASE_URL is not set in .env")
     os.environ["READER_BASE_URL"] = reader_url if backend == "model" else ""   # "" = rule-based fallback
     va = argparse.Namespace(**vars(a))
     va.run_name = run_name
-    s = run_eval.evaluate(va, cfg)
     d = run_eval.RESULTS / run_name
-    retried = []
+    if a.retry_only and (d / "summary.json").exists():
+        s = json.loads((d / "summary.json").read_text())
+    else:
+        s = run_eval.evaluate(va, cfg)
+    retried = list((s.get("model_error_retries") or {}).get("tasks_rerun", []))
     for _ in range(a.retry_errors):  # endpoint outages: rerun only the rollouts that never reached the model
         rows = [json.loads(l) for l in open(d / "per_task.jsonl")]
         bad = [r["task_id"] for r in rows if r.get("status") in ("model_error", "missing") or r.get("error")]
@@ -163,6 +169,7 @@ def main():
     ap.add_argument("--variants", default=None,
                     help="comma list of named variants, '+' combines, e.g. base,guard,guard+prompt2")
     ap.add_argument("--retry-errors", type=int, default=3, help="rerun model_error rollouts up to N times")
+    ap.add_argument("--retry-only", action="store_true", help="only rerun model_error rollouts of existing runs")
     ap.add_argument("--seed-tag", default="", help="suffix for run names, e.g. -s2 for a repeat")
     a = ap.parse_args()
     if a.variants:
