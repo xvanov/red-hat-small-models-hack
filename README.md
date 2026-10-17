@@ -121,6 +121,8 @@ Full write-up: [docs/results.md](docs/results.md) (*pending: the gym workstream 
 
 Latency p50: reader 0.58 s per call at concurrency 32, Lightning 2.7 s at concurrency 8. Prompted Lightning treats over a third of vague move-in dates as exact. That failure is why the reader exists.
 
+**Download:** the fine-tuned reader is GitHub release [`reader-v1`](https://github.com/xvanov/red-hat-small-models-hack/releases/tag/reader-v1) (CC BY-SA 4.0, 949 MB tar.gz + `SHA256SUMS`). Model card: [reader/MODEL_CARD.md](reader/MODEL_CARD.md). Serving: [reader/README.md#download](reader/README.md#download).
+
 ### NeMo Gym (held-out, 31 tasks; `gym/results/*/summary.json`)
 
 | Run | Harness | Pass rate | Mean reward | Leasing | Listing | Ops | Recovery (mean reward) |
