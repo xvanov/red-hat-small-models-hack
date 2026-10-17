@@ -45,6 +45,7 @@ Mean reward per category. Pass = every check in the task passed. "Rerun" = rollo
 | (a)+(b) | local | 1 | 11/31 (35.5%) | 0.846 | 0.787 | 0.854 | 1.000 | 0.929 | 21 |
 | (a)+(b)+(d) | local | 2 | 16.5/31 (53.2%) | 0.902 (0.897 to 0.907) | 0.886 | 0.854 | 0.964 | 0.947 | 29 |
 | **(a)+(b)+(d)+(g) final** | local | 2 | **20/31 (64.5%)** | **0.921 (0.911 to 0.931)** | 0.896 | 1.000 | 1.000 | 0.885 | 30 |
+| final + (f) fine-tuned reader (`+readermodel-rerun`) | local | 2 | 20.5/31 (66.1%) | 0.940 (0.936 to 0.943) | 0.944 | 0.812 | 1.000 | 0.978 | 0 |
 | NeMo baseline (`baseline-nemo`) | nemo | 1 | 4/31 (12.9%) | 0.646 | 0.648 | 0.729 | 0.696 | 0.536 | 0 |
 | NeMo + (b) prompt v3 | nemo | 1 | 15/31 (48.4%) | 0.809 | 0.755 | 0.917 | 1.000 | 0.762 | 0 |
 
@@ -55,6 +56,7 @@ What each change did, held-out:
 - **(b) prompt v3** is the largest single change (+0.35 reward, 1 → 11 passes) and the only one that transfers to NeMo's harness, where it takes `simple_agent` from 4 to 15 passes. Ops goes to 1.000 in both runners (correct ZIP and vendor ids).
 - **(d) style pre-check** does nothing alone (without the guard the model rarely sends anything to check) and adds about +5.5 passes on top of (a)+(b).
 - **(g) reasoning history** explains most of the loop-vs-NeMo gap: alone it takes our loop from 0.453 to 0.614 (NeMo baseline 0.646), and it adds about +3.5 passes on top of (a)+(b)+(d).
+- **(f) fine-tuned reader** (`xvanov/rentus-reader-qwen3-0.6b` instead of the rule-based `read_reply` fallback, on top of the final config): +0.5 passes and +0.019 mean reward over 2 runs, which is under the ~0.03 noise threshold, so it is not a clear gain. It helps leasing (0.896 → 0.944) and recovery (0.885 → 0.978) but listing drops (1.000 → 0.812, 4 tasks). All 184 `read_reply` calls across both runs returned `backend: "model"` (0 fallbacks). Not part of the headline final config.
 
 ## Train results (51 tasks, used to choose the changes)
 
@@ -84,7 +86,7 @@ Results JSON: `gym/results/<run>/summary.json` and `per_task.jsonl` (plus local 
 
 ## Not measured yet / open
 
-- **Model reader vs fallback.** `heldout-guard+prompt3+style+rhist+readermodel` is invalid: the reader server answered HTTP 401 to `READER_API_KEY` from `.env` on every call, so all 93 reads used the fallback (flagged `invalid` in its summary). Rerun once the key matches.
+- **Model reader vs fallback**: measured, see the (f) row. The earlier run `heldout-guard+prompt3+style+rhist+readermodel` stays flagged `invalid` (HTTP 401 on all 93 reads, every call fell back to rules); the valid runs are `...+readermodel-rerun` and `-rerun-s2`.
 - `format_facts` (showing hours rendered "10:00 to 18:00" like the NeMo rows instead of the raw policy dict) and reasoning off are implemented as variants (`facts`, `think_off`) but not run.
 - The NeMo row with prompt v3 is the NeMo-path run of the final config: guard and the style pre-check live in our loop, not in `simple_agent`, and reasoning history is already NeMo's default. A second NeMo run is pending.
 - Single runs for the "alone" rows; the spread above (about ±0.02) applies.
