@@ -1,0 +1,358 @@
+"""The operator's agent loop over an OpenAI-compatible chat-completions endpoint.
+
+run(world, goal_or_inbound, client, model, max_steps) drives one task: the model
+talks and calls tools in the same turn; every call goes through the verifier
+(unless RunConfig.verifier is False); events go to the tools package EventSink.
+"""
+from __future__ import annotations
+
+import json
+import re
+import time
+import uuid
+from dataclasses import dataclass, field
+
+from . import toolbox
+from . import verifier as V
+from .config import RunConfig, load_prompt
+
+
+@dataclass
+class RunResult:
+    run_id: str
+    status: str                     # done | done_unverified | max_steps | model_error
+    final_text: str
+    steps: int
+    tool_calls: int
+    messages: list[dict]
+    ledger: list[dict]
+    self_check: list[str] = field(default_factory=list)
+    escalations: list[str] = field(default_factory=list)
+    events: list[dict] = field(default_factory=list)
+    config: str = ""
+
+
+# --------------------------------------------------------------------------- response parsing
+
+THINK = re.compile(r"<think>.*?</think>", re.S)
+INLINE_JSON_CALL = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
+INLINE_XML_CALL = re.compile(r"<tool_call>\s*<function=([\w.-]+)>(.*?)</function>\s*</tool_call>", re.S)
+XML_PARAM = re.compile(r"<parameter=([\w.-]+)>\s*(.*?)\s*</parameter>", re.S)
+
+
+def _as_dict(obj) -> dict:
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return obj
+    for m in ("model_dump", "dict"):
+        f = getattr(obj, m, None)
+        if callable(f):
+            try:
+                return f()
+            except TypeError:
+                pass
+    return dict(vars(obj))
+
+
+def split_reasoning(content: str | None, msg: dict) -> tuple[str, str]:
+    """Return (visible content, reasoning). Handles a reasoning parser (separate
+    field) and raw <think> blocks left in the content."""
+    reasoning = msg.get("reasoning_content") or msg.get("reasoning") or ""
+    text = content or ""
+    inline = "".join(m.group(0) for m in THINK.finditer(text))
+    text = THINK.sub("", text)
+    if "</think>" in text:  # opening tag eaten by the template
+        head, _, text = text.partition("</think>")
+        inline += head
+    return text.strip(), (reasoning + "\n" + re.sub(r"</?think>", "", inline)).strip()
+
+
+def inline_tool_calls(text: str) -> tuple[list[dict], str]:
+    """Tool calls the server's parser missed and left in the content."""
+    calls = []
+    for m in INLINE_JSON_CALL.finditer(text):
+        try:
+            obj = json.loads(m.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and "name" in obj:
+            args = obj.get("arguments", obj.get("parameters", {}))
+            calls.append({"name": obj["name"], "arguments": args if isinstance(args, str) else json.dumps(args)})
+    for m in INLINE_XML_CALL.finditer(text):
+        args = {}
+        for k, v in XML_PARAM.findall(m.group(2)):
+            try:
+                args[k] = json.loads(v)
+            except json.JSONDecodeError:
+                args[k] = v
+        calls.append({"name": m.group(1), "arguments": json.dumps(args)})
+    if calls:
+        text = INLINE_XML_CALL.sub("", INLINE_JSON_CALL.sub("", text)).strip()
+    return [{"id": f"inline_{uuid.uuid4().hex[:8]}", "type": "function", "function": c} for c in calls], text
+
+
+def normalize(resp) -> dict:
+    r = _as_dict(resp)
+    choices = r.get("choices") or []
+    msg = _as_dict(choices[0].get("message") if isinstance(choices[0], dict) else choices[0].message) if choices else {}
+    content, reasoning = split_reasoning(msg.get("content"), msg)
+    calls = []
+    for i, tc in enumerate(msg.get("tool_calls") or []):
+        tc = _as_dict(tc)
+        fn = _as_dict(tc.get("function"))
+        calls.append({"id": tc.get("id") or f"call_{i}_{uuid.uuid4().hex[:6]}", "type": "function",
+                      "function": {"name": fn.get("name", ""), "arguments": fn.get("arguments", "")}})
+    return {"content": content, "reasoning": reasoning, "tool_calls": calls,
+            "finish_reason": choices[0].get("finish_reason") if choices and isinstance(choices[0], dict) else None}
+
+
+# --------------------------------------------------------------------------- the loop
+
+def _opening(goal) -> tuple[str, str | None]:
+    if isinstance(goal, str):
+        return f"Owner: {goal}", "owner"
+    g = dict(goal)
+    if g.get("owner_instruction"):
+        return f"Owner: {g['owner_instruction']}", "owner"
+    if g.get("thread_id"):
+        who = g.get("renter_name") or "a renter"
+        said = f': "{g["text"]}"' if g.get("text") else ""
+        return (f"New renter message on {g.get('channel', 'a channel')} thread {g['thread_id']} from {who}{said}. "
+                "Read the thread and handle it."), None
+    return json.dumps(g), None
+
+
+class _Runner:
+    def __init__(self, world, client, cfg: RunConfig, sink, be, sleep):
+        self.world, self.client, self.cfg, self.sink, self.be, self.sleep = world, client, cfg, sink, be, sleep
+        self.tools = toolbox.tool_schemas(be, cfg.tool_descriptions, cfg.reader)
+        self.checker = V.CallChecker(self.tools)
+        self.guard = V.LoopGuard(cfg.loop_guard_repeats)
+        self.ledger: list[dict] = []
+        self.escalations: list[str] = []
+        self.tried_channels: dict[str, set[str]] = {}
+        self.n_calls = 0
+
+    def emit(self, type, actor, data):
+        toolbox.emit(self.sink, type, actor, data)
+
+    # ---- one tool call -> the content of its tool message
+    def execute(self, tc: dict) -> dict:
+        name, raw = tc["function"]["name"], tc["function"]["arguments"]
+        if not self.cfg.verifier:
+            try:
+                args = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+            except json.JSONDecodeError as e:
+                return {"ok": False, "error": {"code": "INVALID_ARGS", "message": f"arguments are not JSON: {e.msg}",
+                                               "retryable": True}}
+            return self._call(name, args, tc["id"])
+
+        chk = self.checker.check(name, raw)
+        if not chk.ok:
+            self.emit("verifier", "verifier", {"stage": "pre-call", "tool": name, "ok": False,
+                                               "problems": chk.problems, "call_id": tc["id"]})
+            sig = V.signature(name, chk.args if chk.args is not None else raw)
+            if self.guard.failed(sig):
+                return self._force_escalate(sig, name, chk.args, "; ".join(chk.problems))
+            return chk.feedback()
+        if chk.repaired:
+            self.emit("verifier", "verifier", {"stage": "pre-call", "tool": name, "ok": True,
+                                               "repaired": chk.repaired, "call_id": tc["id"]})
+        args = chk.args
+        sig = V.signature(name, args)
+        if sig in self.guard.escalated:
+            return {"ok": False, "error": {"code": "POLICY_BLOCKED", "message": "this call was already escalated to "
+                                           "the owner after repeated failures", "retryable": False},
+                    "verifier": {"action": "stop", "suggestion": "do not call it again; finish with a summary"}}
+        if sig in self.guard.blocked:
+            self.emit("verifier", "verifier", {"stage": "pre-call", "tool": name, "ok": False,
+                                               "problems": ["identical call was already refused"]})
+            if self.guard.failed(sig):
+                return self._force_escalate(sig, name, args, "the same refused call was repeated")
+            return {"ok": False, "error": {"code": "POLICY_BLOCKED", "message": "you already made this exact call and "
+                                           "it was refused; repeating it will not work", "retryable": False},
+                    "verifier": {"action": "change course",
+                                 "suggestion": "fix what the refusal named, or escalate_to_owner"}}
+
+        attempt = 0
+        while True:
+            env = self._call(name, args, tc["id"], attempt)
+            problems = V.check_result(name, env)
+            if problems:
+                self.emit("verifier", "verifier", {"stage": "result", "tool": name, "ok": False, "problems": problems})
+                error = {"code": "MALFORMED_RESULT", "message": "tool returned malformed data: " + "; ".join(problems),
+                         "retryable": True}
+            elif not env["ok"]:
+                error = env["error"]
+            else:
+                self._record_success(name, args, env)
+                return env
+            if name == "publish_listing":
+                self.tried_channels.setdefault(args.get("listing_id", ""), set()).add(args.get("channel"))
+            d = V.decide(name, args, error, attempt, max_retries=self.cfg.max_retries,
+                         backoff_base_s=self.cfg.backoff_base_s,
+                         tried_channels=self.tried_channels.get(args.get("listing_id", ""), set()))
+            self.emit("verifier", "verifier", {"stage": "policy", "tool": name, "code": error.get("code"),
+                                               "action": d.action, "note": d.note})
+            if d.action == "retry":
+                self.emit("retry", "verifier", {"tool": name, "attempt": attempt + 1, "delay_s": d.delay_s,
+                                                "code": error.get("code")})
+                self.sleep(d.delay_s)
+                attempt += 1
+                continue
+            if d.action == "fallback":
+                self.emit("fallback", "verifier", {"tool": name, "code": error.get("code"), "note": d.note,
+                                                   "suggestion": d.suggestion, "alternatives": d.alternatives})
+            if error.get("code") in V.NO_RETRY:
+                self.guard.blocked.add(sig)
+            if self.guard.failed(sig):
+                return self._force_escalate(sig, name, args, f"{error.get('code')}: {error.get('message')}")
+            fb = {"action": d.action, "note": d.note, "attempts": attempt + 1}
+            if d.suggestion:
+                fb["suggestion"] = d.suggestion
+            if d.alternatives:
+                fb["alternatives"] = d.alternatives
+            if error.get("code") == "MALFORMED_RESULT":
+                fb["suggestion"] = "the data could not be trusted; do not use it, try another way or escalate"
+            return {"ok": False, "error": error, "verifier": fb}
+
+    def _call(self, name, args, call_id, attempt=0):
+        self.n_calls += 1
+        self.emit("tool_call", "operator", {"tool": name, "args": args, "call_id": call_id, "attempt": attempt})
+        try:
+            env = toolbox.call(self.be, self.world, name, args)
+        except Exception as e:  # tools must not raise; if they do, treat as upstream error
+            env = {"ok": False, "error": {"code": "UPSTREAM_ERROR", "message": f"{type(e).__name__}: {e}",
+                                          "retryable": True}}
+        self.emit("tool_result", "system", {"tool": name, "call_id": call_id, "ok": env.get("ok") if isinstance(env, dict) else None,
+                                            "result": env})
+        if not self.cfg.verifier and isinstance(env, dict) and env.get("ok"):
+            self._record_success(name, args, env)
+        return env
+
+    def _record_success(self, name, args, env):
+        self.ledger.append({"name": name, "args": args, "data": env.get("data")})
+        if name == "publish_listing":
+            self.tried_channels.setdefault(args.get("listing_id", ""), set()).add(args.get("channel"))
+        if name == "escalate_to_owner":
+            esc = (env.get("data") or {}).get("escalation") or env.get("data") or {}
+            self.escalations.append(esc.get("esc_id", "?"))
+            self.emit("escalation", "operator", {"reason": args.get("reason"), "ref_id": args.get("ref_id"),
+                                                 "esc_id": esc.get("esc_id"), "forced": False})
+
+    def _force_escalate(self, sig, name, args, why, reason=None) -> dict:
+        self.guard.escalated.add(sig)
+        reason = (reason or f"{name} failed {self.guard.count(sig)} times: {why}")[:500]
+        ea = {"reason": reason, "ref_id": V.ref_from(args)}
+        env = toolbox.call(self.be, self.world, "escalate_to_owner", ea)
+        esc = ((env or {}).get("data") or {}).get("escalation") or {}
+        if env.get("ok"):
+            self.ledger.append({"name": "escalate_to_owner", "args": ea, "data": env.get("data")})
+            self.escalations.append(esc.get("esc_id", "?"))
+        self.emit("escalation", "verifier", {"reason": reason, "ref_id": ea["ref_id"], "esc_id": esc.get("esc_id"),
+                                             "forced": True})
+        return {"ok": False, "error": {"code": "POLICY_BLOCKED", "message": reason, "retryable": False},
+                "verifier": {"action": "escalated", "esc_id": esc.get("esc_id"),
+                             "suggestion": "I escalated this to the owner. Do not call it again; continue with other "
+                                           "work or finish with a summary."}}
+
+
+def run(world, goal_or_inbound, client=None, model: str | None = None, max_steps: int | None = None, *,
+        config: RunConfig | None = None, sink=None, backend=None, history: list[dict] | None = None,
+        run_id: str | None = None, sleep=time.sleep) -> RunResult:
+    cfg = config or RunConfig()
+    if model:
+        cfg = cfg.with_(model=model)
+    if max_steps:
+        cfg = cfg.with_(max_steps=max_steps)
+    be = backend or toolbox.backend()
+    run_id = run_id or f"r_{uuid.uuid4().hex[:8]}"
+    if sink is None:
+        sink = toolbox.make_sink(be, run_id)
+    if client is None:
+        from openai import OpenAI
+        client = OpenAI(base_url=cfg.base_url, api_key=cfg.api_key)
+    R = _Runner(world, client, cfg, sink, be, sleep)
+
+    st = toolbox.state(world)
+    pol = st.get("policy") or {}
+    facts = {"today": str(st.get("clock", ""))[:10] or None, "spend_limit_usd": pol.get("spend_limit_usd"),
+             "showing_hours": pol.get("showing_hours")}
+    if history:
+        messages = list(history)
+    else:
+        messages = [{"role": "system", "content": load_prompt(cfg, facts)}]
+    opening, who = _opening(goal_or_inbound)
+    messages.append({"role": "user", "content": opening})
+    if who == "owner":
+        R.emit("owner_message", "owner", {"text": opening[len("Owner: "):]})
+    before = toolbox.snapshot(world)
+
+    status, final_text, checks, rounds_left, steps = "max_steps", "", [], cfg.self_check_rounds, 0
+    while steps < cfg.max_steps:
+        steps += 1
+        kw = {"model": cfg.model, "messages": messages, "tools": R.tools, "tool_choice": "auto",
+              "temperature": cfg.temperature, "max_tokens": cfg.max_tokens}
+        if cfg.reasoning is not None:
+            kw["extra_body"] = {"chat_template_kwargs": {"enable_thinking": cfg.reasoning}}
+        resp, err = None, None
+        for attempt in range(cfg.max_retries + 1):
+            try:
+                resp = client.chat.completions.create(**kw)
+                break
+            except Exception as e:  # network / server errors
+                err = f"{type(e).__name__}: {e}"
+                R.emit("retry", "verifier", {"tool": "<model>", "attempt": attempt + 1, "error": err[:300]})
+                sleep(min(cfg.backoff_base_s * (2 ** attempt), 8.0))
+        if resp is None:
+            status, final_text = "model_error", err or "model call failed"
+            break
+        m = normalize(resp)
+        calls = m["tool_calls"]
+        if not calls and cfg.verifier:
+            calls, m["content"] = inline_tool_calls(m["content"]) if "<tool_call>" in m["content"] else ([], m["content"])
+            if calls:
+                R.emit("verifier", "verifier", {"stage": "parse", "ok": True,
+                                                "repaired": [f"recovered {len(calls)} tool call(s) from text"]})
+        R.emit("model_message", "operator", {"text": m["content"], "tool_calls": [c["function"]["name"] for c in calls],
+                                             "reasoning": m["reasoning"][:2000] if m["reasoning"] else None,
+                                             "step": steps})
+        am = {"role": "assistant", "content": m["content"] or ""}
+        if calls:
+            am["tool_calls"] = calls
+        if cfg.keep_reasoning_in_history and m["reasoning"]:
+            am["reasoning_content"] = m["reasoning"]
+        messages.append(am)
+
+        if calls:
+            for tc in calls:
+                out = R.execute(tc)
+                messages.append({"role": "tool", "tool_call_id": tc["id"],
+                                 "content": json.dumps(out, default=str, ensure_ascii=False)})
+            continue
+
+        final_text = m["content"]
+        if not cfg.verifier:
+            status = "done"
+            break
+        checks = V.self_check(before, toolbox.snapshot(world), R.ledger, final_text)
+        R.emit("verifier", "verifier", {"stage": "self-check", "ok": not checks, "problems": checks})
+        if not checks:
+            status = "done"
+            break
+        if rounds_left <= 0:
+            status = "done_unverified"
+            break
+        rounds_left -= 1
+        messages.append({"role": "user", "content": "[verifier] Your summary does not match the world state: "
+                         + "; ".join(checks) + ". Do the missing actions now with tools, or correct the summary "
+                         "so it only states what actually happened."})
+
+    if status == "max_steps" and cfg.verifier:
+        R._force_escalate("__max_steps__", "run", {}, "",
+                          reason=f"step limit {cfg.max_steps} reached before the task finished")
+
+    return RunResult(run_id=run_id, status=status, final_text=final_text, steps=steps, tool_calls=R.n_calls,
+                     messages=messages, ledger=R.ledger, self_check=checks, escalations=R.escalations,
+                     events=list(getattr(sink, "events", []) or []), config=cfg.label())
