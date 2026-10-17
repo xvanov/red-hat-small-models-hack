@@ -1,0 +1,366 @@
+"""Score a model config on a task split.
+
+    python gym/run_eval.py --split heldout --run-name baseline                    # local loop, vLLM endpoint
+    python gym/run_eval.py --split heldout --run-name baseline --via nemo         # NeMo Gym rollout collection
+    python gym/run_eval.py --split heldout --run-name stub-smoke --stub           # no GPU: stub endpoint
+
+Writes results/<run_name>/{summary.json, per_task.jsonl} (plus nemo/ artifacts for --via nemo).
+
+Two runners, one scorer:
+  local  gym/rentus_env RolloutSession + rentus_operator.run (the real operator harness: prompt,
+         tool-description variant, verifier, reader, retries). Fast, and every RunConfig knob applies.
+  nemo   NeMo Gym 0.6.0 `gym eval run` with our resources server (resources_servers/rentus) and the
+         built-in simple_agent + vllm_model. The harness is NeMo's simple_agent, so the `verifier`
+         knob does not apply there; prompt, tool descriptions and reader do.
+Both call rentus_env.verify on the same trace format, so a task scores the same either way.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+import traceback
+import uuid
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
+from datetime import datetime, timezone
+from pathlib import Path
+from types import SimpleNamespace
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent
+for p in (HERE, REPO / "tools", REPO / "operator"):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+from rentus_env import RolloutSession, verify  # noqa: E402
+from rentus_env.backend import Backend  # noqa: E402
+
+RESULTS = HERE / "results"
+NEMO_VENV = HERE / ".venv-nemo"
+
+
+# ------------------------------------------------------------------------------------ config
+def load_env_file():
+    f = REPO / ".env"
+    if f.exists():
+        for line in f.read_text().splitlines():
+            if "=" in line and not line.lstrip().startswith("#"):
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+def make_config(args):
+    from rentus_operator import RunConfig
+    cfg = RunConfig(prompt_version=args.prompt, tool_descriptions=args.tools, verifier=not args.no_verifier,
+                    reader=not args.no_reader, max_steps=args.max_steps, temperature=args.temperature,
+                    reasoning={"on": True, "off": False}.get(args.reasoning))
+    if args.base_url:
+        cfg = cfg.with_(base_url=args.base_url)
+    if args.model:
+        cfg = cfg.with_(model=args.model)
+    return cfg
+
+
+def probe_models(base_url: str, api_key: str = "EMPTY", timeout=3.0) -> list[str] | None:
+    import urllib.request
+    try:
+        req = urllib.request.Request(base_url.rstrip("/") + "/models", headers={"Authorization": f"Bearer {api_key}"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return [m["id"] for m in json.load(r).get("data", [])]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+def start_stub() -> str:
+    import stub_endpoint
+    port = free_port()
+    threading.Thread(target=stub_endpoint.serve, args=(port,), daemon=True).start()
+    for _ in range(50):
+        if probe_models(f"http://127.0.0.1:{port}/v1"):
+            break
+        time.sleep(0.05)
+    return f"http://127.0.0.1:{port}/v1"
+
+
+def load_tasks(split: str, ids: list[str] | None = None, limit: int | None = None) -> list[dict]:
+    tasks = [json.loads(l) for l in open(HERE / "tasks" / f"{split}.jsonl")]
+    if ids:
+        tasks = [t for t in tasks if t["id"] in ids]
+    return tasks[:limit] if limit else tasks
+
+
+def opening_goal(task: dict, s: RolloutSession):
+    """What the operator is told at the start (same text in both runners)."""
+    if task.get("owner_instruction"):
+        return task["owner_instruction"]
+    cp = next(iter(s.counterparts.values()))
+    said = " ".join(l["say"] for l in cp.script if l.get("after") == "start")
+    return {"thread_id": cp.thread_id, "channel": cp.channel, "renter_name": cp.name, "text": said}
+
+
+def opening_text(goal) -> str:
+    from rentus_operator.loop import _opening
+    return _opening(goal)[0]
+
+
+# ------------------------------------------------------------------------------------ local
+def operator_backend(s: RolloutSession):
+    """A module-like backend for rentus_operator.run that routes every call through the session."""
+    be = s.backend
+    return SimpleNamespace(
+        __name__=f"gym[{be.name}]",
+        TOOLS=be.TOOLS,
+        tool_schemas=be.tool_schemas,
+        EventSink=getattr(be.mod, "EventSink", None),
+        load=lambda patch=None: be.new_world(patch),
+        call=lambda world, name, args, sink=None, actor="operator", call_id=None:
+            s.call(name, args, **({} if be.name == "shim" else {"sink": sink, "actor": actor, "call_id": call_id})),
+    )
+
+
+def run_local_task(task: dict, cfg, run_dir: Path) -> dict:
+    from openai import OpenAI
+    from rentus_operator import run
+    t0 = time.time()
+    s = RolloutSession(task, backend=Backend())
+    goal = opening_goal(task, s)
+    client = OpenAI(base_url=cfg.base_url, api_key=cfg.api_key, timeout=180, max_retries=1)
+    run_id = f"{task['id']}-{uuid.uuid4().hex[:6]}"
+    status, final_text, steps, err, messages = "error", "", 0, None, []
+    try:
+        res = run(s.world, goal, client=client, config=cfg.with_(max_steps=min(cfg.max_steps, task.get("max_turns", 30))),
+                  backend=operator_backend(s), run_id=run_id)
+        status, final_text, steps, messages = res.status, res.final_text, res.steps, res.messages
+    except Exception as e:  # noqa: BLE001 - a crashed rollout scores what it did
+        err = f"{type(e).__name__}: {e}"
+        traceback.print_exc()
+    r = verify(task, s.trace, s.final_state(), final_text)
+    (run_dir / "transcripts").mkdir(exist_ok=True)
+    (run_dir / "transcripts" / f"{task['id']}.json").write_text(json.dumps(
+        {"task_id": task["id"], "status": status, "messages": messages, "trace": s.trace, "renter_view": s.transcript},
+        default=str, ensure_ascii=False, indent=1))
+    return {**r, "subcategory": task.get("subcategory"), "status": status, "steps": steps, "error": err,
+            "final_text": final_text[:2000], "seconds": round(time.time() - t0, 2)}
+
+
+def run_local(tasks, cfg, run_dir: Path, workers: int) -> list[dict]:
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        out = list(ex.map(lambda t: run_local_task(t, cfg, run_dir), tasks))
+    return out
+
+
+# ------------------------------------------------------------------------------------ nemo
+def responses_tools(chat_tools: list[dict]) -> list[dict]:
+    out = []
+    for t in chat_tools:
+        f = t.get("function", t)
+        out.append({"type": "function", "name": f["name"], "description": f.get("description", ""),
+                    "parameters": f.get("parameters", {"type": "object", "properties": {}}), "strict": False})
+    return out
+
+
+def nemo_rows(tasks, cfg) -> list[dict]:
+    from rentus_operator.config import load_prompt
+    from rentus_operator import toolbox
+    rows = []
+    for t in tasks:
+        s = RolloutSession(t, backend=Backend())
+        tools = toolbox.tool_schemas(operator_backend(s), cfg.tool_descriptions, cfg.reader)
+        facts = s.world_facts()
+        sh = facts.get("showing_hours")
+        if isinstance(sh, dict):
+            facts["showing_hours"] = f"{sh.get('start')} to {sh.get('end')}"
+        rows.append({"responses_create_params": {
+                         "input": [{"role": "system", "content": load_prompt(cfg, facts)},
+                                   {"role": "user", "content": opening_text(opening_goal(t, s))}],
+                         "tools": responses_tools(tools), "temperature": cfg.temperature,
+                         "max_output_tokens": cfg.max_tokens},
+                     "task": t, "task_id": t["id"]})
+    return rows
+
+
+def run_nemo(tasks, cfg, run_dir: Path, workers: int) -> list[dict]:
+    gym_bin = NEMO_VENV / "bin" / "gym"
+    if not gym_bin.exists():
+        raise SystemExit(f"NeMo Gym is not installed at {NEMO_VENV}; run gym/setup_nemo_gym.sh first")
+    nd = run_dir / "nemo"
+    nd.mkdir(parents=True, exist_ok=True)
+    inp = nd / "input.jsonl"
+    with open(inp, "w") as f:
+        for row in nemo_rows(tasks, cfg):
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    out = nd / "rollouts.jsonl"
+    for p in nd.glob("rollouts*"):
+        p.unlink()
+    env = {**os.environ, "PATH": f"{NEMO_VENV / 'bin'}:{os.environ.get('PATH', '')}", "VIRTUAL_ENV": str(NEMO_VENV),
+           "MLFLOW_DISABLE_AGENT_HINT": "1"}
+    start = [str(gym_bin), "env", "start", "--config", "resources_servers/rentus/configs/rentus.yaml",
+             "--model-type", "vllm_model", "--model", cfg.model, "--model-url", cfg.base_url,
+             "--model-api-key", cfg.api_key or "EMPTY"]
+    collect = [str(gym_bin), "eval", "run", "--no-serve", "--agent", "rentus_simple_agent",
+               "--input", str(inp), "--output", str(out), "--num-repeats", "1", "--concurrency", str(workers),
+               "--no-health-check"]
+    (nd / "command.txt").write_text(" ".join(start) + "\n" + " ".join(collect) + "\n")
+    t0 = time.time()
+    env_log = open(nd / "gym_env.log", "w")
+    server = subprocess.Popen(start, cwd=HERE, env=env, stdout=env_log, stderr=subprocess.STDOUT, start_new_session=True)
+    try:
+        deadline = time.time() + 900
+        while True:
+            text = (nd / "gym_env.log").read_text(errors="replace")
+            if "servers ready!" in text:
+                break
+            if server.poll() is not None or "finished unexpectedly" in text or time.time() > deadline:
+                raise SystemExit(f"gym env start failed; see {nd / 'gym_env.log'}\n{text[-3000:]}")
+            time.sleep(2)
+        with open(nd / "gym_eval.log", "w") as log:
+            rc = subprocess.run(collect, cwd=HERE, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=3600).returncode
+    finally:
+        try:
+            os.killpg(server.pid, signal.SIGTERM)
+            server.wait(timeout=60)
+        except Exception:  # noqa: BLE001
+            try:
+                os.killpg(server.pid, signal.SIGKILL)
+            except Exception:  # noqa: BLE001
+                pass
+        env_log.close()
+    if rc != 0 or not out.exists():
+        tail = (nd / "gym_eval.log").read_text()[-3000:]
+        raise SystemExit(f"gym eval run failed (rc={rc}); see {nd / 'gym_eval.log'}\n{tail}")
+    by_id = {t["id"]: t for t in tasks}
+    results = []
+    for line in open(out):
+        r = json.loads(line)
+        task = by_id.get(r.get("task_id")) or r.get("task")
+        results.append({"task_id": task["id"], "category": task.get("category"), "subcategory": task.get("subcategory"),
+                        "reward": r.get("reward", 0.0), "pass": bool(r.get("task_pass")),
+                        "checks_passed": r.get("checks_passed"), "checks_total": r.get("checks_total"),
+                        "checks": r.get("checks", []), "tool_calls": r.get("tool_calls"), "status": "nemo",
+                        "steps": None, "error": None, "final_text": "", "seconds": None})
+    seen = {r["task_id"] for r in results}
+    for t in tasks:  # a rollout NeMo dropped counts as a zero
+        if t["id"] not in seen:
+            results.append({"task_id": t["id"], "category": t["category"], "subcategory": t.get("subcategory"),
+                            "reward": 0.0, "pass": False, "checks_passed": 0, "checks_total": len(t["checks"]),
+                            "checks": [], "tool_calls": 0, "status": "missing", "error": "no rollout"})
+    print(f"nemo rollouts: {len(results)} in {time.time() - t0:.0f}s")
+    return results
+
+
+# ------------------------------------------------------------------------------------ summary
+def summarize(results: list[dict], meta: dict) -> dict:
+    n = len(results)
+    cat = defaultdict(list)
+    for r in results:
+        cat[r["category"]].append(r)
+    checks = defaultdict(lambda: [0, 0])
+    for r in results:
+        for c in r.get("checks") or []:
+            checks[c["type"]][0] += c["pass"]
+            checks[c["type"]][1] += 1
+    return {**meta, "tasks": n,
+            "pass_rate": round(sum(r["pass"] for r in results) / n, 4) if n else 0.0,
+            "mean_reward": round(sum(r["reward"] for r in results) / n, 4) if n else 0.0,
+            "by_category": {k: {"tasks": len(v), "pass_rate": round(sum(r["pass"] for r in v) / len(v), 4),
+                                "mean_reward": round(sum(r["reward"] for r in v) / len(v), 4)} for k, v in sorted(cat.items())},
+            "check_pass_rate": {k: round(a / b, 4) for k, (a, b) in sorted(checks.items())},
+            "errors": sum(1 for r in results if r.get("error"))}
+
+
+def git_head() -> str | None:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=REPO, text=True).strip()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def evaluate(args, cfg=None) -> dict:
+    load_env_file()
+    cfg = cfg or make_config(args)
+    stub = args.stub
+    if stub:
+        cfg = cfg.with_(base_url=start_stub() if args.via == "local" else cfg.base_url, model="stub")
+    if not stub:
+        models = probe_models(cfg.base_url, cfg.api_key)
+        if models is None:
+            raise SystemExit(f"model endpoint {cfg.base_url} is not reachable; rerun with --stub to test plumbing")
+        if not args.model and "OPERATOR_MODEL" not in os.environ and models:
+            cfg = cfg.with_(model=models[0])
+    tasks = load_tasks(args.split, args.ids.split(",") if args.ids else None, args.limit)
+    run_dir = RESULTS / args.run_name
+    if run_dir.exists() and not args.keep:
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    stub_proc = None
+    if stub and args.via == "nemo":
+        port = free_port()
+        stub_proc = subprocess.Popen([sys.executable, str(HERE / "stub_endpoint.py"), "--port", str(port)])
+        time.sleep(0.5)
+        cfg = cfg.with_(base_url=f"http://127.0.0.1:{port}/v1")
+    t0 = time.time()
+    try:
+        results = (run_nemo if args.via == "nemo" else run_local)(tasks, cfg, run_dir, args.workers)
+    finally:
+        if stub_proc:
+            stub_proc.terminate()
+    order = {t["id"]: i for i, t in enumerate(tasks)}
+    results.sort(key=lambda r: order.get(r["task_id"], 1e9))
+    with open(run_dir / "per_task.jsonl", "w") as f:
+        for r in results:
+            f.write(json.dumps(r, ensure_ascii=False, default=str) + "\n")
+    cfg_d = {k: v for k, v in asdict(cfg).items() if k != "api_key"}
+    meta = {"run_name": args.run_name, "split": args.split, "via": args.via, "stub": stub,
+            "model": cfg.model, "base_url": cfg.base_url, "config_label": cfg.label(), "config": cfg_d,
+            "tools_backend": Backend().name, "git": git_head(),
+            "nemo_gym_version": "0.6.0" if args.via == "nemo" else None,
+            "started": datetime.fromtimestamp(t0, timezone.utc).isoformat(timespec="seconds"),
+            "seconds": round(time.time() - t0, 1)}
+    summary = summarize(results, meta)
+    (run_dir / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
+    print(json.dumps({k: summary[k] for k in ("run_name", "via", "model", "config_label", "tasks", "pass_rate",
+                                              "mean_reward", "by_category", "check_pass_rate", "errors")}, indent=1))
+    return summary
+
+
+def build_parser():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--split", default="heldout", choices=["train", "heldout"])
+    ap.add_argument("--run-name", required=True)
+    ap.add_argument("--via", default="local", choices=["local", "nemo"])
+    ap.add_argument("--stub", action="store_true", help="use gym/stub_endpoint.py instead of a model (plumbing only)")
+    ap.add_argument("--base-url", default=None, help="default: $OPERATOR_BASE_URL or http://localhost:8000/v1")
+    ap.add_argument("--model", default=None, help="default: $OPERATOR_MODEL or the endpoint's first model")
+    ap.add_argument("--prompt", default="v1")
+    ap.add_argument("--tools", default="verbose", choices=["verbose", "terse"])
+    ap.add_argument("--no-verifier", action="store_true")
+    ap.add_argument("--no-reader", action="store_true")
+    ap.add_argument("--reasoning", default="default", choices=["on", "off", "default"])
+    ap.add_argument("--temperature", type=float, default=0.2)
+    ap.add_argument("--max-steps", type=int, default=30)
+    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--ids", default=None, help="comma-separated task ids")
+    ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--keep", action="store_true", help="do not wipe an existing results dir")
+    return ap
+
+
+if __name__ == "__main__":
+    evaluate(build_parser().parse_args())
