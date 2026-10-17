@@ -1,9 +1,13 @@
 """Adapter over the tools package.
 
 Uses rentus_tools (W3) when importable, otherwise the local shim. Set
-RENTUS_TOOLS_BACKEND=shim to force the shim (the offline tests do this).
-Everything the operator needs from the tools side goes through this module, so
-when the real package lands only this file has to follow its API.
+RENTUS_TOOLS_BACKEND=shim to force the shim (the offline tests do this), or
+=real to require the real package. Everything the operator needs from the tools
+side goes through this module.
+
+Both backends share one convention: call(world, name, args, sink=, actor=,
+call_id=) runs the tool AND emits tool_call / tool_result / escalation /
+owner_message events to the sink, so the loop never emits those itself.
 """
 from __future__ import annotations
 
@@ -28,18 +32,19 @@ def backend(name: str | None = None) -> ModuleType:
 
 
 def tool_schemas(be: ModuleType, variant: str = "verbose", reader: bool = True) -> list[dict]:
-    """OpenAI tool schemas, with the description variant applied."""
-    getter = getattr(be, "tools_for", None)
+    """OpenAI tool schemas with the description variant applied."""
     tools = None
-    if callable(getter):
+    fn = getattr(be, "tool_schemas", None)
+    if callable(fn) and be is not shim:
         try:
-            tools = getter(variant)
-        except TypeError:
+            tools = fn(variant)
+        except (KeyError, TypeError):
             tools = None
-    tools = copy.deepcopy(tools if tools is not None else be.TOOLS)
+    native = tools is not None
+    tools = copy.deepcopy(tools if native else be.TOOLS)
     if not reader:
         tools = [t for t in tools if t["function"]["name"] != "read_reply"]
-    if variant == "terse":
+    if variant == "terse" and not native:
         for t in tools:
             f = t["function"]
             f["description"] = _first_sentence(f.get("description", ""))
@@ -53,18 +58,15 @@ def _first_sentence(s: str) -> str:
     return m.group(1) if m else s.strip()
 
 
-def call(be: ModuleType, world, name: str, args: dict) -> dict:
-    return be.call(world, name, args)
+def call(be: ModuleType, world, name: str, args: dict, *, sink=None, actor: str = "operator",
+         call_id: str | None = None) -> dict:
+    return be.call(world, name, args, sink=sink, actor=actor, call_id=call_id)
 
 
 def state(world) -> dict:
-    """The world's state as a plain dict, whatever the World class looks like."""
+    """The world's state as a plain dict (a copy for the real World)."""
     if isinstance(world, dict):
         return world
-    for attr in ("state", "data", "doc"):
-        v = getattr(world, attr, None)
-        if isinstance(v, dict):
-            return v
     for meth in ("to_dict", "snapshot"):
         f = getattr(world, meth, None)
         if callable(f):
@@ -78,44 +80,40 @@ def snapshot(world) -> dict:
     return copy.deepcopy({k: v for k, v in state(world).items() if not str(k).startswith("_")})
 
 
+def today(world) -> str | None:
+    c = state(world).get("clock")
+    if isinstance(c, dict):
+        c = c.get("now")
+    return str(c)[:10] if c else None
+
+
+def add_room(world, room: dict) -> bool:
+    """Add a room record if no room has that room_id. Works on both backends."""
+    rooms = world["rooms"] if isinstance(world, dict) else getattr(world, "rooms")
+    if any(r.get("room_id") == room.get("room_id") for r in rooms):
+        return False
+    room = copy.deepcopy(room)
+    room.setdefault("address_public", room.get("address"))
+    rooms.append(room)
+    return True
+
+
 def new_world(be: ModuleType, patch: dict | None = None):
-    for ctor in ("new_world", "load_world"):
-        f = getattr(be, ctor, None)
-        if callable(f):
-            return f(patch) if patch is not None else f()
-    W = getattr(be, "World", None)
-    if W is not None:
-        for m in ("load", "from_inventory", "default"):
-            f = getattr(W, m, None)
-            if callable(f):
-                try:
-                    return f(patch=patch) if patch else f()
-                except TypeError:
-                    continue
-        return W()
-    return shim.new_world(patch)
+    return be.load(patch=patch)
 
 
 def make_sink(be: ModuleType, run_id: str, path=None, on_event=None):
     Sink = getattr(be, "EventSink", None) or shim.EventSink
-    try:
-        return Sink(run_id=run_id, path=path, on_event=on_event)
-    except TypeError:
-        try:
-            return Sink(run_id, path)
-        except TypeError:
-            return shim.EventSink(run_id=run_id, path=path, on_event=on_event)
+    sink = Sink(run_id=run_id, path=path)
+    if on_event is not None:
+        if hasattr(sink, "subscribers"):
+            sink.subscribers.append(on_event)
+        else:
+            sink.on_event = on_event
+    return sink
 
 
 def emit(sink, type: str, actor: str, data: dict):
     if sink is None:
         return None
-    fn = getattr(sink, "emit", None)
-    if callable(fn):
-        try:
-            return fn(type=type, actor=actor, data=data)
-        except TypeError:
-            return fn({"type": type, "actor": actor, "data": data})
-    if callable(sink):
-        return sink({"type": type, "actor": actor, "data": data})
-    return None
+    return sink.emit(type, actor, data)

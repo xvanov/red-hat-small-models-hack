@@ -218,15 +218,14 @@ class _Runner:
             return {"ok": False, "error": error, "verifier": fb}
 
     def _call(self, name, args, call_id, attempt=0):
+        """Run one tool through the backend, which emits tool_call/tool_result events."""
         self.n_calls += 1
-        self.emit("tool_call", "operator", {"tool": name, "args": args, "call_id": call_id, "attempt": attempt})
         try:
-            env = toolbox.call(self.be, self.world, name, args)
+            env = toolbox.call(self.be, self.world, name, args, sink=self.sink, actor="operator", call_id=call_id)
         except Exception as e:  # tools must not raise; if they do, treat as upstream error
             env = {"ok": False, "error": {"code": "UPSTREAM_ERROR", "message": f"{type(e).__name__}: {e}",
                                           "retryable": True}}
-        self.emit("tool_result", "system", {"tool": name, "call_id": call_id, "ok": env.get("ok") if isinstance(env, dict) else None,
-                                            "result": env})
+            self.emit("tool_result", "system", {"tool": name, "call_id": call_id, "result": env})
         if not self.cfg.verifier and isinstance(env, dict) and env.get("ok"):
             self._record_success(name, args, env)
         return env
@@ -238,20 +237,24 @@ class _Runner:
         if name == "escalate_to_owner":
             esc = (env.get("data") or {}).get("escalation") or env.get("data") or {}
             self.escalations.append(esc.get("esc_id", "?"))
-            self.emit("escalation", "operator", {"reason": args.get("reason"), "ref_id": args.get("ref_id"),
-                                                 "esc_id": esc.get("esc_id"), "forced": False})
 
     def _force_escalate(self, sig, name, args, why, reason=None) -> dict:
         self.guard.escalated.add(sig)
         reason = (reason or f"{name} failed {self.guard.count(sig)} times: {why}")[:500]
-        ea = {"reason": reason, "ref_id": V.ref_from(args)}
-        env = toolbox.call(self.be, self.world, "escalate_to_owner", ea)
-        esc = ((env or {}).get("data") or {}).get("escalation") or {}
+        self.emit("verifier", "verifier", {"stage": "loop-guard", "ok": False, "tool": name,
+                                           "problems": [reason], "action": "force escalate_to_owner"})
+        env, ea = {}, {}
+        for ref in V.ref_candidates(args, self.ledger, toolbox.state(self.world))[:6]:
+            ea = {"reason": reason, "ref_id": ref}
+            env = toolbox.call(self.be, self.world, "escalate_to_owner", ea, sink=self.sink, actor="verifier",
+                               call_id=f"guard_{uuid.uuid4().hex[:6]}")
+            if env.get("ok") or (env.get("error") or {}).get("code") != "NOT_FOUND":
+                break
+        data = (env or {}).get("data") or {}
+        esc = data.get("escalation") or data
         if env.get("ok"):
-            self.ledger.append({"name": "escalate_to_owner", "args": ea, "data": env.get("data")})
+            self.ledger.append({"name": "escalate_to_owner", "args": ea, "data": data})
             self.escalations.append(esc.get("esc_id", "?"))
-        self.emit("escalation", "verifier", {"reason": reason, "ref_id": ea["ref_id"], "esc_id": esc.get("esc_id"),
-                                             "forced": True})
         return {"ok": False, "error": {"code": "POLICY_BLOCKED", "message": reason, "retryable": False},
                 "verifier": {"action": "escalated", "esc_id": esc.get("esc_id"),
                              "suggestion": "I escalated this to the owner. Do not call it again; continue with other "
@@ -277,7 +280,7 @@ def run(world, goal_or_inbound, client=None, model: str | None = None, max_steps
 
     st = toolbox.state(world)
     pol = st.get("policy") or {}
-    facts = {"today": str(st.get("clock", ""))[:10] or None, "spend_limit_usd": pol.get("spend_limit_usd"),
+    facts = {"today": toolbox.today(world), "spend_limit_usd": pol.get("spend_limit_usd"),
              "showing_hours": pol.get("showing_hours")}
     if history:
         messages = list(history)

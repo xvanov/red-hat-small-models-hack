@@ -99,7 +99,8 @@ def listing_demo(area_hint: str = "Appling", channels=("marketplace", "roomies")
     """Scripted run of the listing flow, used by `cli --stub`."""
     def pick(msgs):
         rooms = (tool_data(msgs, "list_rooms") or {}).get("rooms", [])
-        rid = rooms[0]["room_id"] if rooms else "R001"
+        hit = [r for r in rooms if area_hint.lower() in json.dumps(r).lower()] or rooms
+        rid = hit[0]["room_id"] if hit else "R001"
         return turn(call("get_room", room_id=rid), call("get_listing_media", room_id=rid),
                     reasoning="Two independent reads, call them in parallel.")
 
@@ -126,5 +127,5 @@ def listing_demo(area_hint: str = "Appling", channels=("marketplace", "roomies")
         lid = tool_data(msgs, "create_listing")["listing"]["listing_id"]
         return turn(call("report_to_owner", summary=f"Listing {lid} is live on {', '.join(channels)}."))
 
-    return [turn(call("list_rooms", area=area_hint)), pick, draft, create, publish, report,
+    return [turn(call("list_rooms")), pick, draft, create, publish, report,
             turn(content=f"I published the listing on {' and '.join(channels)} and reported to the owner.")]

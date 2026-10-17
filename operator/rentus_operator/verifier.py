@@ -179,35 +179,87 @@ class CallChecker:
 # --------------------------------------------------------------------------- 2. results
 
 NUM = (int, float)
+
+# Record specs: required keys -> type ("a|b" means either key), from contracts/tools.md §3.
+RECORDS: dict[str, dict] = {
+    "room": {"room_id": str, "rent": NUM, "address|address_public": str},
+    "room_summary": {"room_id": str},
+    "listing": {"listing_id": str, "status": str, "title": str, "body": str, "channels": dict},
+    "thread": {"thread_id": str, "channel": str, "messages": list},
+    "thread_summary": {"thread_id": str, "channel": str},
+    "renter": {"renter_id": str, "gate": dict},
+    "event": {"event_id": str, "start": str, "status": str},
+    "vendor": {"vendor_id": str, "name": str},
+    "quote": {"quote_id": str, "vendor_id": str, "amount": NUM},
+    "job": {"job_id": str, "status": str, "issue": str, "property": str},
+    "escalation": {"esc_id": str, "reason": str, "ref_id": str, "created_at": str},
+    "photo": {"name": str, "url": str},
+    "match": {"renter_id": str, "score": NUM},
+    "result": {"title": str, "url": str},
+}
+# Types of well-known optional fields, checked wherever they appear in a record.
+FIELD_TYPES = {"area": str, "zip": str, "address": str, "address_public": str, "type": str, "private_bath": bool,
+               "deposit": NUM, "available_from": str, "price": NUM, "language": str, "renter_name": str,
+               "end": str, "phone": str, "trade": str, "rating": NUM, "responds": bool, "quote_range": list,
+               "eta": str, "severity": str, "photos": list, "thread_ids": list, "messages": list,
+               "channels": dict, "gate": dict, "wants": dict, "reasons": list, "snippet": str, "count": NUM,
+               "gate_missing": list, "created": bool, "url": str, "post_id": str, "created_at": str,
+               "posted_at": str, "ts": str, "cost": NUM, "amount": NUM}
+
+# Per tool: top-level keys -> type | record name | [record name] | [type].
 SHAPES: dict[str, dict] = {
-    "list_rooms": {"rooms": list},
-    "get_room": {"room": {"room_id": str}},
-    "update_room": {"room": {"room_id": str}},
-    "create_listing": {"listing": {"listing_id": str, "status": str}},
-    "update_listing": {"listing": {"listing_id": str}},
-    "mark_filled": {"listing": {"listing_id": str, "status": str}},
+    "list_rooms": {"rooms": ["room_summary"]},
+    "get_room": {"room": "room"},
+    "update_room": {"room": "room"},
+    "create_listing": {"listing": "listing"},
+    "update_listing": {"listing": "listing"},
+    "mark_filled": {"listing": "listing"},
     "publish_listing": {"post_id": str, "status": str},
-    "get_listing_media": {"photos": list},
+    "get_listing_media": {"photos": ["photo"]},
     "check_listing_compliance": {"ok": bool, "findings": list},
-    "get_market_rent": {"zori": NUM},
-    "list_threads": {"threads": list},
-    "read_thread": {"thread": {"thread_id": str, "messages": list}},
+    "get_market_rent": {"zori": NUM, "as_of": str},
+    "list_threads": {"threads": ["thread_summary"]},
+    "read_thread": {"thread": "thread"},
     "send_message": {"message_id": str},
     "read_reply": {"lease": dict, "move_in": dict, "phone": dict, "occupants": dict, "reason": dict,
                    "intents": list, "language": str},
-    "upsert_renter": {"renter": {"renter_id": str}},
-    "match_renters": {"matches": list},
+    "upsert_renter": {"renter": "renter"},
+    "match_renters": {"matches": ["match"]},
     "find_showing_slots": {"slots": list},
-    "propose_showing": {"event": {"event_id": str, "status": str}},
-    "web_search": {"results": list},
+    "propose_showing": {"event": "event"},
+    "web_search": {"results": ["result"]},
     "fetch_page": {"text": str},
-    "find_vendors": {"vendors": list},
-    "request_quote": {"quote": {"quote_id": str, "amount": NUM}},
-    "book_vendor": {"job": {"job_id": str, "status": str}},
-    "create_job": {"job": {"job_id": str}},
-    "escalate_to_owner": {"escalation": {"esc_id": str}},
+    "find_vendors": {"vendors": ["vendor"]},
+    "request_quote": {"quote": "quote"},
+    "book_vendor": {"job": "job"},
+    "create_job": {"job": "job"},
+    "escalate_to_owner": {"escalation": "escalation"},
     "report_to_owner": {"ok": bool},
 }
+
+
+def _is(v, want) -> bool:
+    if want is NUM or want is int or want is float:
+        return isinstance(v, NUM) and not isinstance(v, bool)
+    return isinstance(v, want)
+
+
+def _record_errors(rec, kind: str, path: str) -> list[str]:
+    if not isinstance(rec, dict):
+        return [f"{path} should be a {kind} object, got {type(rec).__name__}"]
+    errs = []
+    for key, want in RECORDS[kind].items():
+        opts = key.split("|")
+        present = [k for k in opts if rec.get(k) is not None]
+        if not present:
+            errs.append(f"{path}.{key} missing")
+        for k in present:
+            if not _is(rec[k], want):
+                errs.append(f"{path}.{k} has wrong type {type(rec[k]).__name__}")
+    for k, want in FIELD_TYPES.items():
+        if k in rec and rec[k] is not None and not _is(rec[k], want) and k not in RECORDS[kind]:
+            errs.append(f"{path}.{k} has wrong type {type(rec[k]).__name__}")
+    return errs
 
 
 def _shape_errors(data, spec, path="data") -> list[str]:
@@ -215,14 +267,25 @@ def _shape_errors(data, spec, path="data") -> list[str]:
         return [f"{path} should be an object, got {type(data).__name__}"]
     errs = []
     for k, want in spec.items():
-        if k not in data or data[k] is None:
+        v = data.get(k)
+        if v is None:
             errs.append(f"{path}.{k} missing")
-        elif isinstance(want, dict):
-            errs += _shape_errors(data[k], want, f"{path}.{k}")
-        else:
-            ok = isinstance(data[k], want) and not (want is NUM and isinstance(data[k], bool))
-            if not ok:
-                errs.append(f"{path}.{k} has wrong type {type(data[k]).__name__}")
+        elif isinstance(want, str):
+            errs += _record_errors(v, want, f"{path}.{k}")
+        elif isinstance(want, list):
+            if not isinstance(v, list):
+                errs.append(f"{path}.{k} should be a list, got {type(v).__name__}")
+            else:
+                for i, item in enumerate(v[:50]):
+                    if isinstance(want[0], str):
+                        errs += _record_errors(item, want[0], f"{path}.{k}[{i}]")
+                    elif not _is(item, want[0]):
+                        errs.append(f"{path}.{k}[{i}] has wrong type {type(item).__name__}")
+        elif not _is(v, want):
+            errs.append(f"{path}.{k} has wrong type {type(v).__name__}")
+    for k, want in FIELD_TYPES.items():
+        if k in data and data[k] is not None and k not in spec and not _is(data[k], want):
+            errs.append(f"{path}.{k} has wrong type {type(data[k]).__name__}")
     return errs
 
 
@@ -244,9 +307,10 @@ def check_result(name: str, env) -> list[str]:
         return []
     data = env["data"]
     errs = _shape_errors(data, spec)
-    if errs and len(spec) == 1:  # tolerate a flat object where the contract shows a wrapper
+    if errs and len(spec) == 1:  # tolerate a flat record where the contract shows a wrapper
         (key, inner), = spec.items()
-        if isinstance(inner, dict) and isinstance(data, dict) and not _shape_errors(data, inner):
+        if isinstance(inner, str) and isinstance(data, dict) and key not in data \
+                and not _record_errors(data, inner, "data"):
             errs = []
     if not errs and name == "read_reply":
         for k in ("lease", "move_in", "phone", "occupants", "reason"):
@@ -317,12 +381,27 @@ class LoopGuard:
         return self.fails.get(sig, 0)
 
 
+REF_KEYS = ("thread_id", "listing_id", "job_id", "renter_id", "quote_id", "room_id", "event_id")
+
+
 def ref_from(args) -> str:
     if isinstance(args, dict):
-        for k in ("thread_id", "listing_id", "job_id", "renter_id", "quote_id", "room_id", "vendor_id"):
+        for k in REF_KEYS:
             if isinstance(args.get(k), str):
                 return args[k]
     return "run"
+
+
+def ref_candidates(args, ledger: list[dict], state: dict) -> list[str]:
+    """Ids an escalation could point at, best first: the failing call's own ids, ids
+    the run touched (latest first), then any thread or room in the world."""
+    out = []
+    for src in [args] + [c.get("args") for c in reversed(ledger)]:
+        if isinstance(src, dict):
+            out += [src[k] for k in REF_KEYS if isinstance(src.get(k), str)]
+    for coll, key in (("threads", "thread_id"), ("listings", "listing_id"), ("rooms", "room_id")):
+        out += [r.get(key) for r in (state.get(coll) or [])[:1] if isinstance(r, dict)]
+    return [x for x in dict.fromkeys(out) if x] or ["run"]
 
 
 # --------------------------------------------------------------------------- 4. self-check
@@ -344,7 +423,7 @@ def _operator_msgs(state: dict) -> set[str]:
     threads = list(state.get("threads", []) or [])
     for ch in (state.get("channels") or {}).values():
         if isinstance(ch, dict):
-            threads += ch.get("threads", []) or []
+            threads += [t for t in ch.get("threads", []) or [] if isinstance(t, dict)]
     for t in threads:
         for m in t.get("messages", []) or []:
             if m.get("from") == "operator":

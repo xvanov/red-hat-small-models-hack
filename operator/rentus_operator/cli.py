@@ -59,7 +59,10 @@ def printer(color: bool):
     def show(ev):
         t, d = ev["type"], ev.get("data", {})
         if t == "owner_message":
-            print(f"{c['b']}OWNER{c['x']}  {d.get('text')}")
+            if d.get("summary") is not None:
+                print(f"  {c['b']}report -> owner{c['x']}: {d['summary']}")
+            else:
+                print(f"{c['b']}OWNER{c['x']}  {d.get('text')}")
         elif t == "model_message":
             if d.get("reasoning"):
                 print(f"  {c['dim']}think: {_short(d['reasoning'], 120)}{c['x']}")
@@ -105,10 +108,9 @@ def build_world(be, patch_path: str | None, fixture: bool):
     patch = json.loads(Path(patch_path).read_text()) if patch_path else None
     world = toolbox.new_world(be, patch)
     if fixture and FIXTURE.exists():
-        st = toolbox.state(world)
-        rooms = st.setdefault("rooms", [])
+        rooms = toolbox.state(world).get("rooms", [])
         if not any("appling" in str(r.get("address", "")).lower() for r in rooms):
-            rooms.append(json.loads(FIXTURE.read_text())["room"])
+            toolbox.add_room(world, json.loads(FIXTURE.read_text())["room"])
     return world
 
 

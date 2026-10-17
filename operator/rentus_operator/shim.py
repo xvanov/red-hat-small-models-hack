@@ -79,13 +79,17 @@ TOOL_NAMES = {t["function"]["name"] for t in TOOLS}
 
 # --------------------------------------------------------------------------- world
 
+def load(patch: dict | None = None):
+    return new_world(patch)
+
+
 def new_world(patch: dict | None = None, inventory: Path | None = INVENTORY) -> dict:
     base = json.loads(Path(inventory).read_text()) if inventory and Path(inventory).exists() else {"rooms": []}
     w = {"rooms": base.get("rooms", []), "listings": [], "channels": {c: {"posts": [], "threads": []} for c in CHANNELS},
          "threads": [], "register": [], "calendar": [], "vendors": [], "quotes": [], "jobs": [], "escalations": [],
-         "reports": [], "policy": {"spend_limit_usd": 300, "showing_hours": "8 AM to 8 PM",
+         "owner_reports": [], "policy": {"spend_limit_usd": 300, "showing_hours": "8 AM to 8 PM",
                                    "lease_min_months_public": 12, "lease_floor_months": 6},
-         "clock": "2026-10-17T12:00:00-04:00", "faults": [], "_seq": {}, "_fault_state": {}}
+         "clock": {"now": "2026-10-17T09:00:00"}, "faults": [], "_seq": {}, "_fault_state": {}}
     for k, v in (patch or {}).items():
         w[k] = v
     return w
@@ -282,7 +286,7 @@ def _impl(w, name, a):
             if amt.replace(",", "") not in known:
                 return _err("POLICY_BLOCKED", f"price ${amt} is not in any room record", hint="quote the record")
         m = {"id": _id(w, "M"), "from": "operator", "text": text, "attachments": a.get("attachments", []),
-             "ts": w["clock"]}
+             "ts": w["clock"]["now"]}
         t["messages"].append(m)
         return _ok({"message_id": m["id"]})
     if name == "read_reply":
@@ -375,16 +379,31 @@ def _impl(w, name, a):
         return _ok({"job": j})
     if name == "escalate_to_owner":
         e = {"esc_id": _id(w, "X"), "reason": a["reason"], "ref_id": a["ref_id"], "draft": a.get("draft"),
-             "created_at": w["clock"]}
+             "created_at": w["clock"]["now"]}
         w["escalations"].append(e)
         return _ok({"escalation": e})
     if name == "report_to_owner":
-        w["reports"].append({"summary": a["summary"], "ts": w["clock"]})
+        w["owner_reports"].append({"summary": a["summary"], "ts": w["clock"]["now"]})
         return _ok({"ok": True})
     return _err("NOT_FOUND", f"unknown tool {name}")
 
 
-def call(world: dict, name: str, args: dict) -> dict:
+def call(world: dict, name: str, args: dict | None = None, *, sink=None, actor: str = "operator",
+         call_id: str | None = None) -> dict:
+    """Same signature and event behaviour as rentus_tools.call."""
+    if sink:
+        sink.emit("tool_call", actor, {"tool": name, "call_id": call_id, "args": args})
+    res = _call(world, name, args or {})
+    if sink:
+        sink.emit("tool_result", "system", {"tool": name, "call_id": call_id, "result": res})
+        if res["ok"] and name == "escalate_to_owner":
+            sink.emit("escalation", actor, res["data"])
+        if res["ok"] and name == "report_to_owner":
+            sink.emit("owner_message", actor, {"summary": (args or {}).get("summary")})
+    return res
+
+
+def _call(world: dict, name: str, args: dict) -> dict:
     if name not in TOOL_NAMES:
         return _err("NOT_FOUND", f"unknown tool {name}", hint="use one of the listed tools")
     tool = next(t for t in TOOLS if t["function"]["name"] == name)["function"]["parameters"]
