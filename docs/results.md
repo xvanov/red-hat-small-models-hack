@@ -84,6 +84,28 @@ gym/.venv/bin/python gym/results/_p21/table.py heldout-base heldout-guard+prompt
 
 Results JSON: `gym/results/<run>/summary.json` and `per_task.jsonl` (plus local transcripts or NeMo `nemo/rollouts.jsonl`).
 
+## Reference: frontier model (NOT RUN YET)
+
+**Status, 2026-10-17:** the harness is built and tested offline, but no frontier numbers exist yet. The OpenCode Zen key we were given (`OPENCODE_API_KEY`) answered `401 api_key_expired`, so nothing was spent ($0.00). The section below describes the method and how to run it once a fresh key is in place. This table gets filled in only from real runs.
+
+**Purpose.** This is a comparison point only. The frontier model is never part of the running system (organizers: the 33B limit covers the models loaded to run the app). It shows where the local 30B + 0.6B system lands against a frontier model on the same tasks, with the same scorer, at what cost and latency, given that the local system keeps all renter data on our own GPU.
+
+**Same harness, one switch.** `RunConfig(api="anthropic")` (CLI `--api anthropic`) swaps only the model client: `operator/rentus_operator/anthropic_client.py` translates the loop's OpenAI-style requests into Anthropic Messages API requests through the official `anthropic` SDK (1.11.0) and translates the responses back. The loop, prompt v3, tools, verifier, renter guard, style pre-check, reasoning history, tasks and `verify.py` are unchanged. The default stays `api="openai"`. Model: `claude-opus-5-5` (Claude Opus 5.5), effort `high`, thinking always on (the model does not allow turning it off). The model rejects `temperature`, so the loop's 0.2 is not sent. Thinking blocks are replayed unchanged on each turn, and prompt caching is on. Reader pinned to the rule-based fallback, as in the final row above. Spend: a process-wide meter adds up Zen's per-call `cost` (or list price, $4 in / $20 out per million tokens, if the field is missing) and refuses calls once `FRONTIER_BUDGET_USD` (default $25) is reached.
+
+**Estimated cost:** about $0.25 to $0.35 per task with caching, so about $15 to $22 for 2 seeds × 31 tasks, plus about $4 to $5 for a 400-row reader sample. That is near the $25 cap. Without caching it would be well over.
+
+```bash
+export FRONTIER_ENV_FILE=/path/to/env/with/OPENCODE_API_KEY FRONTIER_BUDGET_USD=25 FRONTIER_USAGE_LOG=gym/results/frontier-usage.jsonl
+gym/.venv/bin/python gym/ablate.py --run-name _ --split heldout --variants guard+prompt3+style+rhist \
+    --api anthropic --model claude-opus-5-5 --prefix heldout-frontier- --workers 4            # seed 1
+gym/.venv/bin/python gym/ablate.py --run-name _ --split heldout --variants guard+prompt3+style+rhist \
+    --api anthropic --model claude-opus-5-5 --prefix heldout-frontier- --seed-tag -s2 --workers 4   # seed 2
+gym/.venv/bin/python reader/eval.py --backend anthropic --model claude-opus-5-5 --label frontier-opus-5-5 \
+    --sample 400 --concurrency 8     # stratified 400-row sample; also rescores every existing reader on the same rows
+```
+
+Each operator run's `summary.json` gets a `reference_model` block (cost per task, task seconds, call count, total spend). Reader metrics go to `reader/results/frontier-opus-5-5.test.sample400.metrics.json` with `same_sample_baselines`. On the same 400 rows, the existing systems score close to their full-set numbers (exact match: fine-tuned 0.813 vs 0.791 on all 1,419 rows, fallback 0.555 vs 0.575, Lightning 0.123 vs 0.106, base 0.000), so the sample is a fair stand-in.
+
 ## Not measured yet / open
 
 - **Model reader vs fallback**: measured, see the (f) row. The earlier run `heldout-guard+prompt3+style+rhist+readermodel` stays flagged `invalid` (HTTP 401 on all 93 reads, every call fell back to rules); the valid runs are `...+readermodel-rerun` and `-rerun-s2`.

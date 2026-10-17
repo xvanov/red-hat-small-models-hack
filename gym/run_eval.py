@@ -64,6 +64,11 @@ def make_config(args):
     cfg = RunConfig(prompt_version=args.prompt, tool_descriptions=args.tools, verifier=not args.no_verifier,
                     reader=not args.no_reader, max_steps=args.max_steps, temperature=args.temperature,
                     reasoning={"on": True, "off": False}.get(args.reasoning))
+    if getattr(args, "api", "openai") == "anthropic":   # REFERENCE ONLY (frontier model), never the running system
+        from rentus_operator.anthropic_client import DEFAULT_MODEL
+        cfg = cfg.with_(api="anthropic", model=args.model or DEFAULT_MODEL, effort=args.effort,
+                        base_url="https://opencode.ai/zen")
+        return cfg
     if args.base_url:
         cfg = cfg.with_(base_url=args.base_url)
     if args.model:
@@ -137,12 +142,12 @@ def operator_backend(s: RolloutSession):
 
 
 def run_local_task(task: dict, cfg, run_dir: Path) -> dict:
-    from openai import OpenAI
     from rentus_operator import run
+    from rentus_operator.loop import make_client
     t0 = time.time()
     s = RolloutSession(task, backend=Backend())
     goal = opening_goal(task, s)
-    client = OpenAI(base_url=cfg.base_url, api_key=cfg.api_key, timeout=180, max_retries=1)
+    client = make_client(cfg, timeout=180, max_retries=1)
     run_id = f"{task['id']}-{uuid.uuid4().hex[:6]}"
     status, final_text, steps, err, messages = "error", "", 0, None, []
     try:
@@ -157,8 +162,15 @@ def run_local_task(task: dict, cfg, run_dir: Path) -> dict:
     (run_dir / "transcripts" / f"{task['id']}.json").write_text(json.dumps(
         {"task_id": task["id"], "status": status, "messages": messages, "trace": s.trace, "renter_view": s.transcript},
         default=str, ensure_ascii=False, indent=1))
-    return {**r, "subcategory": task.get("subcategory"), "status": status, "steps": steps, "error": err,
-            "final_text": final_text[:2000], "seconds": round(time.time() - t0, 2)}
+    out = {**r, "subcategory": task.get("subcategory"), "status": status, "steps": steps, "error": err,
+           "final_text": final_text[:2000], "seconds": round(time.time() - t0, 2)}
+    if getattr(client, "calls", None) is not None:   # reference backend: per-task model cost and latency
+        out["model_calls"] = len(client.calls)
+        out["cost_usd"] = round(sum(c.get("cost_usd") or 0 for c in client.calls), 5)
+        out["model_latency_s"] = round(sum(c.get("latency_s") or 0 for c in client.calls), 2)
+        out["usage"] = {k: sum((c.get("usage") or {}).get(k) or 0 for c in client.calls)
+                        for k in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")}
+    return out
 
 
 def run_local(tasks, cfg, run_dir: Path, workers: int) -> list[dict]:
@@ -304,7 +316,11 @@ def evaluate(args, cfg=None) -> dict:
     stub = args.stub
     if stub:
         cfg = cfg.with_(base_url=start_stub() if args.via == "local" else cfg.base_url, model="stub")
-    if not stub:
+    if cfg.api == "anthropic" and not stub:
+        from rentus_operator.anthropic_client import zen_api_key
+        if not zen_api_key():
+            raise SystemExit("api=anthropic needs OPENCODE_API_KEY (env, or the file named by $FRONTIER_ENV_FILE)")
+    elif not stub:
         models = probe_models(cfg.base_url, cfg.api_key)
         if models is None:
             raise SystemExit(f"model endpoint {cfg.base_url} is not reachable; rerun with --stub to test plumbing")
@@ -346,6 +362,16 @@ def evaluate(args, cfg=None) -> dict:
             "started": datetime.fromtimestamp(t0, timezone.utc).isoformat(timespec="seconds"),
             "seconds": round(time.time() - t0, 1)}
     summary = summarize(results, meta)
+    if cfg.api == "anthropic":
+        from rentus_operator.anthropic_client import METER
+        costs = [r.get("cost_usd") or 0 for r in results]
+        secs = sorted(r.get("seconds") or 0 for r in results)
+        summary["reference_model"] = {
+            "note": "REFERENCE ONLY: frontier model on the same harness, not part of the running system",
+            "provider": "OpenCode Zen (Anthropic Messages API)", "model": cfg.model, "effort": cfg.effort or "high",
+            "run_cost_usd": round(sum(costs), 4), "cost_per_task_usd": round(sum(costs) / len(costs), 4) if costs else None,
+            "task_seconds_p50": secs[len(secs) // 2] if secs else None, "task_seconds_mean": round(sum(secs) / len(secs), 1) if secs else None,
+            "model_calls": sum(r.get("model_calls") or 0 for r in results), "process_spend": METER.snapshot()}
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
     print(json.dumps({k: summary[k] for k in ("run_name", "via", "model", "config_label", "tasks", "pass_rate",
                                               "mean_reward", "by_category", "check_pass_rate", "errors")}, indent=1))
@@ -366,6 +392,9 @@ def build_parser():
     ap.add_argument("--no-reader", action="store_true")
     ap.add_argument("--reasoning", default="default", choices=["on", "off", "default"])
     ap.add_argument("--temperature", type=float, default=0.2)
+    ap.add_argument("--api", default="openai", choices=["openai", "anthropic"],
+                    help="anthropic = REFERENCE-ONLY frontier backend (OpenCode Zen), never the running system")
+    ap.add_argument("--effort", default=None, help="api=anthropic: output_config.effort (default high)")
     ap.add_argument("--max-steps", type=int, default=30)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--ids", default=None, help="comma-separated task ids")

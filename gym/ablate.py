@@ -111,6 +111,8 @@ def run_variant(a, spec: str, run_name: str, reader_url: str | None) -> dict:
 
 def wait_endpoint(cfg, max_wait_s: int = 1800):
     """Block until the model endpoint generates again (vLLM restarts / tunnel drops happen)."""
+    if getattr(cfg, "api", "openai") != "openai":
+        return   # reference backend: the SDK already retries; nothing to wait for
     import time
     from openai import OpenAI
     t0 = time.time()

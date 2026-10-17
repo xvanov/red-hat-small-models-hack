@@ -29,6 +29,9 @@ class RunConfig:
     api_key: str = field(default_factory=lambda: os.environ.get("OPERATOR_API_KEY", "EMPTY"))
     temperature: float = 0.2
     max_tokens: int = 2048
+    api: str = "openai"                   # "openai" (vLLM, the running system) | "anthropic" (REFERENCE ONLY:
+                                          # frontier model via anthropic_client.py, never part of the system)
+    effort: str | None = None             # api=anthropic only: output_config.effort (None = adapter default "high")
     reasoning: bool | None = None         # None = server default; True/False sent as chat_template_kwargs
     keep_reasoning_in_history: bool = False
 
@@ -53,6 +56,8 @@ class RunConfig:
             out += " format_facts=on"
         if self.keep_reasoning_in_history:
             out += " reasoning_history=on"
+        if self.api != "openai":
+            out += f" api={self.api} model={self.model}" + (f" effort={self.effort}" if self.effort else "")
         if self.reasoning is not None:
             out += f" reasoning={'on' if self.reasoning else 'off'}"
         return out

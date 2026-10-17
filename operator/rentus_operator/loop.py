@@ -297,6 +297,18 @@ class _Runner:
                                            "work or finish with a summary."}}
 
 
+def make_client(cfg: RunConfig, timeout: float | None = None, max_retries: int | None = None):
+    """The model client for cfg.api. "openai" (default) is the running system; "anthropic" is the
+    reference-only frontier backend (rentus_operator.anthropic_client)."""
+    if cfg.api == "anthropic":
+        from .anthropic_client import AnthropicChatAdapter
+        return AnthropicChatAdapter(model=cfg.model, effort=cfg.effort or "high",
+                                    max_tokens=max(cfg.max_tokens, 16000))
+    from openai import OpenAI
+    kw = {k: v for k, v in (("timeout", timeout), ("max_retries", max_retries)) if v is not None}
+    return OpenAI(base_url=cfg.base_url, api_key=cfg.api_key, **kw)
+
+
 def run(world, goal_or_inbound, client=None, model: str | None = None, max_steps: int | None = None, *,
         config: RunConfig | None = None, sink=None, backend=None, history: list[dict] | None = None,
         run_id: str | None = None, sleep=time.sleep) -> RunResult:
@@ -310,8 +322,7 @@ def run(world, goal_or_inbound, client=None, model: str | None = None, max_steps
     if sink is None:
         sink = toolbox.make_sink(be, run_id)
     if client is None:
-        from openai import OpenAI
-        client = OpenAI(base_url=cfg.base_url, api_key=cfg.api_key)
+        client = make_client(cfg)
     R = _Runner(world, client, cfg, sink, be, sleep)
 
     st = toolbox.state(world)

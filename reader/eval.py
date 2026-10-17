@@ -5,6 +5,9 @@ Backends:
             else the operator's shim), no model at all
   endpoint  any OpenAI-compatible chat endpoint (vLLM, Lightning, the fine-tuned
             reader) with the fixed prompt in reader/prompt.py
+  anthropic REFERENCE ONLY: a frontier model (default claude-opus-5-5) over the Anthropic
+            Messages API via OpenCode Zen, same prompt. Never part of the running system.
+            Needs the `anthropic` SDK (gym/.venv has it) and OPENCODE_API_KEY.
 
 Examples:
   python reader/eval.py --backend fallback
@@ -12,6 +15,11 @@ Examples:
       --model rentus-reader --label finetuned
   python reader/eval.py --backend endpoint --base-url $OPERATOR_BASE_URL \
       --model $OPERATOR_MODEL --label lightning --no-thinking
+
+  python reader/eval.py --backend anthropic --label frontier-opus-5-5 --sample 400 --concurrency 8
+
+--sample N scores a seeded sample stratified by source x language x gold move-in status, and
+rescores every existing <label>.<split>.preds.jsonl on the same rows (same_sample_baselines).
 
 Writes reader/results/<label>.<split>.metrics.json and .preds.jsonl.
 Metrics: exact match, per-field status / value accuracy, JSON validity, intent
@@ -152,6 +160,77 @@ def run_endpoint(rows: list[dict], a) -> list[dict]:
     return preds
 
 
+def run_anthropic(rows: list[dict], a) -> list[dict]:
+    """Frontier reference: same system prompt + user message, Messages API through the anthropic SDK."""
+    sys.path.insert(0, str(REPO / "operator"))
+    from rentus_operator.anthropic_client import METER, make_sdk_client, messages_create
+    sdk = make_sdk_client(timeout=a.timeout)
+
+    def one(r):
+        msgs = build_messages(r["input"])
+        system = "\n\n".join(m["content"] for m in msgs if m["role"] == "system")
+        body = {"model": a.model, "max_tokens": a.max_tokens, "system": system,
+                "messages": [{"role": m["role"], "content": m["content"]} for m in msgs if m["role"] != "system"]}
+        if a.effort:
+            body["output_config"] = {"effort": a.effort}
+        t0 = time.time()
+        text, err, cost, usage = None, None, None, None
+        try:
+            data = messages_create(sdk, METER, **body)
+            text = "".join(b.get("text", "") for b in data.get("content") or [] if b.get("type") == "text")
+            cost, usage = data.get("_cost_usd"), data.get("usage")
+        except Exception as e:  # noqa: BLE001 - budget cap, API errors: scored as an empty answer
+            err = f"{type(e).__name__}: {str(e)[:200]}"
+        return {"id": r["id"], "raw_text": text, "pred": parse_output(text) if text is not None else None,
+                "error": err, "latency_s": time.time() - t0, "cost_usd": cost, "usage": usage}
+
+    preds = []
+    with ThreadPoolExecutor(max_workers=a.concurrency) as ex:
+        for i, p in enumerate(ex.map(one, rows), 1):
+            preds.append(p)
+            if i % 50 == 0:
+                print(f"  {i}/{len(rows)} spent ${METER.snapshot()['spent_usd']:.2f}", file=sys.stderr)
+    return preds
+
+
+def stratified_sample(rows: list[dict], n: int, seed: int = 0) -> list[dict]:
+    """Seeded sample of n rows, proportional per stratum (source x language x gold move-in status)."""
+    import random
+    strata: dict[tuple, list[dict]] = {}
+    for r in rows:
+        g = canonical(r["output"])
+        strata.setdefault((r.get("source"), g["language"], g["move_in"]["status"]), []).append(r)
+    rng = random.Random(seed)
+    keys = sorted(strata, key=str)
+    quota = {k: len(strata[k]) * n / len(rows) for k in keys}
+    take = {k: int(quota[k]) for k in keys}
+    for k in sorted(keys, key=lambda k: quota[k] - take[k], reverse=True)[: n - sum(take.values())]:
+        take[k] += 1   # largest remainders
+    out = []
+    for k in keys:
+        out += rng.sample(strata[k], take[k])
+    order = {r["id"]: i for i, r in enumerate(rows)}
+    return sorted(out, key=lambda r: order[r["id"]])
+
+
+def same_sample_baselines(rows: list[dict], split: str, skip: str) -> dict:
+    """Rescore every existing full-split preds file on exactly these rows."""
+    out = {}
+    for f in sorted(RESULTS.glob(f"*.{split}.preds.jsonl")):
+        label = f.name[: -len(f".{split}.preds.jsonl")]
+        if label == skip:
+            continue
+        preds = [json.loads(l) for l in f.read_text().splitlines() if l.strip()]
+        ids = {r["id"] for r in rows}
+        sub = [p for p in preds if p["id"] in ids]
+        if len(sub) == len(rows):
+            m = score(rows, sub)
+            out[label] = {k: m[k] for k in ("exact_match", "json_valid", "intent_f1_micro", "language_acc")}
+            out[label]["vague_date_trap"] = m["vague_date_trap"]["rate"]
+            out[label].update({f_: m["fields"][f_]["status_and_value_acc"] for f_ in FIELDS})
+    return out
+
+
 # ---------------------------------------------------------------- scoring
 
 def _norm_val(field: str, v):
@@ -256,7 +335,7 @@ def score(rows: list[dict], preds: list[dict]) -> dict:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--backend", choices=["fallback", "endpoint"], required=True)
+    ap.add_argument("--backend", choices=["fallback", "endpoint", "anthropic"], required=True)
     ap.add_argument("--split", default="test", choices=["train", "dev", "test"])
     ap.add_argument("--limit", type=int, default=0, help="first N rows only (0 = all)")
     ap.add_argument("--base-url", default=None)
@@ -269,17 +348,34 @@ def main():
     ap.add_argument("--no-thinking", action="store_true", help="send chat_template_kwargs.enable_thinking=false")
     ap.add_argument("--json-mode", action="store_true", help="send response_format json_object")
     ap.add_argument("--extra-body", default=None, help="JSON merged into the request body")
+    ap.add_argument("--effort", default="medium", help="anthropic backend: output_config.effort (model default medium)")
+    ap.add_argument("--sample", type=int, default=0, help="seeded stratified sample of N rows (0 = all)")
+    ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
     load_env()
 
     rows = load_rows(a.split)
     if a.limit:
         rows = rows[:a.limit]
+    if a.sample:
+        rows = stratified_sample(rows, a.sample, a.seed)
     t0 = time.time()
     if a.backend == "fallback":
         name, preds = run_fallback(rows)
         label = a.label or "fallback"
         info = {"backend": "fallback", "impl": name}
+    elif a.backend == "anthropic":
+        a.model = a.model or "claude-opus-5-5"
+        if a.max_tokens == 400:
+            a.max_tokens = 8000   # thinking is always on for Opus 5.5 and counts against max_tokens
+        preds = run_anthropic(rows, a)
+        label = a.label or "frontier-" + re.sub(r"[^\w.-]", "_", a.model)
+        from rentus_operator.anthropic_client import METER
+        costs = [p["cost_usd"] for p in preds if p.get("cost_usd") is not None]
+        info = {"backend": "anthropic", "reference_only": True, "provider": "OpenCode Zen (Anthropic Messages API)",
+                "model": a.model, "effort": a.effort, "cost_usd": round(sum(costs), 4),
+                "cost_per_row_usd": round(sum(costs) / len(costs), 5) if costs else None,
+                "concurrency": a.concurrency, "spend": METER.snapshot()}
     else:
         a.base_url = a.base_url or os.environ.get("READER_BASE_URL")
         a.model = a.model or os.environ.get("READER_MODEL")
@@ -289,9 +385,13 @@ def main():
         label = a.label or re.sub(r"[^\w.-]", "_", a.model)
         info = {"backend": "endpoint", "model": a.model, "no_thinking": a.no_thinking, "json_mode": a.json_mode}
     m = {"label": label, "split": a.split, **info, "wall_s": round(time.time() - t0, 1), **score(rows, preds)}
+    if a.sample:
+        m["sample"] = {"n": len(rows), "seed": a.seed, "strata": "source x language x gold move_in status",
+                       "ids": [r["id"] for r in rows]}
+        m["same_sample_baselines"] = same_sample_baselines(rows, a.split, label)
 
     RESULTS.mkdir(exist_ok=True)
-    stem = RESULTS / f"{label}.{a.split}{'.limit' + str(a.limit) if a.limit else ''}"
+    stem = RESULTS / f"{label}.{a.split}{'.limit' + str(a.limit) if a.limit else ''}{'.sample' + str(a.sample) if a.sample else ''}"
     Path(f"{stem}.metrics.json").write_text(json.dumps(m, indent=1, ensure_ascii=False) + "\n")
     with open(f"{stem}.preds.jsonl", "w") as fh:
         for p in preds:
