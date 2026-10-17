@@ -75,6 +75,7 @@ def browser_page(platform: str, target: str, headless: bool | None = None) -> It
                                                         viewport={"width": 1280, "height": 900})
             try:
                 page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                _guard(page)
                 yield page
             finally:
                 ctx.close()
@@ -82,9 +83,18 @@ def browser_page(platform: str, target: str, headless: bool | None = None) -> It
             browser = pw.chromium.launch(headless=True if headless is None else headless)
             try:
                 ctx = browser.new_context(viewport={"width": 1100, "height": 900})
-                yield ctx.new_page()
+                page = ctx.new_page()
+                _guard(page)
+                yield page
             finally:
                 browser.close()
+
+
+def _guard(page) -> None:
+    """Swallow native file pickers (a stray click on a drop zone must not clear uploaded photos)
+    and dismiss any beforeunload / alert dialogs."""
+    page.on("filechooser", lambda fc: None)
+    page.on("dialog", lambda d: d.dismiss())
 
 
 def screenshot(page, platform: str, target: str, tag: str = "") -> str:
@@ -187,8 +197,8 @@ class Runner:
             if self.page.locator(sel).filter(visible=True).count() > 0:
                 raise AdapterError(
                     "LOGIN_REQUIRED", f"{self.platform} shows a login page",
-                    hint=f"owner runs: channels/.venv/bin/python -m channels.login {self.platform}"
-                    + (" --mock" if self.target == "mock" else ""),
+                    hint=(f"owner runs: channels/.venv/bin/python -m channels.login {self.platform}"
+                          if self.target == "live" else "mock login wall is on: switch it off at the mock control panel"),
                     details={"screenshot": screenshot(self.page, self.platform, self.target, "-login")})
         except AdapterError:
             raise
