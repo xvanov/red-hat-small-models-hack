@@ -207,3 +207,13 @@ def test_malformed_list_result(world):
     assert r["ok"]
     rooms = r["data"].get("rooms")
     assert not (isinstance(rooms, list) and rooms and set(rooms[0]) == set(world.rooms[0]) - {"amenities", "photos", "price_basis", "address"})
+
+
+def test_validation_without_jsonschema(world, monkeypatch):
+    import rentus_tools.core as core
+    monkeypatch.setattr(core, "jsonschema", None)
+    call_err(world, "get_room", {"room_id": 5}, "INVALID_ARGS")
+    call_err(world, "publish_listing", {"listing_id": "L1", "channel": "myspace"}, "INVALID_ARGS")
+    e = call_err(world, "find_showing_slots", {"room_id": "R023", "date_from": "10/18", "date_to": "2026-10-19"}, "INVALID_ARGS")
+    assert "YYYY-MM-DD" in e["message"]
+    call_ok(world, "get_room", {"room_id": "R023"})

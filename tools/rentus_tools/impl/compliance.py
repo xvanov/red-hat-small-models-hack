@@ -45,7 +45,8 @@ _RULES: list[tuple[str, str, str, str]] = [
     # Sex: 24 CFR 100.75(c)(1). Shared-living sex preference is permitted by HUD guidance, so caution only.
     (r"\b(female|male|women|men|girls?|guys?|ladies)( only| roommates? only| tenants? only)\b|\bsolo (mujeres|hombres|chicas|chicos)\b",
      "sex", "caution", "allowed only for shared living space; otherwise remove"),
-    (r"\bno (gays?|lesbians?|lgbt\w*|trans\w*)\b|\bstraight only\b", "sex", "violation", "remove"),
+    (r"\bno (gays?|lesbians?|lgbt\w*|trans\w*)\b|\bstraight only\b", "sex", "caution",
+     "remove; federal treatment has varied and many state and local laws protect sexual orientation and gender identity"),
     # Source of income: not covered by 24 CFR 100.75; some localities protect it. Severity set by policy.
     (r"\bno (section ?8|sección ?8|vouchers?|housing (choice )?vouchers?|housing assistance|hcv)\b",
      "source_of_income", "caution", "remove; voucher holders are protected in some jurisdictions"),

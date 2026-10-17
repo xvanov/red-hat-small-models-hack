@@ -5,7 +5,10 @@ import difflib
 import json
 from typing import Any, Callable
 
-import jsonschema
+try:
+    import jsonschema
+except ImportError:  # minimal built-in validator keeps the package importable with zero deps
+    jsonschema = None
 
 from .errors import ToolError, ok
 from .events import EventSink
@@ -58,21 +61,50 @@ def validate_args(name: str, args: Any) -> dict:
     if missing:
         raise ToolError("INVALID_ARGS", f"{name}: missing required argument(s) {', '.join(map(repr, missing))}",
                         hint=_arg_summary(name))
-    errors = sorted(jsonschema.Draft202012Validator(schema).iter_errors(args), key=lambda e: list(e.path))
-    if errors:
-        e = errors[0]
-        where = ".".join(str(p) for p in e.path) or "(args)"
-        msg = e.message
-        if e.validator == "pattern":
-            msg = f"{e.instance!r} has the wrong format"
-            if "T" in e.validator_value:
+    first = _first_error(schema, args)
+    if first:
+        where, kind, value, instance, msg = first
+        if kind == "pattern":
+            msg = f"{instance!r} has the wrong format"
+            if "T" in value:
                 msg += " (expected YYYY-MM-DDTHH:MM)"
-            elif r"\d{5}" in e.validator_value:
+            elif r"\d{5}" in value:
                 msg += " (expected a 5-digit ZIP)"
             else:
                 msg += " (expected YYYY-MM-DD)"
         raise ToolError("INVALID_ARGS", f"{name}: argument {where}: {msg}", hint=_arg_summary(name))
     return args
+
+
+_TYPES = {"string": str, "number": (int, float), "integer": int, "boolean": bool, "array": list, "object": dict}
+
+
+def _first_error(schema: dict, args: dict):
+    """(where, validator, validator_value, instance, message) for the first problem, or None."""
+    if jsonschema is not None:
+        errors = sorted(jsonschema.Draft202012Validator(schema).iter_errors(args), key=lambda e: list(e.path))
+        if not errors:
+            return None
+        e = errors[0]
+        return ".".join(str(p) for p in e.path) or "(args)", e.validator, e.validator_value, e.instance, e.message
+    import re
+    for k, v in args.items():
+        ps = schema["properties"][k]
+        t = ps.get("type")
+        if t and (not isinstance(v, _TYPES[t]) or (t in ("number", "integer") and isinstance(v, bool))):
+            return k, "type", t, v, f"{v!r} is not of type {t!r}"
+        if "enum" in ps and v not in ps["enum"]:
+            return k, "enum", ps["enum"], v, f"{v!r} is not one of {ps['enum']}"
+        if "pattern" in ps and not re.search(ps["pattern"], v):
+            return k, "pattern", ps["pattern"], v, "bad format"
+        if "minimum" in ps and v < ps["minimum"]:
+            return k, "minimum", ps["minimum"], v, f"{v} is less than {ps['minimum']}"
+        if t == "array" and "items" in ps:
+            it = ps["items"].get("type")
+            for x in v:
+                if it and not isinstance(x, _TYPES[it]):
+                    return k, "type", it, x, f"{x!r} is not of type {it!r}"
+    return None
 
 
 def call(world: World, name: str, args: Any = None, *, sink: EventSink | None = None,

@@ -114,3 +114,16 @@ JSONL, one task per line, in `gym/tasks/{train,heldout}.jsonl`. Held-out tasks a
 ```
 
 Counterparts are scripted (no model), driven by `when_asked` matching on the operator's last question; source utterances come from the published datasets. Scores: each check is pass/fail; a task passes when all checks pass; we report task pass rate plus per-check rates.
+
+## 8. Clarifications from the W3 implementation (Oct 17)
+
+These pin down details the sections above left open. None changes a shape another workstream already depends on.
+
+- **Layout.** The package directory is `tools/rentus_tools/` (so `tools/schemas.py` above means `tools/rentus_tools/schemas.py`). Vendor fixtures are `tools/rentus_tools/fixtures/vendors.json`.
+- **Data shapes.** Single records come wrapped in a key: `get_room` → `{"room": {...}}`, `create_listing`/`update_listing` → `{"listing": {...}, "compliance": {...}}`, `upsert_renter` → `{"renter", "created", "gate_missing"}`, `propose_showing` → `{"event"}`, `request_quote` → `{"quote"}`, `book_vendor` → `{"job"}`, `escalate_to_owner` → `{"escalation"}`. `read_reply` returns the reader JSON plus `backend: "model" | "fallback"`.
+- **World.** `clock` is `{"now": "YYYY-MM-DDTHH:MM:SS"}`. Rooms keep the inventory's `address` and get `address_public` as an alias. Extra top-level keys: `owner_reports[]`, `mode` (`sandbox` | `live`), `counters`, `meta`. Patches upsert record lists by id; `{"$replace": v}` replaces a value.
+- **Register.** `renter_id` is the thread's `renter_id` when the scenario sets one (e.g. `renter:maria`), else `renter:<slug of name>`. Gate items use the reader's shapes (`gate.move_in = {status, date, raw}`, others `{status, value}`).
+- **Gate complete** (what `propose_showing` requires): lease `answered` with value `true` (a conditional yes, `exception`, is not enough); move_in `answered` or `exception` with a date; phone `answered` or `exception` with a value; reason `answered`; occupants `answered` or `exception` with a value that fits the room's `max_occupants`.
+- **Hidden truth.** `find_vendors`, `web_search` and `fetch_page` never expose `responds` or `quote_range`.
+- **Faults.** Optional `match` (args subset) narrows a fault to some calls; `"tool": "*"` matches any tool. Counters `_seen`/`_fired` are stored on each fault dict. Invalid args never consume a fault.
+- **Compliance findings** also carry `severity` (`violation` blocks; `caution` is advisory) and `citation`.
