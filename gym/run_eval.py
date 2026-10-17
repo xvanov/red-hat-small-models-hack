@@ -217,7 +217,8 @@ def run_nemo(tasks, cfg, run_dir: Path, workers: int) -> list[dict]:
     collect = [str(gym_bin), "eval", "run", "--no-serve", "--agent", "rentus_simple_agent",
                "--input", str(inp), "--output", str(out), "--num-repeats", "1", "--concurrency", str(workers),
                "--no-health-check"]
-    (nd / "command.txt").write_text(" ".join(start) + "\n" + " ".join(collect) + "\n")
+    redact = lambda argv: " ".join("****" if i and argv[i - 1] == "--model-api-key" else x for i, x in enumerate(argv))
+    (nd / "command.txt").write_text(redact(start) + "\n" + redact(collect) + "\n")
     t0 = time.time()
     env_log = open(nd / "gym_env.log", "w")
     server = subprocess.Popen(start, cwd=HERE, env=env, stdout=env_log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -304,6 +305,12 @@ def evaluate(args, cfg=None) -> dict:
             raise SystemExit(f"model endpoint {cfg.base_url} is not reachable; rerun with --stub to test plumbing")
         if not args.model and "OPERATOR_MODEL" not in os.environ and models:
             cfg = cfg.with_(model=models[0])
+        from openai import OpenAI
+        try:  # preflight: /models can answer while generation is down
+            OpenAI(base_url=cfg.base_url, api_key=cfg.api_key, timeout=60, max_retries=1).chat.completions.create(
+                model=cfg.model, messages=[{"role": "user", "content": "ping"}], max_tokens=1)
+        except Exception as e:  # noqa: BLE001
+            raise SystemExit(f"model endpoint {cfg.base_url} cannot generate: {type(e).__name__}: {e}")
     tasks = load_tasks(args.split, args.ids.split(",") if args.ids else None, args.limit)
     run_dir = RESULTS / args.run_name
     if run_dir.exists() and not args.keep:
