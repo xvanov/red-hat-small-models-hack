@@ -18,7 +18,7 @@ SYSTEM_PROMPT = """You read one message from a person asking about a room for re
 Describe ONLY the latest renter message. Use the thread only to interpret it (a bare "yes" answers the lease question only if the operator just asked it).
 
 Return exactly this JSON object, no prose, no code fences:
-{"lease":{"status":S,"value":true|false|null},"move_in":{"status":S,"date":"YYYY-MM-DD"|null,"raw":"span as written"|null},"phone":{"status":S,"value":"+1XXXXXXXXXX"|null},"occupants":{"status":S,"value":integer|null},"reason":{"status":S,"value":"short normalized reason"|null},"intents":[...],"language":"en"|"es"}
+{"lease":{"status":S,"value":true|false|null},"move_in":{"status":S,"date":"YYYY-MM-DD"|null,"raw":"span as written"|null},"phone":{"status":S,"value":"+1XXXXXXXXXX"|null},"occupants":{"status":S,"value":integer|null},"reason":{"status":S,"value":"short normalized reason"|null},"intents":[zero or more label strings, e.g. "scheduling","question"],"language":"en"|"es"}
 S is one of: answered, vague, no, exception, absent (absent = the message does not touch this item).
 
 lease (one-year lease): answered = explicit yes (true). vague = "probably", "as long as necessary", "depends" (null). no = refuses a year (false). exception = yes with a condition such as subletting (true).
@@ -27,7 +27,7 @@ phone: answered = full 10-digit US number in any format, normalized to E.164 (+1
 occupants: number of people moving in (pets do not count: "me and my dog" = 1). vague = "maybe me and a friend". no = declines. exception = core count plus a part-time guest; value = core count.
 reason (why they are moving): answered = concrete reason ("new job at Duke", "current lease ending"), value is a short normalized phrase. vague = "need a change", "personal reasons" (null). no = declines (null).
 Values are null whenever status is vague, no or absent, except lease no = false.
-intents (zero or more, in this order): price_negotiation (asks for lower price or a deal), scheduling (wants to see the room or proposes/asks a showing time), small_talk (no qualifying content and no request: thanks, ok, emojis, compliments), not_now (interested but timing is later), hard_no (no longer interested / stop), shorter_lease (asks for less than 12 months or month-to-month), question (factual question about the room or listing).
+intents (a JSON list of label strings, zero or more, in this order): price_negotiation (asks for lower price or a deal), scheduling (wants to see the room or proposes/asks a showing time), small_talk (no qualifying content and no request: thanks, ok, emojis, compliments), not_now (interested but timing is later), hard_no (no longer interested / stop), shorter_lease (asks for less than 12 months or month-to-month), question (factual question about the room or listing).
 language: "es" if the message is Spanish, else "en"."""
 
 

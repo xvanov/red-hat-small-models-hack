@@ -63,26 +63,23 @@ def load_rows(split: str) -> list[dict]:
 # ---------------------------------------------------------------- backends
 
 def _fallback_fn():
-    """Find the deterministic read_reply fallback. Prefer rentus_tools (W3), else the operator shim."""
+    """Find the deterministic read_reply fallback: W3's rentus_tools reader if present, else the operator shim.
+    Returns (name, fn(input_dict) -> reader JSON)."""
     for p in (REPO / "tools", REPO / "operator"):
         sys.path.insert(0, str(p))
-    try:  # W3's package, if it exposes a plain function
-        import importlib
-        for mod in ("rentus_tools.impl.reader", "rentus_tools.reader", "rentus_tools.impl"):
-            try:
-                m = importlib.import_module(mod)
-            except ImportError:
-                continue
-            for name in ("read_reply_fallback", "read_reply"):
-                fn = getattr(m, name, None)
-                if callable(fn):
-                    return f"{mod}.{name}", lambda text, pending: _unwrap(fn(text=text, pending_item=pending))
-    except Exception:  # noqa: BLE001
+    try:
+        from rentus_tools.impl.reader import read_reply_fallback
+        return "rentus_tools.impl.reader.read_reply_fallback", lambda inp: read_reply_fallback(
+            inp["message"], context=inp.get("context") or [], today=inp["today"])
+    except ImportError:
         pass
     from rentus_operator import shim
     world = shim.new_world()
-    return "rentus_operator.shim.read_reply", lambda text, pending: _unwrap(
-        shim.call(world, "read_reply", {"text": text, **({"pending_item": pending} if pending else {})}))
+
+    def via_shim(inp):
+        pending = pending_item(inp)
+        return _unwrap(shim.call(world, "read_reply", {"text": inp["message"], **({"pending_item": pending} if pending else {})}))
+    return "rentus_operator.shim.read_reply", via_shim
 
 
 def _unwrap(res):
@@ -107,7 +104,7 @@ def run_fallback(rows: list[dict]) -> tuple[str, list[dict]]:
     preds = []
     for r in rows:
         t0 = time.time()
-        out = fn(r["input"]["message"], pending_item(r["input"]))
+        out = fn(r["input"])
         preds.append({"id": r["id"], "raw_text": json.dumps(out, ensure_ascii=False), "pred": out,
                       "latency_s": time.time() - t0})
     return name, preds
@@ -140,7 +137,7 @@ def run_endpoint(rows: list[dict], a) -> list[dict]:
                 msg = resp["choices"][0]["message"]
                 text = msg.get("content") or ""
                 break
-            except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError) as e:
+            except (OSError, KeyError, IndexError, json.JSONDecodeError) as e:
                 err = f"{type(e).__name__}: {str(e)[:200]}"
                 time.sleep(1 + attempt)
         return {"id": r["id"], "raw_text": text, "pred": parse_output(text), "error": None if text is not None else err,
@@ -209,7 +206,8 @@ def score(rows: list[dict], preds: list[dict]) -> dict:
             fboth[f] += s_ok and v_ok
             all_fields &= s_ok and v_ok
         g_int = set(gold["intents"])
-        p_int = set((pred or {}).get("intents") or []) if isinstance((pred or {}).get("intents"), list) else set()
+        raw_int = (pred or {}).get("intents")
+        p_int = {i for i in raw_int if isinstance(i, str)} if isinstance(raw_int, list) else set()
         for lab in INTENTS:
             tp[lab] += lab in g_int and lab in p_int
             fp[lab] += lab not in g_int and lab in p_int
