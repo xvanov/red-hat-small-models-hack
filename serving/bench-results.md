@@ -29,3 +29,18 @@ prompt ≈ 3939 tokens shared prefix + short unique turn, output 256 tokens (ign
 Not measured: the engine crashed with `CUDA error: an illegal memory access` (FlashInfer attention metadata build) at concurrency 4, with async scheduling on and again with it off. Single requests worked and logged a mean acceptance length of about 3.0–3.3 (per-position acceptance ≈ 0.79 / 0.66 / 0.55). MTP is left off.
 
 Caveat: other workstreams started calling this server around 11:45 ET, so the "prefix caching OFF" run above may include some of their traffic. Re-run both on a quiet server before quoting.
+
+### RE-RUN prefix caching ON, MTP off — NOT a quiet server — 2026-10-17 12:13 EDT
+
+prompt ≈ 3939 tokens shared prefix + short unique turn, output 256 tokens (ignore_eos), thinking off, streamed.
+
+| concurrency | requests | aggregate tok/s | per-request tok/s | p50 latency | p95 latency | p50 TTFT | p95 TTFT |
+|---|---|---|---|---|---|---|---|
+| 1 | 8 | 30 | 30 | 8.52s | 9.41s | 325 ms | 476 ms |
+| 4 | 8 | 121 | 30 | 8.45s | 8.52s | 588 ms | 602 ms |
+| 16 | 32 | 390 | 25 | 10.46s | 11.26s | 1171 ms | 1939 ms |
+| 32 | 64 | 670 | 21 | 12.13s | 12.97s | 2082 ms | 3430 ms |
+
+The 12:11 ET re-run above shared the GPU with about 16 concurrent gym-agent requests (3–5k prompt tok/s) **and** the W6 reader fine-tune running on the same GPU (7 GB, GPU at 98%). Per-request speed dropped about 8x vs the 11:37 run. Use it as a "server under real team load" data point, not a clean config comparison. Soak at the same time: 16 concurrent x 160 requests x 512 tokens, 0 errors, 422 tok/s total for this client, p50 19.6 s, p95 20.7 s, while the engine reported ~530–880 tok/s generation overall and KV cache usage under 3%.
+
+The prefix caching OFF re-run was **not** done: the server never went quiet (gym + reader training), and switching caching needs a ~2.5 min vLLM restart that would break their runs. To do it later on an idle server: `PREFIX_CACHE=off bash ~/serving/start_vllm.sh`, `uv run serving/bench.py --label ... --out serving/bench-results.md`, then `bash ~/serving/start_vllm.sh` again.

@@ -64,6 +64,13 @@ Notes for the operator loop (W2):
 - **The model sometimes writes IDs with Unicode hyphens** (`L‑1042` with U+2011). Normalize dashes before matching IDs or amounts in its text (`smoke_test.py` has `norm()`). Tool-call JSON arguments were plain ASCII in every run.
 - Sampling per the card: temperature 1.0, top_p 0.95.
 
+## Stability (checked 12:10 ET)
+
+- The one crash other workstreams saw (about 11:49 ET) was my second MTP test (CUDA illegal memory access), followed by my restart to the default config. The current container (created 11:49 ET) has `speculative_config=None`, 0 restarts, no OOM, no errors.
+- It held 16 concurrent agent requests from me plus ~16 from the gym with 0 errors. KV cache usage stays under 3% and the queue stays empty, so `--max-num-seqs 64` and `--gpu-memory-utilization 0.80` stay as they are.
+- The GPU is shared with the W6 reader fine-tune (7 GB, GPU at 98%). vLLM's 77.5 GB plus the training job's 7 GB leaves about 13 GB free. While training runs, operator speed drops a lot (about 30 tok/s per request vs 254 tok/s when idle).
+- `serving/watchdog.sh` (start | stop | once) polls `/v1/models` every 30 s. After 2 misses it restarts the tunnel, then logs the container state from the instance to `serving/.watchdog.log`.
+
 ## Benchmarks
 
 See `bench-results.md`. In short (shared ~2.5k-token system prompt, 256 output tokens, thinking off):
