@@ -39,9 +39,12 @@ VARIANTS = {
     "base": {},
     "guard": {"renter_guard": True},                                   # (a) harness: renter turn ends with send_message
     "prompt2": {"prompt_version": "v2"},                               # (b) system prompt v2, workflow per scenario
+    "prompt3": {"prompt_version": "v3"},                               # (b2) v2 + vendor-id/zip, exact address, ask-as-question
     "tools2": {"tool_descriptions": "v2"},                             # (c) tool-description variant
     "rhist": {"keep_reasoning_in_history": True},                      # (g) reasoning kept in history, like NeMo's
+    "facts": {"format_facts": True},                                   # (g) prompt facts formatted like the NeMo rows
     "think_off": {"reasoning": False},                                 # (e) reasoning off
+    "style": {"style_precheck": True},                                 # (d) verifier style pre-check on send_message
     "noverif": {"verifier": False},                                    # verifier off
     "noreader": {"reader": False},                                     # (f) reader out of the loop
     "readermodel": {"_reader_backend": "model"},                       # (f) fine-tuned reader instead of fallback
@@ -67,9 +70,52 @@ def run_variant(a, spec: str, run_name: str, reader_url: str | None) -> dict:
     va.run_name = run_name
     s = run_eval.evaluate(va, cfg)
     d = run_eval.RESULTS / run_name
+    retried = []
+    for _ in range(a.retry_errors):  # endpoint outages: rerun only the rollouts that never reached the model
+        rows = [json.loads(l) for l in open(d / "per_task.jsonl")]
+        bad = [r["task_id"] for r in rows if r.get("status") in ("model_error", "missing") or r.get("error")]
+        if not bad:
+            break
+        wait_endpoint(cfg)
+        retried += bad
+        vr = argparse.Namespace(**vars(va))
+        vr.run_name, vr.ids, vr.limit = f"_retry-{run_name}", ",".join(bad), None
+        run_eval.evaluate(vr, cfg)
+        rd = run_eval.RESULTS / vr.run_name
+        new = {json.loads(l)["task_id"]: json.loads(l) for l in open(rd / "per_task.jsonl")}
+        rows = [new.get(r["task_id"], r) for r in rows]
+        with open(d / "per_task.jsonl", "w") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False, default=str) + "\n")
+        for t in (rd / "transcripts").glob("*.json") if (rd / "transcripts").exists() else []:
+            (d / "transcripts").mkdir(exist_ok=True)
+            t.replace(d / "transcripts" / t.name)
+        import shutil
+        shutil.rmtree(rd, ignore_errors=True)
+        meta = {k: v for k, v in s.items() if k not in ("tasks", "pass_rate", "mean_reward", "by_category",
+                                                        "check_pass_rate", "errors")}
+        s = run_eval.summarize(rows, meta)
+    s["model_error_retries"] = {"tasks_rerun": retried,
+                                "still_failed": [r["task_id"] for r in (json.loads(l) for l in open(d / "per_task.jsonl"))
+                                                 if r.get("status") in ("model_error", "missing") or r.get("error")]}
     s["variant"] = {"spec": spec, "reader_backend": backend}
     (d / "summary.json").write_text(json.dumps(s, indent=1) + "\n")
     return s
+
+
+def wait_endpoint(cfg, max_wait_s: int = 1800):
+    """Block until the model endpoint generates again (vLLM restarts / tunnel drops happen)."""
+    import time
+    from openai import OpenAI
+    t0 = time.time()
+    while time.time() - t0 < max_wait_s:
+        try:
+            OpenAI(base_url=cfg.base_url, api_key=cfg.api_key, timeout=30, max_retries=0).chat.completions.create(
+                model=cfg.model, messages=[{"role": "user", "content": "ping"}], max_tokens=1)
+            return
+        except Exception:  # noqa: BLE001
+            time.sleep(20)
+    raise SystemExit("model endpoint did not come back")
 
 
 def alt_prompt(base: str) -> str | None:
@@ -116,6 +162,7 @@ def main():
     ap.add_argument("--out", default=str(run_eval.RESULTS / "ablations.md"))
     ap.add_argument("--variants", default=None,
                     help="comma list of named variants, '+' combines, e.g. base,guard,guard+prompt2")
+    ap.add_argument("--retry-errors", type=int, default=3, help="rerun model_error rollouts up to N times")
     ap.add_argument("--seed-tag", default="", help="suffix for run names, e.g. -s2 for a repeat")
     a = ap.parse_args()
     if a.variants:

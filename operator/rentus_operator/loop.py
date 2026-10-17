@@ -189,6 +189,14 @@ class _Runner:
                                                "repaired": chk.repaired, "call_id": tc["id"]})
         args = chk.args
         sig = V.signature(name, args)
+        if self.cfg.style_precheck and name == "send_message":
+            fb = V.style_precheck(args)
+            if fb is not None:
+                self.emit("verifier", "verifier", {"stage": "pre-call", "tool": name, "ok": False,
+                                                   "problems": [fb["error"]["message"]], "call_id": tc["id"]})
+                if self.guard.failed(sig):
+                    return self._force_escalate(sig, name, args, fb["error"]["message"])
+                return fb
         if sig in self.guard.escalated:
             return {"ok": False, "error": {"code": "POLICY_BLOCKED", "message": "this call was already escalated to "
                                            "the owner after repeated failures", "retryable": False},

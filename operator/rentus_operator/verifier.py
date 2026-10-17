@@ -487,3 +487,33 @@ def self_check(before: dict, after: dict, ledger: list[dict], final_text: str) -
         if re.search(r"\b(i (sent|replied|messaged|texted|answered))\b", low) and not new_msgs:
             problems.append("summary says a message was sent, but no operator message was added")
     return list(dict.fromkeys(problems))
+
+
+# --------------------------------------------------------------------------- style pre-check (P2.1 d)
+
+def _style_violations(text: str) -> list[tuple[str, str]]:
+    """The same rules send_message enforces (rentus_tools.impl.style), applied before the call."""
+    try:
+        from rentus_tools.impl.style import style_violations  # type: ignore
+        return style_violations(text)
+    except ImportError:  # shim backend: same three rules, simple sentence split
+        v = []
+        n = len([x for x in re.split(r"[.!?]+(?=\s|$)", text) if re.search(r"\w", x)])
+        if n > 2:
+            v.append(("max_two_sentences", f"text has {n} sentences; the limit is 2"))
+        if text.count("?") > 1:
+            v.append(("one_question", f"text asks {text.count('?')} questions; ask one thing at a time"))
+        if re.search("[\u2012-\u2015]|--", text):
+            v.append(("no_long_dashes", "text contains an em/en dash; use a comma or a period"))
+        return v
+
+
+def style_precheck(args: dict) -> dict | None:
+    """None when a send_message draft passes; otherwise feedback for the model (the call is not made)."""
+    v = _style_violations(str(args.get("text", "")))
+    if not v:
+        return None
+    return {"ok": False, "error": {"code": "STYLE_PRECHECK", "message": "not sent, the draft breaks style rules: "
+                                   + "; ".join(m for _, m in v), "retryable": True},
+            "verifier": {"action": "rewrite", "suggestion": "rewrite it as at most 2 short sentences with at most "
+                         "one question mark at the end, no em or en dashes, then call send_message again"}}

@@ -18,6 +18,10 @@ class RunConfig:
     renter_guard: bool = False            # P2.1 (a): a renter-facing run may not end on plain text while the
                                           # renter's last message is unanswered; the harness bounces it back
     renter_guard_rounds: int = 3          # max bounces per run
+    format_facts: bool = False            # P2.1 (g): showing hours rendered "10:00 to 18:00" as the NeMo rows do,
+                                          # instead of the raw policy dict
+    style_precheck: bool = False          # P2.1 (d): verifier checks send_message style rules BEFORE the call and
+                                          # returns a rewrite request instead of sending (needs verifier on)
 
     # model / endpoint
     model: str = field(default_factory=lambda: os.environ.get("OPERATOR_MODEL", "nemotron"))
@@ -43,6 +47,10 @@ class RunConfig:
                f"verifier={'on' if self.verifier else 'off'} reader={'on' if self.reader else 'off'}")
         if self.renter_guard:
             out += " renter_guard=on"
+        if self.style_precheck:
+            out += " style_precheck=on"
+        if self.format_facts:
+            out += " format_facts=on"
         if self.keep_reasoning_in_history:
             out += " reasoning_history=on"
         if self.reasoning is not None:
@@ -53,6 +61,9 @@ class RunConfig:
 def load_prompt(cfg: RunConfig, world_facts: dict) -> str:
     template = (PROMPTS_DIR / f"system_{cfg.prompt_version}.md").read_text()
     reader = (PROMPTS_DIR / ("reader_on.md" if cfg.reader else "reader_off.md")).read_text().strip()
+    if cfg.format_facts and isinstance(world_facts.get("showing_hours"), dict):
+        sh = world_facts["showing_hours"]
+        world_facts = {**world_facts, "showing_hours": f"{sh.get('start')} to {sh.get('end')}"}
     facts = {"today": "unknown", "spend_limit_usd": "unknown", "showing_hours": "8 AM to 8 PM",
              **{k: v for k, v in world_facts.items() if v is not None}}
     return template.replace("{reader_rules}", reader).format(**facts)
