@@ -16,7 +16,7 @@ channels/.venv/bin/playwright install chromium
 
 channels/.venv/bin/python -m channels.mock_sites --port 8765        # mock sites + control panel at http://127.0.0.1:8765/
 channels/.venv/bin/python -m channels.publish all                   # fill every mock form, stop before submit
-channels/.venv/bin/python -m pytest -q channels/tests               # 26 tests, ~2 min
+channels/.venv/bin/python -m pytest -q channels/tests               # 27 tests, ~2 min
 ```
 
 ## Layout
@@ -31,6 +31,7 @@ channels/.venv/bin/python -m pytest -q channels/tests               # 26 tests, 
 | `repair/` | Self-repair loop (below). |
 | `facebook_page.py` | Graph API: unpublished photo post, Page check, conversation count. |
 | `login.py`, `publish.py` | Owner CLIs. |
+| `../tools/rentus_tools/live/channels_adapter.py` | `LiveAdapter` for W3's tools: `register_all("mock"|"live")` routes `publish_listing`/`send_message` here when `world.mode == "live"`. Live `send_message` only returns a draft. |
 
 ## Mock switches ("page changed", "login wall")
 
