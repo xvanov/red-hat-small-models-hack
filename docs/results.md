@@ -84,27 +84,53 @@ gym/.venv/bin/python gym/results/_p21/table.py heldout-base heldout-guard+prompt
 
 Results JSON: `gym/results/<run>/summary.json` and `per_task.jsonl` (plus local transcripts or NeMo `nemo/rollouts.jsonl`).
 
-## Reference: frontier model (NOT RUN YET)
+## Reference: frontier model (Claude Opus 5.5)
 
-**Status, 2026-10-17:** the harness is built and tested offline, but no frontier numbers exist yet. The OpenCode Zen key we were given (`OPENCODE_API_KEY`) answered `401 api_key_expired`, so nothing was spent ($0.00). The section below describes the method and how to run it once a fresh key is in place. This table gets filled in only from real runs.
+**What this is.** A comparison point, not part of the system. The frontier model is never loaded by the running app (organizers: the 33B limit covers the models loaded to run the app). It shows where our local system (Lightning 30B operator + 0.6B fine-tuned reader, on our own GPU, renter data never leaves it) lands against a frontier API model on the same tasks with the same scorer. Run 2026-10-17, model id `claude-opus-5-5` through OpenCode Zen (Anthropic Messages API, official `anthropic` SDK 1.11.0), effort `high` for the operator and `medium` (the model's default) for the reader. **Total spend: $7.62 of a $10 cap** (operator 3-task probe $0.35, operator run $3.41, reader 30-row probe $0.27, reader run $3.58).
 
-**Purpose.** This is a comparison point only. The frontier model is never part of the running system (organizers: the 33B limit covers the models loaded to run the app). It shows where the local 30B + 0.6B system lands against a frontier model on the same tasks, with the same scorer, at what cost and latency, given that the local system keeps all renter data on our own GPU.
+**Same harness, one switch.** `RunConfig(api="anthropic")` (CLI `--api anthropic`) swaps only the model client (`operator/rentus_operator/anthropic_client.py`). Prompt v3, tools, verifier, renter guard, style pre-check, reasoning history, the 31 held-out tasks and `verify.py` are unchanged, and the reader is pinned to the rule-based fallback, as in the final row above. Differences that come from the model: Opus 5.5 rejects `temperature` (Lightning runs at 0.2) and always thinks; its thinking blocks are passed back unchanged on each turn; prompt caching is on. Cost is computed from token usage at list price ($4 in / $20 out / $0.20 cache read / $5 cache write per million tokens) because Zen returned no per-call `cost` field, so the dollar figures are estimates of what Zen bills.
 
-**Same harness, one switch.** `RunConfig(api="anthropic")` (CLI `--api anthropic`) swaps only the model client: `operator/rentus_operator/anthropic_client.py` translates the loop's OpenAI-style requests into Anthropic Messages API requests through the official `anthropic` SDK (1.11.0) and translates the responses back. The loop, prompt v3, tools, verifier, renter guard, style pre-check, reasoning history, tasks and `verify.py` are unchanged. The default stays `api="openai"`. Model: `claude-opus-5-5` (Claude Opus 5.5), effort `high`, thinking always on (the model does not allow turning it off). The model rejects `temperature`, so the loop's 0.2 is not sent. Thinking blocks are replayed unchanged on each turn, and prompt caching is on. Reader pinned to the rule-based fallback, as in the final row above. Spend: a process-wide meter adds up Zen's per-call `cost` (or list price, $4 in / $20 out per million tokens, if the field is missing) and refuses calls once `FRONTIER_BUDGET_USD` (default $25) is reached.
+### Operator, held-out (31 tasks)
 
-**Estimated cost:** about $0.25 to $0.35 per task with caching, so about $15 to $22 for 2 seeds × 31 tasks, plus about $4 to $5 for a 400-row reader sample. That is near the $25 cap. Without caching it would be well over.
+| system | runs | pass | mean reward | leasing (18) | listing (4) | ops (4) | recovery (5) | model cost per task | task time p50 / mean |
+|---|---|---|---|---|---|---|---|---|---|
+| **Ours: Lightning 30B-A3B, final config** | 2 | **20/31 (64.5%)** | **0.921** | 0.896 | 1.000 | 1.000 | 0.885 | no per-call fee (our rented GPU) | 53 s / 67 s |
+| Claude Opus 5.5, same final config | 1 | 18/31 (58.1%) | 0.889 | 0.831 | 1.000 | 1.000 | 0.923 | $0.110 | 31 s / 35 s |
+
+Opus pass rate by category: leasing 6/18, listing 4/4, ops 4/4, recovery 4/5. Per check type: style 100%, budget/never/escalated/message 100%, state 73%, tool_called 79%. It made 10.3 model calls per task on average (Lightning about 16). Run: `gym/results/heldout-frontier-opus55-guard+prompt3+style+rhist/`. Per-call usage log: `gym/results/frontier-usage.jsonl`.
+
+How to read this honestly:
+- **On this benchmark, with this harness, our local system scores slightly above Opus 5.5** (+2 passes, +0.03 reward). The gap is about the size of our run-to-run noise (about ±0.02 reward), and Opus has one run, so the defensible claim is **parity, not a win.**
+- **The harness was tuned for Lightning.** Prompt v3, the guard and the style pre-check were designed from Lightning's train-split failures. Opus got no tuning at all. Opus with its own tuning would likely score higher.
+- **Most of Opus's leasing losses come from a gap in our tasks, not from a weaker model.** In 9 of its 12 failed leasing tasks, Opus noticed that the renter's move-in date (the label from the reader dataset) falls before the room's availability date and pushed back ("the room is only available from January 1, 2027, so December 1 is too early"). The scripted renter has no line for that, so the gate never completes and `propose_showing` never happens (11 of the 18 failed leasing checks are "showing proposed"). The task generator does not reconcile move-in labels with room availability. That is a flaw in our tasks, and the frontier model's behavior is arguably the better business call. We did not change the tasks or the scorer after seeing this, so the numbers stand as measured. Fixing the generator is open work.
+- **Latency is not like-for-like.** Lightning's times come from a shared vLLM endpoint with outages (see Method) and 4 workers. Opus's come from a hosted API with 4 workers. Per task, Opus is faster here (fewer, longer steps).
+- **What the local system gives up and gets.** Opus costs about $0.11 per operator task, sends every renter message to a third-party API, and needs a network connection. Ours has no per-call fee and keeps renter data on our machine.
+
+### Reader, held-out test, stratified 400-row sample
+
+Opus ran on a seeded 400-row sample of the 1,419-row test split, stratified by source × language × gold move-in status (`reader/eval.py --sample 400 --seed 0`), to fit the budget. Every other row below is the **same 400 rows** rescored from its full-split predictions. On these rows the other systems score close to their full-set numbers (fine-tuned exact match 0.813 here vs 0.791 on all rows), so the sample is a fair stand-in.
+
+| System (same 400 rows) | Exact match | JSON valid | Lease | Move-in | Phone | Occupants | Reason | Intent F1 (micro) | Language | Vague-date trap |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Deterministic regex fallback | 0.555 | 1.000 | 0.873 | 0.995 | 1.000 | 0.973 | 0.890 | 0.764 | 1.000 | 0.000 |
+| Qwen3-0.6B base | 0.000 | 0.913 | 0.120 | 0.028 | 0.003 | 0.043 | 0.000 | 0.137 | 0.700 | 0.125 |
+| **Ours: Qwen3-0.6B + SFT** | **0.813** | 1.000 | 0.998 | 0.978 | 0.998 | 1.000 | 0.885 | 0.939 | 1.000 | 0.042 |
+| Lightning 30B-A3B, prompted | 0.123 | 0.975 | 0.585 | 0.585 | 0.808 | 0.735 | 0.550 | 0.492 | 0.953 | 0.292 |
+| Claude Opus 5.5, prompted (reference) | 0.738 | 1.000 | 0.915 | 0.965 | 1.000 | 0.980 | 0.895 | 0.939 | 1.000 | 0.000 |
+
+(Vague-date trap is over the sample's 24 vague move-in rows, so one row = 0.042.) **The 0.6B fine-tuned reader beats Opus 5.5 on exact match (0.813 vs 0.738)**, mainly on the lease field (0.998 vs 0.915), where our label conventions (for example "probably" = vague) are learned and not obvious from the prompt. Opus is slightly better on reason (0.895 vs 0.885) and on the vague-date trap (0 of 24 vs 1 of 24). Intent F1 is tied. Opus costs $0.009 per read at 3.3 s p50 (concurrency 8). The fine-tuned reader runs locally at 0.58 s p50 (concurrency 32) with no per-call fee. Metrics: `reader/results/frontier-opus-5-5.test.sample400.metrics.json` (includes `same_sample_baselines` and the sampled ids).
+
+### Reproduce
 
 ```bash
-export FRONTIER_ENV_FILE=/path/to/env/with/OPENCODE_API_KEY FRONTIER_BUDGET_USD=25 FRONTIER_USAGE_LOG=gym/results/frontier-usage.jsonl
-gym/.venv/bin/python gym/ablate.py --run-name _ --split heldout --variants guard+prompt3+style+rhist \
-    --api anthropic --model claude-opus-5-5 --prefix heldout-frontier- --workers 4            # seed 1
-gym/.venv/bin/python gym/ablate.py --run-name _ --split heldout --variants guard+prompt3+style+rhist \
-    --api anthropic --model claude-opus-5-5 --prefix heldout-frontier- --seed-tag -s2 --workers 4   # seed 2
-gym/.venv/bin/python reader/eval.py --backend anthropic --model claude-opus-5-5 --label frontier-opus-5-5 \
-    --sample 400 --concurrency 8     # stratified 400-row sample; also rescores every existing reader on the same rows
+# OPENCODE_API_KEY in the repo .env (loaded automatically, never printed); each process has its own spend cap
+FRONTIER_BUDGET_USD=7 FRONTIER_USAGE_LOG=gym/results/frontier-usage.jsonl gym/.venv/bin/python gym/ablate.py --run-name _ \
+    --split heldout --variants guard+prompt3+style+rhist --api anthropic --model claude-opus-5-5 --prefix heldout-frontier-opus55- --workers 4
+FRONTIER_BUDGET_USD=4.5 FRONTIER_USAGE_LOG=gym/results/frontier-usage.jsonl gym/.venv/bin/python reader/eval.py --backend anthropic \
+    --model claude-opus-5-5 --label frontier-opus-5-5 --sample 400 --seed 0 --concurrency 8
 ```
 
-Each operator run's `summary.json` gets a `reference_model` block (cost per task, task seconds, call count, total spend). Reader metrics go to `reader/results/frontier-opus-5-5.test.sample400.metrics.json` with `same_sample_baselines`. On the same 400 rows, the existing systems score close to their full-set numbers (exact match: fine-tuned 0.813 vs 0.791 on all 1,419 rows, fallback 0.555 vs 0.575, Lightning 0.123 vs 0.106, base 0.000), so the sample is a fair stand-in.
+Not done (budget): a second operator seed for Opus, and the full 1,419-row reader set.
 
 ## Not measured yet / open
 
