@@ -14,13 +14,13 @@ The plan we follow until code freeze (Sun Oct 18, 11:00 AM ET). `BRIEF.md` expla
 
 | ID | Workstream | Deliverable | Depends on | Status |
 |---|---|---|---|---|
-| P1.0 | Contracts (Claude) | `contracts/tools.md`, `contracts/scenario.md`, `contracts/events.md` | — | in progress |
-| P1.1 | W1 serving | RTX Pro 6000 on Brev, vLLM serving Lightning with tool calling, tunnel to localhost:8000, smoke test, first bench | GPU approval (done) | starting |
-| P1.2 | W5 data | downloads, reader dataset (train/dev/test), sandbox inventory, provenance doc | — | running |
-| P1.3 | W3 tools | sandbox implementations of every tool in the contract, with a fault-injection switch | P1.0 | starting |
-| P1.4 | W2 operator | agent loop over vLLM's OpenAI-compatible API, verifier, retries, fallbacks, event stream; runs on a stub model until P1.1 is up | P1.0 | starting |
+| P1.0 | Contracts (Claude) | `contracts/tools.md` (tools, events, scenarios in one file) | — | done |
+| P1.1 | W1 serving | RTX Pro 6000 on Brev, vLLM serving Lightning with tool calling, tunnel to localhost:8000, smoke test, first bench | GPU approval (done) | done 11:36 (billing from 11:26, $2.63/hr) |
+| P1.2 | W5 data | downloads, reader dataset (train/dev/test), sandbox inventory, provenance doc | — | done |
+| P1.3 | W3 tools | sandbox implementations of every tool in the contract, with a fault-injection switch | P1.0 | done (125 tests) |
+| P1.4 | W2 operator | agent loop over vLLM's OpenAI-compatible API, verifier, retries, fallbacks, event stream; runs on a stub model until P1.1 is up | P1.0 | done; first live run 12:25 OK |
 | P1.5 | W4 gym | NeMo Gym resources server wrapping the sandbox tools, 40+ tasks (leasing + ops), scorers, train/held-out split, baseline run script | P1.0, P1.3 | starting |
-| P1.6 | W7 console | web console: owner chat, channel lanes, register, escalations, scoreboard, "break something" button; reads the event stream | P1.0 | starting |
+| P1.6 | W7 console | web console: owner chat, channel lanes, register, escalations, scoreboard, "break something" button; reads the event stream | P1.0 | done (stub); live wiring pending |
 | P1.7 | Baseline | first Gym score of Lightning on held-out tasks, committed to `results/` | P1.1, P1.4, P1.5 | — |
 
 **Checkpoint 20:00:** the full sandbox loop runs on Lightning through vLLM, the console shows it, and a baseline score exists.
