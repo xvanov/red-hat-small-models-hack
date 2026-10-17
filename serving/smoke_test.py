@@ -68,6 +68,14 @@ TOOLS = [
 SYSTEM = "You are a leasing operator for a room-rental company. Use tools when they help. Today is 2026-10-17."
 
 
+DASHES = dict.fromkeys(map(ord, "\u2010\u2011\u2012\u2013\u2014\u2212"), "-")
+
+
+def norm(text):
+    """The model sometimes writes IDs with Unicode hyphens (L\u20111042); callers must normalize."""
+    return (text or "").translate(DASHES)
+
+
 def has_think(text):
     return bool(text) and ("<think>" in text or "</think>" in text)
 
@@ -136,10 +144,11 @@ def main():
         r = client.chat.completions.create(model=model, messages=msgs, tools=TOOLS, **samp)
         dt = time.perf_counter() - t
         m = r.choices[0].message
-        ok = bool(m.content) and "L-1042" in m.content and not has_think(m.content)
+        ok = bool(m.content) and "L-1042" in norm(m.content) and not has_think(m.content)
+        unicode_dash = bool(m.content) and "L-1042" not in m.content and ok
         failures += not ok
         print(f"[3 round trip] {'PASS' if ok else 'FAIL'} {dt:.2f}s finish={r.choices[0].finish_reason} "
-              f"more_calls={[c.function.name for c in (m.tool_calls or [])]}")
+              f"more_calls={[c.function.name for c in (m.tool_calls or [])]} unicode_dash_in_id={unicode_dash}")
         print(f"         content: {m.content!r:.200}")
     else:
         failures += 1

@@ -4,7 +4,8 @@
 #
 #   scp serving/start_vllm.sh rentus-operator:~/serving/ && ssh rentus-operator 'bash ~/serving/start_vllm.sh'
 #
-# Env overrides: MODEL, NAME, PREFIX_CACHE=on|off, PORT, MAX_LEN, GPU_UTIL, MTP=on|off
+# Env overrides: MODEL, NAME, PREFIX_CACHE=on|off, ASYNC=on|off, PORT, MAX_LEN, GPU_UTIL, MTP=on|off
+# MTP=on crashed under concurrency on vLLM 0.27.1 + RTX Pro 6000 (see README); default off.
 # The API key comes from ~/serving/vllm.env (VLLM_API_KEY=...), written by the
 # operator machine from .env OPERATOR_API_KEY. It is never echoed.
 set -euo pipefail
@@ -18,6 +19,7 @@ MAX_LEN=${MAX_LEN:-65536}
 GPU_UTIL=${GPU_UTIL:-0.80}
 PREFIX_CACHE=${PREFIX_CACHE:-on}
 MTP=${MTP:-off}
+ASYNC=${ASYNC:-on}
 
 ARGS=(
   --model "$MODEL"
@@ -26,7 +28,6 @@ ARGS=(
   --max-model-len "$MAX_LEN"
   --gpu-memory-utilization "$GPU_UTIL"
   --max-num-seqs 64
-  --async-scheduling
   --mamba-backend flashinfer
   --mamba-cache-mode align
   --mamba-ssm-cache-dtype float16
@@ -36,6 +37,7 @@ ARGS=(
   --tool-call-parser qwen3_coder
   --enable-auto-tool-choice
 )
+if [ "$ASYNC" = on ]; then ARGS+=(--async-scheduling); fi
 if [ "$PREFIX_CACHE" = on ]; then ARGS+=(--enable-prefix-caching); else ARGS+=(--no-enable-prefix-caching); fi
 # MTP heads live inside the checkpoint (no extra model, nothing added to the 33B budget).
 if [ "$MTP" = on ]; then ARGS+=(--speculative-config '{"method":"mtp","num_speculative_tokens":3}'); fi
