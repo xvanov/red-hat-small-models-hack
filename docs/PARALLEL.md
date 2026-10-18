@@ -1,5 +1,7 @@
 # Parallel lanes (Sun Oct 18, from ~03:45 ET)
 
+**Update 04:30:** the owner chose a single coordinating session; all lanes run as background subagents of lane 0. Each lane below is one subagent.
+
 Each new agent session takes ONE lane. Start the session in `~/red-hat-small-models-hack` with:
 
 > Read CLAUDE.md, BRIEF.md, docs/PARALLEL.md, docs/DECISIONS.md. You own lane **<N>**. Work only in that lane's folders.
