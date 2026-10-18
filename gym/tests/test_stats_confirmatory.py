@@ -136,9 +136,11 @@ def test_plan_on_committed_v2_runs():
                 {"id": "H1", "test": "superiority", "a": "final", "b": "baseline"},
                 {"id": "H3i", "test": "fewer", "a": "router", "b": "final", "metric": "model_calls", "co_primary_of": "H3"},
                 {"id": "H3ii", "test": "noninferiority", "a": "router", "b": "final", "co_primary_of": "H3"}]}
-    out = stats.run_plan(plan, seed=0)
+    out = stats.run_plan(plan, seed=0, gate=False)   # v2 predates the freeze rules: exploratory reuse only
     fam = {f["hypothesis"]: f for f in out["family"]}
     assert fam["H1"]["reject"] and not fam["H3"]["reject"]
+    gated = stats.run_plan(plan, seed=0)            # with the run gate, pre-freeze runs never count
+    assert all(not f["tested"] for f in gated["family"]) and gated["input_problems"]
     t = {r["id"]: r for r in out["tests"]}
     assert t["H3i"]["reject"] and not t["H3ii"]["reject"]
     assert math.isclose(t["H3ii"]["d"], -0.053, abs_tol=0.002)
@@ -150,3 +152,98 @@ def test_power_simulation_monotone():
     assert hi > lo and hi > 0.8
     rp = stats.simulate_reader_power(40, 8, 0.10, 0.2, sims=40, n_boot=300, seed=1)
     assert rp > 0.5
+
+
+# ------------------------------------------------------------------ Amendment 2: run names and the run gate
+import shlex  # noqa: E402
+import subprocess  # noqa: E402
+
+import frozen  # noqa: E402
+
+REPO = HERE.parent
+
+
+def test_launch_commands_write_exactly_the_plan_run_names():
+    """Round-2 N3: every config's run names are what its pre-registered launch command writes (dry run)."""
+    plan = json.loads((HERE / "confirmatory_v3.json").read_text())
+    assert set(plan["launch"]) - {"_note"} == set(plan["configs"])
+    for label, cmd in plan["launch"].items():
+        if label == "_note":
+            continue
+        argv = shlex.split(cmd)
+        if argv[0].endswith("python"):
+            argv = [sys.executable] + argv[1:] + ["--print-run-names"]
+            env = None
+        else:
+            env = {"PATH": "/usr/bin:/bin", "PRINT_RUN_NAMES": "1"}
+        out = subprocess.run(argv, cwd=REPO, env=env, capture_output=True, text=True, check=True).stdout.split()
+        assert out == plan["configs"][label], (label, out)
+
+
+def test_check_plan_lists_every_missing_run():
+    plan = json.loads((HERE / "confirmatory_v3.json").read_text())
+    chk = stats.check_plan(plan, freeze={"commit": None})
+    for names in plan["configs"].values():
+        for r in names:
+            assert any(r in p for p in chk["problems"]), r
+    assert any("frontier" in p for p in chk["problems"])
+    r = subprocess.run([sys.executable, str(HERE / "stats.py"), "plan", str(HERE / "confirmatory_v3.json"), "--check"],
+                       cwd=REPO, capture_output=True, text=True)
+    assert r.returncode == 1 and "v3-heldout-frontier-cc-" in r.stdout
+
+
+FZ = {"commit": "a" * 40, "artifact_sha256": {"gym/tasks/v3/heldout.jsonl": "f" * 64}}
+
+
+def _summary(**kw):
+    prov = {"commit": "a" * 40, "dirty_frozen_paths": False, "tasks_path": str(REPO / "gym/tasks/v3/heldout.jsonl"),
+            "tasks_sha256": "f" * 64}
+    prov.update(kw.pop("prov", {}))
+    mer = {"tasks_rerun": [], "still_failed": [], "mid_rollout_drops": [], "void": False, "retry_provenance": []}
+    mer.update(kw.pop("mer", {}))
+    return {"provenance": prov, "model_error_retries": mer, **kw}
+
+
+def test_run_problems_rules():
+    never = lambda a, b: False
+    same = lambda a, b: True
+    assert frozen.run_problems(_summary(), FZ, never) == []
+    assert any("void" in w for w in frozen.run_problems(_summary(mer={"void": True}), FZ, never))
+    assert any("still_failed" in w for w in frozen.run_problems(_summary(mer={"still_failed": ["t1"]}), FZ, never))
+    assert any("dirty" in w for w in frozen.run_problems(_summary(prov={"dirty_frozen_paths": True}), FZ, never))
+    assert any("not recorded" in w for w in frozen.run_problems(_summary(prov={"dirty_frozen_paths": None}), FZ, never))
+    off = _summary(prov={"commit": "b" * 40})
+    assert any("differs from freeze commit" in w for w in frozen.run_problems(off, FZ, never))
+    assert frozen.run_problems(off, FZ, same) == []          # later commit, frozen paths byte-identical
+    assert any("sha256" in w for w in frozen.run_problems(_summary(prov={"tasks_sha256": "0" * 64}), FZ, never))
+    assert any("no freeze commit" in w for w in frozen.run_problems(_summary(), {"commit": None}, never))
+    s = _summary()
+    del s["model_error_retries"]
+    assert any("rerun record" in w for w in frozen.run_problems(s, FZ, never))
+    dirty_retry = _summary(mer={"retry_provenance": [{**_summary()["provenance"], "dirty_frozen_paths": True}]})
+    assert any(w.startswith("retry 1:") for w in frozen.run_problems(dirty_retry, FZ, never))
+    assert frozen.run_problems(None, FZ, never) == ["no summary.json"]
+
+
+def _write_run(root, name, rewards, summary):
+    d = root / name
+    d.mkdir()
+    (d / "per_task.jsonl").write_text("".join(
+        json.dumps({"task_id": f"t{i}", "category": "c", "pass": int(r >= 1), "reward": r}) + "\n"
+        for i, r in enumerate(rewards)))
+    (d / "summary.json").write_text(json.dumps(summary))
+    return str(d)
+
+
+def test_run_plan_gate_rejects_one_dirty_run(tmp_path):
+    hi, lo = [1.0, 0.9, 1.0, 0.95] * 10, [0.5, 0.6, 0.4, 0.55] * 10
+    a = [_write_run(tmp_path, f"a{i}", hi, _summary()) for i in range(3)]
+    b = [_write_run(tmp_path, f"b{i}", lo, _summary()) for i in range(3)]
+    plan = {"alpha_familywise_one_sided": 0.025, "configs": {"final": a, "baseline": b},
+            "hypotheses": [{"id": "H1", "test": "superiority", "a": "final", "b": "baseline"}]}
+    ok = stats.run_plan(plan, freeze=FZ, same_frozen=lambda x, y: False)
+    assert ok["family"][0]["tested"] and ok["family"][0]["reject"] and not ok["input_problems"]
+    Path(b[1], "summary.json").write_text(json.dumps(_summary(prov={"dirty_frozen_paths": True})))
+    bad = stats.run_plan(plan, freeze=FZ, same_frozen=lambda x, y: False)
+    assert not bad["family"][0]["tested"] and bad["family"][0]["p"] == 1.0
+    assert any("dirty" in p for p in bad["input_problems"])

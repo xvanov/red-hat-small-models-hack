@@ -13,11 +13,23 @@
 #          unless ALLOW_READER_FALLBACK=1, which drops +readermodel (rule-based read_reply) and says so.
 # Env: FRONTIER_MODEL (claude-opus-5-5 | claude-fable-5-1, default claude-opus-5-5), FRONTIER_EFFORT
 #      (default high), FRONTIER_WORKERS (default 3, max 3), FREEZE_COMMIT (if set, refuse when anything
-#      under the frozen paths differs from it), PREFIX (default <taskset>-<split>-frontier-cc-).
+#      under gym/frozen_paths.txt differs from it), PREFIX (default <taskset>-<split>-frontier-cc-),
+#      PRINT_RUN_NAMES=1 (print the run names this call would write, one per line, and exit: no setup, no calls).
+# Run names for the confirmatory plan: `scripts/frontier_ref.sh gym/tasks/v3/heldout.jsonl 1,2,3,4,5` writes
+# v3-heldout-frontier-cc-guard+prompt3+style+rhist+readermodel-s1..s5, the names gym/confirmatory_v3.json lists
+# (checked by gym/tests/test_stats_confirmatory.py). ALLOW_READER_FALLBACK=1 changes the names, so such runs are
+# missing from the plan, and `gym/stats.py plan --check` fails on them.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-[ $# -ge 2 ] || { sed -n 2,20p "$0"; exit 2; }
+[ $# -ge 2 ] || { sed -n 2,26p "$0"; exit 2; }
 TASKS=$1; SEEDS=$2; VARIANT=${3:-guard+prompt3+style+rhist+readermodel}
+SET=$(basename "$(dirname "$TASKS")"); SPLIT=$(basename "$TASKS" .jsonl)
+[ "$SET" = tasks ] && SET=v1
+PREFIX=${PREFIX:-$SET-$SPLIT-frontier-cc-}
+if [ "${PRINT_RUN_NAMES:-0}" = 1 ]; then
+  for s in ${SEEDS//,/ }; do echo "$PREFIX$VARIANT-s$s"; done
+  exit 0
+fi
 MODEL=${FRONTIER_MODEL:-claude-opus-5-5}; EFFORT=${FRONTIER_EFFORT:-high}; WORKERS=${FRONTIER_WORKERS:-3}
 PY=gym/.venv-frontier/bin/python
 [ -f "$TASKS" ] || { echo "no task file $TASKS"; exit 2; }
@@ -30,9 +42,13 @@ if [ ! -x "$PY" ] || ! "$PY" -c "import claude_agent_sdk" 2>/dev/null; then
   uv pip install -q --exclude-newer 2026-10-03T00:00:00Z --python "$PY" -r gym/requirements.txt 'claude-agent-sdk==0.2.163'
 fi
 
+mapfile -t FROZEN < <(grep -v '^[[:space:]]*#' gym/frozen_paths.txt | sed '/^[[:space:]]*$/d')
 if [ -n "${FREEZE_COMMIT:-}" ]; then
-  git diff --quiet "$FREEZE_COMMIT" -- gym/rentus_env gym/tasks tools/rentus_tools operator reader/prompt.py \
+  git diff --quiet "$FREEZE_COMMIT" -- "${FROZEN[@]}" \
     || { echo "frozen paths differ from $FREEZE_COMMIT; refusing to run"; exit 3; }
+fi
+if [ "$TASKS" = gym/tasks/v3/heldout.jsonl ] && [ -n "$(git status --porcelain -- "${FROZEN[@]}")" ]; then
+  echo "frozen paths are dirty (gym/frozen_paths.txt); a confirmatory run would be void. Refusing."; exit 3
 fi
 
 if [[ "+$VARIANT+" == *"+readermodel+"* ]]; then
@@ -54,9 +70,6 @@ EOF
   fi
 fi
 
-SET=$(basename "$(dirname "$TASKS")"); SPLIT=$(basename "$TASKS" .jsonl)
-[ "$SET" = tasks ] && SET=v1
-PREFIX=${PREFIX:-$SET-$SPLIT-frontier-cc-}
 echo "frontier reference: $MODEL effort=$EFFORT via $(claude --version 2>/dev/null) | tasks $TASKS | variant $VARIANT | repeats $SEEDS | workers $WORKERS"
 for s in ${SEEDS//,/ }; do
   "$PY" gym/ablate.py --run-name _ --tasks-file "$TASKS" --variants "$VARIANT" --api claude_code \

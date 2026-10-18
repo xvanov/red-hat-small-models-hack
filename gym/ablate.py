@@ -84,6 +84,7 @@ def run_variant(a, spec: str, run_name: str, reader_url: str | None) -> dict:
     else:
         s = run_eval.evaluate(va, cfg)
     retried = list((s.get("model_error_retries") or {}).get("tasks_rerun", []))
+    retry_prov = list((s.get("model_error_retries") or {}).get("retry_provenance", []))
     for _ in range(a.retry_errors):  # endpoint outages: rerun only the rollouts that never reached the model
         rows = [json.loads(l) for l in open(d / "per_task.jsonl")]
         bad = [r["task_id"] for r in rows if never_reached_model(r)]
@@ -93,7 +94,8 @@ def run_variant(a, spec: str, run_name: str, reader_url: str | None) -> dict:
         retried += bad
         vr = argparse.Namespace(**vars(va))
         vr.run_name, vr.ids, vr.limit = f"_retry-{run_name}", ",".join(bad), None
-        run_eval.evaluate(vr, cfg)
+        rs = run_eval.evaluate(vr, cfg)
+        retry_prov.append(rs.get("provenance"))   # the rerun rollouts' own commit / dirty state (Amendment 2)
         rd = run_eval.RESULTS / vr.run_name
         new = {json.loads(l)["task_id"]: json.loads(l) for l in open(rd / "per_task.jsonl")}
         with open(d / "per_task.attempts.jsonl", "a") as fa:   # replaced attempts are kept, never overwritten
@@ -117,7 +119,7 @@ def run_variant(a, spec: str, run_name: str, reader_url: str | None) -> dict:
     s["model_error_retries"] = {"rule": "protocol 4.4: rerun only rollouts with zero model completions",
                                 "tasks_rerun": retried,
                                 "still_failed": [r["task_id"] for r in final_rows if never_reached_model(r)],
-                                "mid_rollout_drops": mid,
+                                "mid_rollout_drops": mid, "retry_provenance": retry_prov,
                                 "void": len(mid) > 0.10 * max(1, len(final_rows))}
     s["variant"] = {"spec": spec, "reader_backend": backend}
     (d / "summary.json").write_text(json.dumps(s, indent=1) + "\n")

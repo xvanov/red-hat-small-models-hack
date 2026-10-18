@@ -536,15 +536,66 @@ def simulate_reader_power(threads: int, rows_per_thread: int, true_d: float, dis
 
 
 # ---------------------------------------------------------------- confirmatory plan runner
-def run_plan(plan: dict, seed: int = 0, results_root: Path | None = None) -> dict:
+def run_gate_problems(run: str, freeze: dict, same_frozen=None) -> list[str]:
+    """Why run `run` may not count (Amendment 2, N4): gym/frozen.py run_problems on its summary.json."""
+    import frozen
+    try:
+        d = resolve_run(run)
+    except SystemExit:
+        return ["missing"]
+    sp = d / "summary.json"
+    summary = json.loads(sp.read_text()) if sp.exists() else None
+    return frozen.run_problems(summary, freeze, same_frozen or frozen.frozen_paths_identical)
+
+
+def check_plan(plan: dict, gate: bool = True, freeze: dict | None = None, same_frozen=None) -> dict:
+    """Every input the plan names, and what is wrong with it. `problems` empty = every hypothesis can be tested.
+
+    Missing run names are listed explicitly so that a naming mismatch (round-2 N3: the frontier runs) can never
+    turn a hypothesis into a silent 'not tested'."""
+    if gate and freeze is None:
+        import frozen
+        freeze = frozen.freeze_state()
+    runs, problems = {}, []
+    for label, names in plan["configs"].items():
+        for r in names:
+            why = run_gate_problems(r, freeze, same_frozen) if gate else ([] if _run_exists(r) else ["missing"])
+            runs[r] = why
+            problems += [f"{label}: run {r}: {w}" for w in why]
+    for h in plan["hypotheses"]:
+        if h["test"] == "reader_superiority":
+            for k in ("a", "b"):
+                if not Path(h[k]).exists():
+                    problems.append(f"{h['id']}: preds file {h[k]}: missing")
+    return {"runs": runs, "problems": problems, "freeze_commit": (freeze or {}).get("commit")}
+
+
+def _run_exists(r: str) -> bool:
+    try:
+        resolve_run(r)
+        return True
+    except SystemExit:
+        return False
+
+
+def run_plan(plan: dict, seed: int = 0, results_root: Path | None = None, gate: bool = True,
+             freeze: dict | None = None, same_frozen=None) -> dict:
     """Evaluate every hypothesis in a pre-registered plan (gym/confirmatory_v3.json) and apply Holm once.
 
-    Missing runs or preds files -> that hypothesis is untested (p = 1, stays in m)."""
+    Missing runs or preds files -> that hypothesis is untested (p = 1, stays in m). With gate=True (the default
+    and the only mode `stats.py plan` offers) a run whose summary.json is void, has still_failed rollouts,
+    recorded dirty frozen paths, or ran off the freeze commit's frozen paths makes its config untested too
+    (Amendment 2, N4). gate=False is for exploratory reuse on runs made before the freeze (e.g. v2)."""
     alpha = float(plan.get("alpha_familywise_one_sided", ALPHA_FW))
     rows, pvals = [], {}
+    chk = check_plan(plan, gate, freeze, same_frozen)
 
     def cfg(label):
         runs = plan["configs"][label]
+        bad = {r: chk["runs"][r] for r in runs if chk["runs"].get(r)}
+        if bad:
+            r, why = next(iter(bad.items()))
+            raise LookupError(f"{len(bad)} of {len(runs)} {label} run(s) missing or rejected, e.g. {r}: {'; '.join(why)}")
         try:
             return Config(label, runs, strict=True)
         except SystemExit as e:   # missing run dir or task -> untested
@@ -580,13 +631,18 @@ def run_plan(plan: dict, seed: int = 0, results_root: Path | None = None) -> dic
             prev = pvals.get(parent, 0.0)
             pvals[parent] = None if (prev is None or r.get("p") is None) else max(prev, r["p"])
     fam = holm_family(pvals, alpha)
-    return {"alpha_familywise_one_sided": alpha, "delta": plan.get("delta", DELTA), "tests": rows, "family": fam}
+    return {"alpha_familywise_one_sided": alpha, "delta": plan.get("delta", DELTA), "tests": rows, "family": fam,
+            "gate": gate, "freeze_commit": chk["freeze_commit"], "input_problems": chk["problems"]}
 
 
 def md_plan(out: dict) -> str:
     lines = [f"Confirmatory family (Holm, familywise one-sided alpha = {out['alpha_familywise_one_sided']}, "
              f"m = {len(out['family'])}; untested hypotheses stay in m with p = 1):", "",
              "| hypothesis | tested | p | Holm p | alpha at rank | decision |", "|---|---|---|---|---|---|"]
+    if out.get("input_problems"):
+        lines[1:1] = ["", f"**{len(out['input_problems'])} input problem(s)** (missing or rejected runs/files; their "
+                      "hypotheses are NOT TESTED): " + "; ".join(out["input_problems"][:12])
+                      + (" ..." if len(out["input_problems"]) > 12 else "")]
     for f in out["family"]:
         lines.append(f"| {f['hypothesis']} | {'yes' if f['tested'] else 'NOT TESTED'} | {fmt_p(f['p'])} | {fmt_p(f['holm_p'])} "
                      f"| {f['alpha_at_rank']:.4f} | {'supported' if f['reject'] else 'not supported'} |")
@@ -735,8 +791,20 @@ def plan_main(argv=None):
     ap.add_argument("plan", help="e.g. gym/confirmatory_v3.json")
     ap.add_argument("--md", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--check", action="store_true",
+                    help="no statistics: list every missing or rejected run / preds file and exit 1 if there is any")
     a = ap.parse_args(argv)
-    out = run_plan(json.loads(Path(a.plan).read_text()), seed=a.seed)
+    plan = json.loads(Path(a.plan).read_text())
+    if a.check:
+        chk = check_plan(plan)
+        print(f"freeze commit: {chk['freeze_commit'] or 'NONE (docs/freeze-manifest.json not committed)'}")
+        print(f"{sum(1 for v in chk['runs'].values() if not v)} of {len(chk['runs'])} runs count")
+        for p_ in chk["problems"]:
+            print("  " + p_)
+        sys.exit(1 if chk["problems"] else 0)
+    out = run_plan(plan, seed=a.seed)
+    for p_ in out["input_problems"]:
+        print(f"INPUT PROBLEM: {p_}", file=sys.stderr)
     print(md_plan(out) if a.md else json.dumps(out, indent=1, default=str))
 
 

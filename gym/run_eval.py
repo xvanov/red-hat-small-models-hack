@@ -457,14 +457,36 @@ def provenance(tasks_path) -> dict:
             return subprocess.check_output(["git", *a], cwd=REPO, text=True, stderr=subprocess.DEVNULL).strip()
         except Exception:  # noqa: BLE001
             return None
-    status = git("status", "--porcelain", "--", "gym/rentus_env", "gym/tasks", "tools", "operator", "reader/prompt.py",
-                 "serving", "data/twins")
+    import frozen
+    status = git("status", "--porcelain", "--", *frozen.frozen_paths())   # gym/frozen_paths.txt (Amendment 2)
     return {"commit": git("rev-parse", "HEAD"), "describe": git("describe", "--always", "--dirty"),
             "dirty": bool(git("status", "--porcelain")), "dirty_frozen_paths": bool(status),
             "dirty_files": (status or "").splitlines()[:50],
             "tasks_path": str(tasks_path), "tasks_sha256": sha256_file(tasks_path),
             "code_sha256": {"gym/rentus_env": tree_sha256("gym/rentus_env"), "tools": tree_sha256("tools"),
                             "operator": tree_sha256("operator"), "serving": tree_sha256("serving")}}
+
+
+CONFIRMATORY_TASKS = ("gym/tasks/v3/heldout.jsonl",)
+
+
+def confirmatory_guard(tasks_path) -> None:
+    """Refuse to START a model run on a confirmatory task file when it cannot count (Amendment 2, N4): any dirty
+    frozen path, or a task file that is not the frozen one. stats.py applies the full rule again at analysis."""
+    import frozen
+    try:
+        rel = str(Path(tasks_path).resolve().relative_to(REPO))
+    except ValueError:
+        return
+    if rel not in CONFIRMATORY_TASKS:
+        return
+    dirty = frozen.dirty_frozen()
+    if dirty:
+        raise SystemExit(f"refusing a confirmatory run on {rel}: {len(dirty)} frozen path(s) dirty "
+                         f"(gym/frozen_paths.txt), e.g. {dirty[:3]}. Commit or revert them first.")
+    want = (frozen.freeze_state()["artifact_sha256"] or {}).get(rel)
+    if want and sha256_file(tasks_path) != want:
+        raise SystemExit(f"refusing a confirmatory run: {rel} does not match its frozen sha256 in docs/freeze-manifest.json")
 
 
 def git_head() -> str | None:
@@ -529,6 +551,8 @@ def evaluate(args, cfg=None) -> dict:
             raise SystemExit(f"model endpoint {cfg.base_url} cannot generate: {type(e).__name__}: {e}")
     tasks = load_tasks(args.split, args.ids.split(",") if args.ids else None, args.limit,
                        getattr(args, "tasks_version", "v1"), getattr(args, "tasks_file", None))
+    if not stub:
+        confirmatory_guard(TASKS_PATH)
     run_dir = RESULTS / args.run_name
     if run_dir.exists() and not args.keep:
         shutil.rmtree(run_dir)

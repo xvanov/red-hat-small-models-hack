@@ -70,9 +70,14 @@ def main():
     ap.add_argument("--sim-seed-follow", action="store_true", help="llm_renter: simulator seed = operator seed")
     ap.add_argument("--sim-model", default=None, help="llm_renter: simulator model (default: endpoint's first)")
     ap.add_argument("--sim-base-url", default=None, help="llm_renter: simulator endpoint (default: local Lightning)")
+    ap.add_argument("--print-run-names", action="store_true",
+                    help="print the run names these flags would write, one per line, and exit (no model calls)")
     a = ap.parse_args()
     seeds = [int(s) for s in a.seeds.split(",") if s.strip()]
     runs = [f"{a.prefix}-s{s}" for s in seeds]
+    if a.print_run_names:
+        print("\n".join(runs))
+        return
     if not a.analyze_only:
         run_eval.load_env_file()
         import os
