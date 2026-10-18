@@ -149,6 +149,13 @@ const S = {
 async function pollStatus() {
   try {
     S.status = await j("/api/status");
+    if (S.status.public_readonly && !document.body.classList.contains("ro")) {
+      document.body.classList.add("ro");
+      const b = document.createElement("div");
+      b.className = "ro-banner";
+      b.innerHTML = `<b>Live view · read-only</b> · this is the owner's real console. Contact details are masked and nothing can be sent from here. <a href="https://demo.rentus.homes" target="_blank" rel="noopener">demo.rentus.homes ↗</a>`;
+      document.body.prepend(b);
+    }
     const b = S.status.badge || {}, r = S.status.reader || {};
     setStat("#st-op", b.backend_up, b.backend_up ? "Operator · Lightning on vLLM" : "Operator · offline");
     setStat("#st-reader", r.live, r.live ? "Reader · " + (S.status.reader_label || "0.6B").replace(/\s*\(vLLM\)/, "") : "Reader · rules fallback", !r.live ? "warn" : null);
@@ -709,6 +716,10 @@ function renderChat() {
   $("#run-state").textContent = !open ? "This conversation has ended. Start a new chat to continue." : busy ? "Working…" : "Enter to send";
   $("#ask").disabled = !open;
   $("#ask-send").disabled = !open;
+  if (!S.turns.length && S.status?.public_readonly) {
+    el.innerHTML = `<div class="empty" style="padding-top:80px">${I.bot}<b>${(S.chats || []).length ? "Pick a conversation on the left" : "No conversations yet"}</b><div>This read-only view shows the owner's conversations with the operator.</div></div>`;
+    return;
+  }
   if (!S.turns.length) {
     el.innerHTML = `<div class="empty" style="padding-top:80px">${I.bot}<b>What should the operator do?</b><div>Describe a room to list, a repair, or a question about your renters.</div>
       <div class="suggest"><div class="small muted">Examples (click to put one in the message box)</div>

@@ -13,6 +13,8 @@ Paths (each prints PASS/FAIL lines and saves screenshots):
              nothing reaches a real person                                 docs/img/console-approval.png, approve-phone.png
   model      the Model tab shows the numbers the result endpoints serve (/api/results, /api/trust,
              /api/performance), never hardcoded ones                       docs/img/console-model.png
+  public     the read-only public console on :8092 (CONSOLE_PUBLIC_READONLY=1): every tab renders, no action
+             buttons, writes refused, no personal-Messenger threads          docs/img/console-public-*.png
   phone      /approve on the real console at phone size                    docs/img/approve-phone-live.png
   assistant  LIVE operator run (uses the GPU): the owner types a listing instruction in the Assistant,
              the operator's reply and its tool calls appear, the listing card shows per-channel status
@@ -282,13 +284,43 @@ def path_assistant(p, timeout=240):
     b.close()
 
 
+PUBLIC = os.environ.get("CONSOLE_PUBLIC_URL_LOCAL", "http://127.0.0.1:8092")
+
+
+def path_public(p):
+    """The public read-only console (CONSOLE_PUBLIC_READONLY=1 on :8092): tabs render, no controls, writes refused."""
+    st = get("/api/status", PUBLIC)
+    check("public console runs in read-only mode", st.get("public_readonly") is True)
+    for method, path in (("POST", "/api/runs"), ("POST", "/api/reset"), ("POST", "/api/live/conversations"),
+                         ("POST", "/api/live/approvals/x"), ("POST", "/api/live/threads/x/reply"),
+                         ("POST", "/api/runs/x/listings/L001/facebook"), ("GET", "/approve"), ("GET", "/api/file?path=runs/x.png")):
+        code = httpx.request(method, PUBLIC + path, json={"text": "x"}, timeout=10).status_code
+        check(f"public {method} {path.split('?')[0]} refused", code == 403, str(code))
+    th = get("/api/live/threads", PUBLIC).get("items") or []
+    check("no personal-Messenger threads in public", all(t["channel"] != "messenger_personal" for t in th), f"{len(th)} threads")
+    b, pg = open_page(p, PUBLIC + "/#/inbox")
+    for tab, sel in (("inbox", "#thread-list"), ("assistant", "#chat"), ("pipeline", "#page-pipeline .page-head"),
+                     ("model", "#page-model .kpis"), ("data", "#page-data .flow")):
+        pg.goto(PUBLIC + f"/#/{tab}")
+        pg.wait_for_selector(sel, timeout=20000)
+        pg.wait_for_timeout(1500)
+        if tab == "inbox" and pg.query_selector(".titem"):
+            pg.click(".titem")
+            pg.wait_for_timeout(2000)
+        visible_actions = [x for x in pg.query_selector_all("button[data-act], #reply-send, #ask-send, #new-convo, #new-chat, [data-fb], #archive-thread") if x.is_visible()]
+        check(f"public {tab}: renders with no action buttons", not visible_actions and pg.is_visible(".ro-banner") and not pg._errors,
+              f"{len(visible_actions)} visible")
+        shoot(pg, f"console-public-{tab}.png")
+    b.close()
+
+
 PATHS = {"tabs": path_tabs, "inbox": path_inbox, "approval": path_approval, "model": path_model, "phone": path_phone,
-         "assistant": path_assistant}
+         "assistant": path_assistant, "public": path_public}
 
 
 def main(argv) -> int:
     from playwright.sync_api import sync_playwright
-    names = list(PATHS) if not argv or argv == ["all"] else argv
+    names = [n for n in PATHS if n != "public"] if not argv or argv == ["all"] else argv  # public needs the :8092 process
     with sync_playwright() as p:
         for n in names:
             print(f"== {n}", flush=True)

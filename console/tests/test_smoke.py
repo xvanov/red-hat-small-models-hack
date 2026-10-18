@@ -273,3 +273,48 @@ def test_chat_history_lists_only_owner_chats(base):
     assert o in ids and t not in ids
     assert next(c for c in chats if c["run_id"] == o)["title"] == "Owner asks something"
     httpx.post(base + "/api/reset")
+
+
+MUTATING = [
+    ("POST", "/api/runs"), ("POST", "/api/demo"), ("POST", "/api/demo/speed"), ("POST", "/api/reset"),
+    ("POST", "/api/runs/r_x/owner"), ("POST", "/api/runs/r_x/escalations/ESC001"), ("POST", "/api/runs/r_x/faults"),
+    ("POST", "/api/runs/r_x/speed"), ("POST", "/api/runs/r_x/stop"), ("POST", "/api/runs/r_x/listings/L001/facebook"),
+    ("POST", "/api/live/threads/t_test_lee/reply"), ("POST", "/api/live/threads/t_test_lee/archive"),
+    ("POST", "/api/live/conversations"), ("POST", "/api/live/approvals/ap_1"),
+    ("PUT", "/api/runs"), ("DELETE", "/api/runs/r_x"),
+]
+
+
+def test_public_readonly_mode(tmp_path):
+    """CONSOLE_PUBLIC_READONLY=1: every mutating route is 403 on the server, private data is filtered."""
+    port = _free_port()
+    env = {**os.environ, "CONSOLE_FORCE_STUB": "1", "OPERATOR_BASE_URL": "", "CONSOLE_RUNS_DIR": str(tmp_path),
+           "CONSOLE_LIVE_MODULE": "console.tests.fake_live", "CONSOLE_FB_MODULE": "console.tests.fake_fb",
+           "CONSOLE_PUBLIC_READONLY": "1"}
+    proc = subprocess.Popen([sys.executable, "-m", "uvicorn", "console.app:app", "--port", str(port), "--log-level", "warning"],
+                            cwd=REPO, env=env)
+    url = f"http://127.0.0.1:{port}"
+    try:
+        assert _wait(lambda: _ok(url + "/api/status"), 20)
+        for method, path in MUTATING:
+            r = httpx.request(method, url + path, json={"text": "x", "goal": "x", "decision": "approve", "action": "publish",
+                                                       "channel": "sms", "to": "1", "kind": "timeout"})
+            assert r.status_code == 403 and r.json()["error"] == "read-only public view", (method, path, r.status_code)
+        for path in ("/approve", "/api/file?path=runs/x.png", "/api/approvals"):
+            assert httpx.get(url + path).status_code == 403, path
+        for path in ("/", "/api/status", "/api/results", "/api/trust", "/api/performance", "/api/chats", "/api/live/status",
+                     "/api/live/threads", "/api/live/approvals", "/static/data.json"):
+            assert httpx.get(url + path).status_code == 200, path
+        assert httpx.get(url + "/api/status").json()["public_readonly"] is True
+        th = httpx.get(url + "/api/live/threads").json()["items"]
+        assert th and all(t["channel"] != "messenger_personal" for t in th)
+        assert httpx.get(url + "/api/live/threads/t_test_mp").status_code == 404
+        sam = next(t for t in th if t["thread_id"] == "t_test_sam")
+        assert sam["contact_display"] == "Sam T." and "line" not in sam
+        lee = next(t for t in th if t["thread_id"] == "t_test_lee")
+        assert lee["contact_display"] == "+1 ••• ••• 0100"
+        ap = httpx.get(url + "/api/live/approvals").json()["items"]
+        assert all(a["thread_id"] != "t_test_mp" for a in ap) and all(not a["draft_text"] for a in ap)
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)

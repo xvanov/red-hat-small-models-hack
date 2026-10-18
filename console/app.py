@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import integration as integ
 from . import live as livemod
+from . import public
 from . import live_world
 from . import panels
 from .demo import DEMO_PATCH, Director
@@ -43,6 +44,17 @@ FAULT_HELP = {"page_changed": "the site's layout moved under the automation",
 
 app = FastAPI(title="Rentus Operator console")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+PUBLIC_BLOCKED_GET = ("/approve", "/api/file", "/api/approvals")
+
+
+@app.middleware("http")
+async def public_readonly(request: Request, call_next):
+    """CONSOLE_PUBLIC_READONLY=1: only the GETs that render the tabs; nothing can be started, sent or changed."""
+    if public.READONLY:
+        path = request.url.path
+        if request.method not in ("GET", "HEAD", "OPTIONS") or any(path == p or path.startswith(p + "/") or path.startswith(p + "?") for p in PUBLIC_BLOCKED_GET):
+            return JSONResponse({"error": "read-only public view"}, status_code=403)
+    return await call_next(request)
 RUNS: dict[str, object] = {}
 STATE = {"active": None, "director": None}
 
@@ -126,7 +138,7 @@ def status():
             "fault_help": FAULT_HELP, "reader": reader, "reader_label": reader["label"].removeprefix("reader: "),
             "operator_config": getattr(run, "config_name", None) or FINAL_CONFIG_NAME, "public_url": PUBLIC_URL,
             "approve_url": PUBLIC_URL + "/approve",
-            "demo": STATE["director"].state() if STATE["director"] else None}
+            "demo": STATE["director"].state() if STATE["director"] else None, "public_readonly": public.READONLY}
 
 
 @app.get("/api/scenarios")
@@ -531,13 +543,20 @@ def live_status():
 def live_threads():
     ts, err = _live("list_threads", default=[])
     items = [livemod.norm_thread(t) for t in (ts or []) if isinstance(t, dict)]
+    if public.READONLY:
+        items = [public.thread(t) for t in items if public.visible(t)]
     items.sort(key=lambda t: str(t.get("last_ts") or ""), reverse=True)
     return {"available": err is None, "error": err, "items": items}
 
 
 @app.get("/api/live/threads/{thread_id}")
 def live_thread(thread_id: str):
-    t, err = _live("get_thread", thread_id)
+    if public.READONLY:  # reading in public never marks the owner's messages read
+        t, err = _live("get_thread", thread_id, mark_read=False)
+        if err and "mark_read" in err:
+            t, err = _live("get_thread", thread_id)
+    else:
+        t, err = _live("get_thread", thread_id)
     if err:
         raise HTTPException(503, err)
     if not t:
@@ -545,6 +564,10 @@ def live_thread(thread_id: str):
     t = livemod.norm_thread(t)
     t["messages"] = [m for m in (t.get("messages") or []) if isinstance(m, dict)]
     t["trace"] = [x for x in (t.get("trace") or []) if isinstance(x, dict)]
+    if public.READONLY:
+        if not public.visible(t):
+            raise HTTPException(404, f"no thread {thread_id}")
+        t = public.thread(t)
     return t
 
 
@@ -601,7 +624,7 @@ def _run_approvals() -> list[dict]:
 def live_approvals():
     ap, err = _live("list_approvals", default=[])
     names = {}
-    if ap:
+    if ap or public.READONLY:
         ts, _ = _live("list_threads", default=[])
         names = {t.get("thread_id"): t for t in ts or [] if isinstance(t, dict)}
     items = []
@@ -615,6 +638,8 @@ def live_approvals():
         items.append({**a, "source": "live", "who": a.get("who") or t.get("renter_name") or t.get("contact_display"),
                       "channel": a.get("channel") or t.get("channel"), "last_message": last})
     items += _run_approvals()
+    if public.READONLY:
+        items = public.approvals(items, names)
     return {"available": err is None, "error": err, "items": items}
 
 
