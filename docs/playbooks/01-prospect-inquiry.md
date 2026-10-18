@@ -18,7 +18,7 @@ Every person who asks about a room leaves the conversation captured in the deman
 2. `upsert_renter` with everything stated, raw words kept. Never fill an unstated field with a default.
 3. If the thread is tied to one listing, go straight to disclosure (R-ROUTE-1). If it is ambiguous, send one short line per live listing and ask which one (R-ROUTE-2).
 4. Disclosure from the record only, split into messages of at most 2 sentences: type, private and shared spaces, rent, deposit, utilities, street name, availability. Then house rules. No question until the end of the burst.
-5. First gate question last: "How long do you want to stay? Is a one year lease okay with you?" Then the pending-info loop (playbook 02 for vague answers).
+5. First gate question last: "Is a one year lease okay with you?" (the spec's two-part wording "How long do you want to stay? Is a one year lease okay with you?" carries two question marks, which `send_message` refuses as `one_question`; lane 2 should pick one form). Then the pending-info loop (playbook 02 for vague answers).
 6. Gate complete: report to the owner (R-ESC-6), offer slots with `find_showing_slots`, `propose_showing`, and say the time is pending my confirmation.
 
 **B. Nothing fits today**

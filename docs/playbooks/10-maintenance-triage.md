@@ -13,7 +13,7 @@ Of about 200 problem reports: plumbing is the biggest group (leaks, clogs, smell
 1. **Safety screen first, every time.** If the message suggests an emergency (list below), the first reply is a safety instruction, and the owner is alerted immediately. Then triage.
 2. **Acknowledge within minutes.** One line that you got it, then one diagnostic question.
 3. **Ask, one at a time, only what you need:** what exactly happens, where, since when, is it getting worse, and a photo or short video. Use the trade checklist below.
-4. **Try the safe first fix** where one exists and the tenant is comfortable: breaker reset, router restart, plunger, check the shutoff valve, check the thermostat batteries. Never ask a tenant to open a panel, touch wiring, or climb a roof.
+4. **Try the safe first fix** where one exists and the tenant is comfortable: breaker reset, router restart, plunger, check the shutoff valve, check the thermostat batteries. Never ask a tenant to remove a panel cover, touch wiring, use tools on gas or electrical parts, or climb a roof.
 5. **Not solved:** `create_job` with the property, a clear issue description that includes what was tried, and a severity. `find_vendors` → `request_quote` (playbook 13).
 6. **Coordinate access:** ask the tenant for good time windows, tell them who is coming and when (`notify_tenant`, missing). Respect notice rules unless it is an emergency.
 7. **Close the loop:** after the visit, ask the tenant if it is fixed, and request a photo if it is visible. Report to the owner.
