@@ -977,3 +977,35 @@ def test_compose_drops_an_invented_phone_echo():
     ok = " ".join(compose.compose(["Got it, your phone is 919 555 0142.", "Why are you moving?"], "sms",
                                   "mi número es 919 555 0142"))
     assert "919 555 0142" in ok
+
+
+def test_content_free_ack_skips_model(env):
+    import rentus_tools as rt
+    daemon.register_adapters(env["store"])
+    calls = []
+
+    def runner(w, inbound, h):
+        calls.append(inbound["text"])
+        rt.call(w, "send_message", {"thread_id": inbound["thread_id"], "text": "When do you want to move in?"})
+        return _Res([])
+
+    env["tf"].push(OWNER_PHONE, "Is the room available?", "SM-k1")
+    daemon.poll_all(env["store"])
+    tid = api.list_threads()[0]["thread_id"]
+    daemon.run_turn(env["store"], tid, runner=runner)
+    for i, txt in enumerate(["ok", "\U0001F44D", ""]):
+        env["tf"].push(OWNER_PHONE, txt, f"SM-k{i + 2}")
+        daemon.poll_all(env["store"])
+        assert daemon.run_turn(env["store"], tid, runner=runner)["status"] == "content_free"
+    assert len(calls) == 1 and len(env["tf"].sent) == 1  # a question is pending: just wait
+
+
+def test_compose_drops_question_about_filled_item_and_caps_first_sms():
+    from channels.live import compose
+    out = compose.compose(["Thanks.", "Is a one year lease okay with you?"], "sms", filled={"lease"})
+    assert out == ["Thanks."]
+    first = " ".join(compose.compose(["It's a bedroom in a house on Appling Way in Durham, with a private bathroom.",
+                                      "Rent is $750 a month.", "It's available from November 1.",
+                                      "House rules: no smoking inside and no parties.",
+                                      "Is a one year lease okay with you?"], "sms", "how much?", first=True))
+    assert first.startswith("Rent is $750 a month.") and "House rules" not in first and first.count(".") == 2

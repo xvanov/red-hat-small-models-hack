@@ -103,7 +103,18 @@ def _only_refers_to_link(s: str, pool: list[str]) -> bool:
     return "http" not in s and bool(LINK_REF.search(s)) and any("http" in k for k in pool)
 
 
-def merge(texts: list[str], renter_text: str = "") -> list[str]:
+GATE_Q = {  # a question about this gate item (EN + ES)
+    "lease": r"\blease\b|one year|1 year|12 month|how long|contrato|un año|cu[aá]nto tiempo",
+    "move_in": r"move[- ]?in|when .*mov|moving date|mudar|mudanza|fecha",
+    "phone": r"phone|number to reach|best number|tel[eé]fono|n[uú]mero",
+    "reason": r"reason|why .*mov|what brings|motivo|por qu[eé]",
+    "occupants": r"how many (people|person)|who .*(living|live)|just you|personas|cu[aá]nt[oa]s|solo usted|solo t[uú]",
+}
+FIRST_KEEP = re.compile(r"\$\s?\d|available|disponible|private bath|baño privado|bathroom", re.I)
+FIRST_DROP = re.compile(r"house rules|reglas de la casa|I'll confirm|confirmar[eé]|pets?|mascotas", re.I)
+
+
+def merge(texts: list[str], renter_text: str = "", filled: set | None = None, first_sms: bool = False) -> list[str]:
     """Pooled, de-duplicated sentences: statements (answer first), then the last question."""
     pool: list[str] = []
     for t in texts:
@@ -114,6 +125,9 @@ def merge(texts: list[str], renter_text: str = "") -> list[str]:
             and not _invented_phone(s, renter_text)]
     questions = [s for s in pool if s.rstrip().endswith("?")]
     statements = [s for s in pool if not s.rstrip().endswith("?")]
+    if filled:  # never re-ask a gate item the register already has
+        questions = [q for q in questions
+                     if not any(re.search(GATE_Q[k], q, re.I) for k in filled if k in GATE_Q)]
     rq = (renter_text or "").lower()
     for ask, ans in TOPICS:
         if re.search(ask, rq):
@@ -122,6 +136,10 @@ def merge(texts: list[str], renter_text: str = "") -> list[str]:
                 statements.remove(hit)
                 statements.insert(0, hit)
             break
+    if first_sms and len(statements) > 2:  # a first text: the answer + the key facts, the rest comes later
+        keep = statements[:1] + [x for x in statements[1:] if FIRST_KEEP.search(x) and not FIRST_DROP.search(x)]
+        statements = keep[:2] if len(keep) >= 2 else (keep + [x for x in statements if x not in keep
+                                                              and not FIRST_DROP.search(x)])[:2]
     return statements + questions[-1:]
 
 
@@ -138,8 +156,9 @@ def _pack(sents: list[str], limit: int, max_parts: int) -> list[str]:
     return [" ".join(sents[:best]), " ".join(sents[best:])]
 
 
-def compose(texts: list[str], channel: str, renter_text: str = "") -> list[str]:
-    sents = merge(texts, renter_text)
+def compose(texts: list[str], channel: str, renter_text: str = "", filled: set | None = None,
+            first: bool = False) -> list[str]:
+    sents = merge(texts, renter_text, filled, first_sms=first and channel in ("sms", "messenger"))
     if not sents:
         return []
     if channel == "email":  # one email, no length limit: statements, each link line, the question

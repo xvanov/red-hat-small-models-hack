@@ -361,6 +361,69 @@ def with_live_note(history, cfg, w, role: str = "prospect"):
     return [{"role": "system", "content": load_prompt(cfg, facts) + "\n\n" + note}]
 
 
+CANNED = {"en": "Glad to help! Let me know if you have any questions.",
+          "es": "¡Con gusto! Avísame si tienes alguna pregunta."}
+GATE_LABEL = {"lease": "lease", "move_in": "move-in date", "phone": "phone", "reason": "reason for moving",
+              "occupants": "number of people"}
+
+
+def gate_note(w, wid: str) -> str:
+    """Per-turn status for the model, appended after the renter's words: which gate items the register already
+    has (never ask them again) and which one to ask next."""
+    row = next((r for r in getattr(w, "register", []) if wid in (r.get("thread_ids") or [])), None)
+    if not row:
+        return ""
+    g = row.get("gate") or {}
+    done, todo = [], []
+    for k in ("lease", "move_in", "phone", "reason", "occupants"):
+        it = g.get(k) or {}
+        if it.get("status") in ("answered", "exception", "no"):
+            v = it.get("date") or it.get("value")
+            done.append(f"{GATE_LABEL[k]}={v}" if v not in (None, "") else GATE_LABEL[k])
+        else:
+            todo.append(GATE_LABEL[k])
+    if not done:
+        return ""
+    nxt = f"; ask next: {todo[0]}" if todo else "; all five answered: propose a showing"
+    return f"\n\n[Status, not from the renter: already answered: {', '.join(done)} (never ask these again){nxt}.]"
+
+
+def content_free_skip(store: Store, thread_id: str, new_in: list[dict]) -> dict | None:
+    """"ok" / "thanks" / an emoji / an empty body: no model turn. If our last message asked something still
+    unanswered, just wait; otherwise one short canned line, at most once per hour per thread."""
+    if not new_in or not all(is_ack(m["text"]) for m in new_in):
+        return None
+    with store.locked():
+        t = store.get_thread(thread_id)
+        last_out = next((m for m in reversed(t["messages"]) if m["direction"] == "out" and m.get("status") == "sent"),
+                        None)
+        t["world_synced"] = sorted(set(t.get("world_synced") or []) | {m["id"] for m in new_in})
+        t["pending_turn"] = False
+        t["busy"], t["busy_since"], t["turn_owner"] = False, None, None
+        pending_q = bool(last_out and (last_out.get("text") or "").rstrip().endswith("?"))
+        recent = time.time() - float(t.get("last_canned_epoch") or 0) < 3600
+        send_canned = not pending_q and not recent and t.get("role", "prospect") == "prospect"
+        if send_canned:
+            t["last_canned_epoch"] = time.time()
+        t["trace"].append({"ts": now_iso(), "actor": "operator", "name": "content_free",
+                           "summary": "short acknowledgement: " + ("one canned line" if send_canned else
+                                                                   "no reply (waiting for their answer)"), "ok": True})
+        store.save_thread(t)
+    if send_canned:
+        lang = "es" if demo.is_spanish(" ".join((m["text"] or "") for m in t["messages"][-6:])) else "en"
+        outbound.deliver(store, thread_id, CANNED[lang], origin="operator")
+    return {"ok": True, "status": "content_free", "seconds": 0.0}
+
+
+ACK_RE = re.compile(r"(?i)[\W_]*(ok(ay)?|k|kk|thanks?|thank you|thx|ty|cool|great|perfect|got it|nice|gracias|vale|"
+                    r"listo|ok gracias|sounds good)?[\W_]*")
+
+
+def is_ack(text: str) -> bool:
+    """Content-free: ok / thanks / an emoji / an empty body (a photo with no text)."""
+    return bool(ACK_RE.fullmatch((text or "").strip()))
+
+
 def needs_answer(text: str) -> bool:
     """A renter batch that must not go unanswered: a question or a substantive message (not ok/thanks/emoji)."""
     t = (text or "").strip()
@@ -380,9 +443,12 @@ def flush(store: Store, thread_id: str, channel: str, renter_text: str) -> dict 
         texts = texts + [link]
     if not texts:
         return None
-    parts = compose.compose(texts, channel, renter_text)
     with store.locked():
         tt = store.get_thread(thread_id) or {}
+    filled = {k if k != "people" else "occupants" for k, v in (tt.get("gate") or {}).items() if v == "exact"}
+    first = not any(m["direction"] == "out" and m.get("status") == "sent" for m in tt.get("messages", []))
+    parts = compose.compose(texts, channel, renter_text, filled=filled if tt.get("role", "prospect") == "prospect"
+                            else None, first=first)
     if tt.get("demo") and not tt.get("disclosed") and parts:
         d = demo.disclosure("es" if demo.is_spanish(renter_text) else "en")
         if channel == "email":  # the email already opens with "Hi <name>,"
@@ -453,6 +519,9 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
         owner_pending = list(t.get("owner_pending") or [])
         synced = set(t.get("world_synced") or [])
         new_in = [m for m in t["messages"] if m["direction"] == "in" and m["id"] not in synced]
+    skip = content_free_skip(store, thread_id, new_in)
+    if skip is not None:
+        return skip
     print(time.strftime("%H:%M:%S"), f"turn start {thread_id} ({len(new_in)} new message(s))", flush=True)
     t0 = time.time()
     try:
@@ -472,6 +541,8 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
         esc0, rep0 = len(w.escalations), len(w.owner_reports)
         inbound = {"thread_id": wid, "channel": registry.world_channel(t["channel"]),
                    "renter_name": t.get("renter_name") or "a renter", "text": "\n".join(m["text"] for m in new_in)}
+        status_note = gate_note(w, wid) if t.get("role", "prospect") == "prospect" else ""
+        model_inbound = dict(inbound, text=inbound["text"] + status_note) if status_note else inbound
         if ADAPTER is not None:
             ADAPTER.begin_turn(thread_id)
         if runner is None:
@@ -482,7 +553,7 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
             be = toolbox.backend("real")
             run_id = f"live_{thread_id.replace(':', '_')}_{int(time.time())}"
             sink = toolbox.make_sink(be, run_id, path=store.root / "events" / f"{run_id}.jsonl")
-            res = run(w, inbound, config=cfg, sink=sink, backend=be, run_id=run_id, history=history)
+            res = run(w, model_inbound, config=cfg, sink=sink, backend=be, run_id=run_id, history=history)
         else:
             res = runner(w, inbound, history)
     except Exception as e:

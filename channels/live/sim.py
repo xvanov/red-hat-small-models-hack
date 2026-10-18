@@ -60,6 +60,10 @@ SCENARIOS: dict[str, dict] = {
                                                 (0, "is it still available?")]},
     "two_contacts": {"channel": "sms", "script": [(0, "Hi is the room available?")],
                      "second_contact": [(0, "Hola, ¿está disponible el cuarto?")]},
+    "photo_empty": {"channel": "sms", "script": [(0, "Is the Appling Way room available?"), (0, ""),
+                                                 (0, "\U0001F4F7")]},
+    "rapid5": {"channel": "sms", "script": [(0, "hi"), (2, "is the room"), (2, "on appling way"),
+                                            (2, "still available"), (2, "and how much is it?")], "expect_replies": 1},
     "email_quoted": {"channel": "email",
                      "script": [(0, "Is the room on Appling Way still available? I'd move in December.\n\n"
                                     "Thanks,\nJane\nSent from my iPhone\n\nOn Sat, Oct 17, 2026 at 9:00 AM Rentus "
