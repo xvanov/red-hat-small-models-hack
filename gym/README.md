@@ -5,7 +5,8 @@ This folder has the tasks, the tools the agent uses and the code that scores eve
 ```
 rentus_env/            pure-Python core (3.12+), shared by both runners and the console
   session.py           RolloutSession: one World per rollout, wraps rentus_tools.call, records the trace
-  counterparts.py      scripted renters, tenants and vendors (no model, decision D4)
+  counterparts.py      scripted renters, tenants and vendors (no model, decision D4; the default)
+  llm_renter.py        opt-in model-played renter (counterpart "mode": "llm_renter"): persona + hidden truth sheet
   verify.py            the scorer: 7 check types, reward = fraction of checks passed
   backend.py           finds rentus_tools (W3), falling back to the operator shim
 resources_servers/rentus/   the NeMo Gym resources server (tool routes, seed_session, verify) + config + data
@@ -15,6 +16,9 @@ build_tasks.py         regenerates tasks/ (seeded, reproducible)
 oracle.py              privileged reference policy: proves every task is solvable (31/31, 51/51)
 run_eval.py            score one config on one split, local loop or NeMo Gym rollout collection
 ablate.py              baseline + one-knob-at-a-time variants -> results/ablations.md
+stats.py               CIs (Wilson / bootstrap), pass^k and pass@k, run-to-run sd, paired bootstrap + exact McNemar
+run_seeds.py           run one config K times with operator seeds, then the stats report
+llm_renter_tasks.py    converts scripted leasing tasks to llm_renter tasks -> tasks/llm_renter/demo_train.jsonl
 stub_endpoint.py       offline OpenAI-compatible stand-in for vLLM (plumbing tests only)
 NOTES_nemo_gym.md      how NeMo Gym works and how we plug into it
 ```
@@ -52,6 +56,19 @@ Each run writes `results/<run_name>/summary.json` (pass rate, mean reward, by ca
 - **nemo** (`--via nemo`): `gym env start` launches our resources server, NeMo's `simple_agent` and NeMo's `vllm_model` server, and `gym eval run --no-serve` collects the rollouts. This is NeMo Gym's own rollout and reward collection, which the bounty asks for. `simple_agent` is NeMo's harness, so the `verifier` knob doesn't apply on this path. Prompt, tool descriptions and reader do.
 
 Both runners score with `rentus_env.verify` over the same trace format. On the stub, the two paths give the same held-out mean reward (0.2184).
+
+## Statistics and model-played renters
+
+Methodology, the v1 re-analysis with confidence intervals, and the llm_renter design are in `docs/eval-method.md`.
+
+```bash
+gym/.venv/bin/python gym/stats.py --md --categories --config final=RUN1,RUN2 --config base=RUN3,RUN4 --compare final:base
+gym/.venv/bin/python gym/run_seeds.py --variant guard+prompt3+style+rhist --split heldout --seeds 1,2,3 --prefix seeds-final
+gym/.venv/bin/python gym/llm_renter_tasks.py      # 6 v2 train tasks -> tasks/llm_renter/demo_train.jsonl (source untouched)
+gym/.venv/bin/python gym/run_seeds.py --tasks-file gym/tasks/llm_renter/demo_train.jsonl --seeds 1 --prefix llm-renter-demo --workers 6
+```
+
+`run_eval.py` also takes `--tasks-file` (any task JSONL) and `--seed` (operator sampling seed, sent as the OpenAI `seed` field). The simulator defaults to the local Lightning endpoint; `RENTER_SIM_BASE_URL`, `RENTER_SIM_MODEL`, `RENTER_SIM_API_KEY` or a task's `simulator` block point it elsewhere. Simulator models are not part of the running system (organizer ruling, 2026-10-17).
 
 ## Task schema
 

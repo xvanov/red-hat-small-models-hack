@@ -13,6 +13,14 @@ from typing import Any
 from .backend import Backend, snapshot, state
 from .counterparts import Counterpart
 
+
+def make_counterpart(spec: dict, task: dict):
+    """Scripted by default; `"mode": "llm_renter"` opts one counterpart into the model-played renter."""
+    if spec.get("mode") == "llm_renter":
+        from .llm_renter import LLMRenter
+        return LLMRenter(spec, task)
+    return Counterpart(spec)
+
 GATE_ITEMS = ("lease", "move_in", "phone", "reason", "occupants")
 GOOD_STATUS = {"answered", "exception"}
 
@@ -51,7 +59,8 @@ class RolloutSession:
         if task.get("faults"):
             patch["faults"] = copy.deepcopy(task["faults"])
         self.world = self.backend.new_world(patch)
-        self.counterparts = {c.thread_id: c for c in (Counterpart(s) for s in task.get("counterparts", []))}
+        self.counterparts = {c.thread_id: c for c in (make_counterpart(s, task) for s in task.get("counterparts", []))}
+        self.sim_events: list[dict] = []   # llm_renter turns, as renter_message events (actor renter:<id>)
         self._seed_threads()
 
     # ---------------------------------------------------------------------------------- setup
@@ -115,7 +124,7 @@ class RolloutSession:
         entry["error"] = None if env.get("ok") else (env.get("error") or {}).get("code")
         if env.get("ok") and name == "send_message":
             self.transcript.append({"thread_id": args.get("thread_id"), "from": "operator", "text": args.get("text", "")})
-            reply = self._counterpart_reply(args.get("thread_id"), args.get("text", ""))
+            reply = self._counterpart_reply(args.get("thread_id"), args.get("text", ""), call_kw.get("sink"))
             if reply:
                 entry["asked"], entry["reply"] = reply
                 if self.surface_replies and isinstance(env.get("data"), dict):
@@ -124,11 +133,24 @@ class RolloutSession:
         self.trace.append(entry)
         return env
 
-    def _counterpart_reply(self, thread_id: str, text: str):
+    def _counterpart_reply(self, thread_id: str, text: str, sink=None):
         cp = self.counterparts.get(thread_id)
         if cp is None:
             return None
         asked, say = cp.respond(text)
+        if hasattr(cp, "log"):   # model-played renter: log the turn as an event from actor renter:<id>
+            actor = cp.id if cp.id.startswith("renter:") else f"renter:{cp.id}"
+            turn = cp.log[-1] if cp.log else {}
+            ev = {"type": "renter_message", "actor": actor, "ts": self.backend.now(self.world),
+                  "data": {"thread_id": thread_id, "text": say, "asked": asked, "turn": turn.get("turn"),
+                           "revealed": turn.get("revealed"), "ghosted": bool(turn.get("ghosted")),
+                           "fallback": bool(turn.get("fallback")), "simulator": "llm_renter"}}
+            self.sim_events.append(ev)
+            if sink is not None and hasattr(sink, "emit"):
+                try:
+                    sink.emit("renter_message", actor, ev["data"])
+                except Exception:  # noqa: BLE001 - logging must never break a rollout
+                    pass
         if say is None:
             return None
         t = next((t for t in self.backend.coll(self.world, "threads") if t.get("thread_id") == thread_id), None)
@@ -138,6 +160,13 @@ class RolloutSession:
         return asked, say
 
     # ----------------------------------------------------------------------------------- views
+    def simulator_log(self) -> dict | None:
+        """Per-renter simulator turns (llm_renter only), for the transcript file."""
+        logs = {cp.id: {"turns": cp.log, "ghosted": cp.ghosted, "model": cp.sim.get("model"), "seed": cp.sim.get("seed"),
+                        "temperature": cp.sim.get("temperature")}
+                for cp in self.counterparts.values() if hasattr(cp, "log")}
+        return {"renters": logs, "events": self.sim_events} if logs else None
+
     def final_state(self) -> dict:
         return snapshot(self.world)
 

@@ -106,9 +106,11 @@ def start_stub() -> str:
 
 
 def load_tasks(split: str, ids: list[str] | None = None, limit: int | None = None,
-               version: str = "v1") -> list[dict]:
-    """v1 = gym/tasks/{split}.jsonl (the set every committed result used); v2 = gym/tasks/v2/{split}.jsonl."""
-    path = HERE / "tasks" / (f"{split}.jsonl" if version == "v1" else f"{version}/{split}.jsonl")
+               version: str = "v1", tasks_file: str | None = None) -> list[dict]:
+    """v1 = gym/tasks/{split}.jsonl (the set every committed result used); v2 = gym/tasks/v2/{split}.jsonl.
+    `tasks_file` (any JSONL of tasks, e.g. gym/tasks/llm_renter/demo_train.jsonl) overrides split/version."""
+    path = Path(tasks_file) if tasks_file else \
+        HERE / "tasks" / (f"{split}.jsonl" if version == "v1" else f"{version}/{split}.jsonl")
     tasks = [json.loads(l) for l in open(path)]
     if ids:
         tasks = [t for t in tasks if t["id"] in ids]
@@ -130,6 +132,34 @@ def opening_text(goal) -> str:
 
 
 # ------------------------------------------------------------------------------------ local
+OPERATOR_SEED: int | None = None   # set by evaluate() from --seed
+
+
+class _SeededCompletions:
+    def __init__(self, inner, seed: int):
+        self._inner, self._seed = inner, seed
+
+    def create(self, **kw):
+        kw.setdefault("seed", self._seed)
+        return self._inner.create(**kw)
+
+    def __getattr__(self, k):
+        return getattr(self._inner, k)
+
+
+class SeededClient:
+    """Wraps an OpenAI client so every chat.completions.create carries `seed` (vLLM: per-request sampler seed).
+    Same seed + same inputs gives the same sample on one vLLM server, up to batch-level numeric noise."""
+
+    def __init__(self, inner, seed: int):
+        self._inner = inner
+        self.chat = type("Chat", (), {})()
+        self.chat.completions = _SeededCompletions(inner.chat.completions, seed)
+
+    def __getattr__(self, k):
+        return getattr(self._inner, k)
+
+
 def operator_backend(s: RolloutSession):
     """A module-like backend for rentus_operator.run that routes every call through the session."""
     be = s.backend
@@ -151,6 +181,8 @@ def run_local_task(task: dict, cfg, run_dir: Path) -> dict:
     s = RolloutSession(task, backend=Backend())
     goal = opening_goal(task, s)
     client = make_client(cfg, timeout=180, max_retries=1)
+    if OPERATOR_SEED is not None and cfg.api == "openai":
+        client = SeededClient(client, OPERATOR_SEED)
     run_id = f"{task['id']}-{uuid.uuid4().hex[:6]}"
     status, final_text, steps, err, messages = "error", "", 0, None, []
     try:
@@ -163,7 +195,8 @@ def run_local_task(task: dict, cfg, run_dir: Path) -> dict:
     r = verify(task, s.trace, s.final_state(), final_text)
     (run_dir / "transcripts").mkdir(exist_ok=True)
     (run_dir / "transcripts" / f"{task['id']}.json").write_text(json.dumps(
-        {"task_id": task["id"], "status": status, "messages": messages, "trace": s.trace, "renter_view": s.transcript},
+        {"task_id": task["id"], "status": status, "messages": messages, "trace": s.trace, "renter_view": s.transcript,
+         **({"simulator": s.simulator_log()} if s.simulator_log() else {})},
         default=str, ensure_ascii=False, indent=1))
     out = {**r, "subcategory": task.get("subcategory"), "status": status, "steps": steps, "error": err,
            "final_text": final_text[:2000], "seconds": round(time.time() - t0, 2)}
@@ -314,7 +347,9 @@ def git_head() -> str | None:
 
 
 def evaluate(args, cfg=None) -> dict:
+    global OPERATOR_SEED
     load_env_file()
+    OPERATOR_SEED = getattr(args, "seed", None)
     cfg = cfg or make_config(args)
     stub = args.stub
     if stub:
@@ -336,7 +371,7 @@ def evaluate(args, cfg=None) -> dict:
         except Exception as e:  # noqa: BLE001
             raise SystemExit(f"model endpoint {cfg.base_url} cannot generate: {type(e).__name__}: {e}")
     tasks = load_tasks(args.split, args.ids.split(",") if args.ids else None, args.limit,
-                       getattr(args, "tasks_version", "v1"))
+                       getattr(args, "tasks_version", "v1"), getattr(args, "tasks_file", None))
     run_dir = RESULTS / args.run_name
     if run_dir.exists() and not args.keep:
         shutil.rmtree(run_dir)
@@ -360,6 +395,7 @@ def evaluate(args, cfg=None) -> dict:
             f.write(json.dumps(r, ensure_ascii=False, default=str) + "\n")
     cfg_d = {k: v for k, v in asdict(cfg).items() if k != "api_key"}
     meta = {"run_name": args.run_name, "split": args.split, "tasks_version": getattr(args, "tasks_version", "v1"),
+            "tasks_file": getattr(args, "tasks_file", None), "operator_seed": getattr(args, "seed", None),
             "via": args.via, "stub": stub,
             "model": cfg.model, "base_url": cfg.base_url, "config_label": cfg.label(), "config": cfg_d,
             "tools_backend": Backend().name, "git": git_head(),
@@ -388,6 +424,9 @@ def build_parser():
     ap.add_argument("--split", default="heldout", choices=["train", "heldout"])
     ap.add_argument("--tasks-version", default="v1", choices=["v1", "v2"],
                     help="task set: v1 (all committed results) or v2 (docs/task-v2-changes.md)")
+    ap.add_argument("--tasks-file", default=None, help="JSONL of tasks; overrides --split/--tasks-version")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="operator sampling seed, sent as the OpenAI `seed` field on every model call (vLLM honours it)")
     ap.add_argument("--run-name", required=True)
     ap.add_argument("--via", default="local", choices=["local", "nemo"])
     ap.add_argument("--stub", action="store_true", help="use gym/stub_endpoint.py instead of a model (plumbing only)")
