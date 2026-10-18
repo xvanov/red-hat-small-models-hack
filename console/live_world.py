@@ -116,7 +116,7 @@ def _exists(p: str | None) -> bool:
     return bool(p) and ((REPO / p).is_file() or Path(p).is_file())
 
 
-LOGIN_RE = re.compile(r"(channels/\.venv/bin/python -m channels\.login \w+)")
+LOGIN_RE = re.compile(r"(channels/\.venv/bin/python -m channels\.login (?:import-cookies )?\w[\w-]*)")
 
 
 def posts(listings: list[dict], events: list[dict], fb: dict) -> list[dict]:
