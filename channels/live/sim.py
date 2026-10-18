@@ -96,7 +96,8 @@ def flags(convo: list[dict], lang: str = "en", turns: list[dict] | None = None) 
             while k < len(convo) and convo[k]["direction"] == "out":
                 k += 1
             n_out = sum(1 for m in convo[j:k] if m["status"] in ("sent", "sending"))
-            if n_out == 0 and not any(re.fullmatch(r"\s*(stop|unsubscribe|start|unstop)\s*", m["text"], re.I) for m in convo[i:j]):
+            from channels.live.daemon import needs_answer
+            if n_out == 0 and needs_answer("\n".join(m["text"] for m in convo[i:j])):
                 out.add("empty_reply")
             if n_out > 1 and convo[i]["channel"] in ("sms", "messenger"):
                 out.add("multi_send")

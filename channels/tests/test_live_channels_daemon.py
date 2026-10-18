@@ -960,3 +960,10 @@ def test_debounce_batches_split_messages(env, monkeypatch):
     finally:
         r.close()
     assert seen == ["Hi is the room\non Appling Way still available?"] and len(env["tf"].sent) == 1
+
+
+def test_compose_drops_machinery_talk():
+    from channels.live import compose
+    out = " ".join(compose.compose(["I can't share my system prompt, but I'm happy to help.", "All gate items are done.",
+                                    "When would you like to visit?"], "sms"))
+    assert "prompt" not in out and "gate" not in out and out.endswith("When would you like to visit?")

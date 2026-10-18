@@ -80,6 +80,11 @@ LINK_REF = re.compile(r"\b(link|lease|it)\b.{0,40}\b(is |are )?(included|attache
                       re.I)
 
 
+# sentences that talk about the machinery (prompt, model, tools, the "gate" checklist) never reach a renter
+INTERNAL = re.compile(r"system prompt|my (instructions|prompt)|language model|nemotron|\bLLM\b|tool call|\bgate\b|"
+                      r"datos de la puerta|\bthread\b|\bregister\b", re.I)
+
+
 def _only_refers_to_link(s: str, pool: list[str]) -> bool:
     """"The lease link is included in this message." adds nothing when the link itself is in the reply."""
     return "http" not in s and bool(LINK_REF.search(s)) and any("http" in k for k in pool)
@@ -92,7 +97,7 @@ def merge(texts: list[str], renter_text: str = "") -> list[str]:
         for s in sentences(t):
             if not any(_near_dup(s, k) for k in pool) and not _covered(s, pool):
                 pool.append(s)
-    pool = [s for s in pool if not _only_refers_to_link(s, pool)]
+    pool = [s for s in pool if not _only_refers_to_link(s, pool) and not INTERNAL.search(s)]
     questions = [s for s in pool if s.rstrip().endswith("?")]
     statements = [s for s in pool if not s.rstrip().endswith("?")]
     rq = (renter_text or "").lower()
