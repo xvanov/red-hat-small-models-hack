@@ -32,7 +32,11 @@ RAW = ROOT / "raw"
 PROC = ROOT / "processed"
 UA = {"User-Agent": "rentus-hackathon-data/0.1 (open-data research)"}
 
-SGD_ZIP = "https://github.com/google-research-datasets/dstc8-schema-guided-dialogue/archive/refs/heads/master.zip"
+# Pinned (leakage review #8): the commit the reader set was built from. GitHub writes the commit into the zip comment,
+# which is checked after download; the derived Homes file must hash to SGD_HOMES_SHA256.
+SGD_COMMIT = "e852981ae34990f4358979625854259302feaa78"
+SGD_ZIP = f"https://github.com/google-research-datasets/dstc8-schema-guided-dialogue/archive/{SGD_COMMIT}.zip"
+SGD_HOMES_SHA256 = "e0d67c28e876a4e947d7cbfa7c4b6d146d04145c7e2fd3b6191b752d0e4c0e3e"
 UCI_ZIP = "https://archive.ics.uci.edu/static/public/555/apartment+for+rent+classified.zip"
 ZORI_CSV = "https://files.zillowstatic.com/research/public_csvs/zori/Zip_zori_uc_sfrcondomfr_sm_month.csv"
 AIRBNB_PAGE = "https://insideairbnb.com/get-the-data/"
@@ -63,7 +67,12 @@ def sgd() -> None:
     if out.exists():
         print(f"  have {out.relative_to(ROOT)}")
         return
-    z = fetch(SGD_ZIP, RAW / "sgd" / "sgd-master.zip", timeout=600)
+    z = RAW / "sgd" / "sgd-master.zip"   # an earlier download of master at the same commit is accepted
+    if not z.exists():
+        z = fetch(SGD_ZIP, RAW / "sgd" / f"sgd-{SGD_COMMIT[:12]}.zip", timeout=600)
+    got = zipfile.ZipFile(z).comment.decode(errors="replace").strip()
+    if got != SGD_COMMIT:
+        raise SystemExit(f"SGD archive is commit {got!r}, expected {SGD_COMMIT}")
     kept, schemas = 0, {}
     with zipfile.ZipFile(z) as zf, open(out, "w") as fo:
         for name in zf.namelist():
@@ -81,7 +90,10 @@ def sgd() -> None:
                     fo.write(json.dumps(d) + "\n")
                     kept += 1
     (RAW / "sgd" / "homes_schema.json").write_text(json.dumps(schemas, indent=1))
-    print(f"  kept {kept} Homes dialogues -> {out.relative_to(ROOT)}")
+    import hashlib
+    h = hashlib.sha256(out.read_bytes()).hexdigest()
+    print(f"  kept {kept} Homes dialogues -> {out.relative_to(ROOT)} (sha256 {h[:12]}, "
+          f"{'matches the pin' if h == SGD_HOMES_SHA256 else 'DOES NOT MATCH the pin ' + SGD_HOMES_SHA256[:12]})")
 
 
 def uci() -> None:
