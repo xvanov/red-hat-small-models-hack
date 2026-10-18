@@ -5,7 +5,7 @@ Written 2026-10-18 ~04:30 ET, **before** the final experiments run. Independent 
 ## 0. What has already been seen (so the reader can discount it)
 
 - **v1 tasks** (`gym/tasks/{train,heldout}.jsonl`): run about 15 times on held-out. Superseded, and used for no claim below.
-- **v2 held-out** (`gym/tasks/v2/heldout.jsonl`, 33 tasks): run once per config (baseline, final, final + router: 3 seeds each; NeMo path: 2 seeds) at commit `437b611`. The results, and the specific failure patterns behind them, are written up in `docs/results.md`: the `first_person` phrase "pending the owner's confirmation", missing `not_now` / `lost` statuses, and the router's lost move-in dates. Held-out check details were read to write that up. So **v2 held-out is contaminated for any change that targets those patterns.** It stays a secondary set, and it is flagged wherever it is used.
+- **v2 held-out** (`gym/tasks/v2/heldout.jsonl`, 33 tasks): run once per config (baseline, final, final + router: 3 seeds each; NeMo path: 2 seeds) at commit `437b611`. The results, and the specific failure patterns behind them, are written up in `docs/results.md`: the `first_person` phrase "pending the owner's confirmation", missing `not_now` / `lost` statuses, and the router's lost move-in dates. Held-out check details were read to write that up. So **v2 held-out is contaminated for any change that targets those patterns.** It stays a secondary set, and it is flagged wherever it is used. *(Amendment 1: worse than that. v2 held-out shares 31 of 33 tasks and 81 of 92 reader utterances with v1 held-out, and v2 was designed from v1 held-out transcripts, so v2 is exploratory only. `b190ed2` and `08cbaa9` changed a tool hint and added a guard after the v2 held-out failures; see A9.)*
 - **Reader synthetic test** (`data/published/reader/test.jsonl`, 1,419 rows): scored once per system. It was never used for training or prompt tuning.
 - **Owner's private data**: explored locally (aggregate counts and paraphrase only, in `~/rentus-private-data/work/`). The exploration covered every period, including the held-out window defined in §2.2. That is a known leak of *knowledge about situation types*, not of task content (§8).
 - **Never seen by anyone**: v3 twin tasks (not generated yet), the twin reader test set, and the real-replay outputs.
@@ -14,7 +14,7 @@ Written 2026-10-18 ~04:30 ET, **before** the final experiments run. Independent 
 
 The primary test set for H1, H3 and H4 is **v3 held-out** (§2.2), because it is the only uncontaminated agent set. v2 held-out results are reported next to them as secondary.
 
-δ (the non-inferiority margin) = **0.05 mean reward**, fixed now. It is about the size of the shift one task-level flip causes on 20 to 40 tasks, and slightly above the router's measured v2 drop (0.053).
+δ (the non-inferiority margin) = **0.05 mean reward**. *(Amendment 1, A2: the original justification was wrong (0.05 is below the router's v2 drop of 0.053, and one task flip moves mean reward by about 0.0025, not 0.05), and δ was chosen after seeing v1 and v2 results. δ stays 0.05, fixed before any v3 run; v3 is the only confirmatory set.)*
 
 | ID | Claim | Primary metric (test) | Secondary metrics | Counts as NOT supported if |
 |---|---|---|---|---|
@@ -26,7 +26,7 @@ The primary test set for H1, H3 and H4 is **v3 held-out** (§2.2), because it is
 | H5 | Prefix caching raises serving throughput on the real operator prompt | output tok/s at N = 32, caching on vs off (`cache_salt`), 3 back-to-back paired repetitions | TTFT p50, gains at N = 8 and N = 64, reader latency under load | the gain is ≤ 0 in any repetition, or the mean gain is < 25%. One repetition (+76%) exists already. This claim is engineering, not inference, so it is outside the Holm family |
 | H6 | On real held-out conversations replayed in shadow mode, the system behaves acceptably | **descriptive, with pre-set targets** (§2.4): never-do violations = 0; style pass on drafts ≥ 90%; reader exact match on owner-checked labels ≥ 0.70; agreement with the next action required by the current rules ≥ 60% | escalation rate, register completeness, per-situation breakdown (cells < 5 suppressed) | any target missed. It is reported as missed, with no re-run against the same threads |
 
-**Primary Holm family** (familywise α = 0.05): H1, H2a, H2b, H3(ii), H4. That is 5 tests (fewer if some are untested). H3(i) is a large, mechanical effect and is reported with its CI only. Secondary metrics get uncorrected 95% CIs and are labeled "secondary". No claim rests on them alone.
+**Primary Holm family** *(superseded by Amendment 1, A1: one-sided tests, familywise α = 0.025, m = 5 fixed: H1, H2a, H2b, H3 as an intersection-union of (i) and (ii), H4)* (familywise α = 0.05): H1, H2a, H2b, H3(ii), H4. That is 5 tests (fewer if some are untested). H3(i) is a large, mechanical effect and is reported with its CI only. Secondary metrics get uncorrected 95% CIs and are labeled "secondary". No claim rests on them alone.
 
 **A new candidate** (e.g. prompt v4 from lane 2, or a router fix): it gets one pre-declared slot, "H1b: candidate vs final, v3 held-out, two-sided". It joins the Holm family only if it is named in an amendment *before* the v3 held-out freeze. Otherwise it is reported on train only.
 
@@ -40,7 +40,7 @@ These use the per-task SD of paired reward differences seen on v2: ≈ 0.13 for 
 | 40 (expected v3) | 0.058 | 0.10 | ~18 points |
 | 80 | 0.041 | 0.072 | ~13 points |
 
-So H1 is well powered (v2 effect +0.36). H3(ii) and H4 can only show non-inferiority if the true difference is close to 0. A δ of 0.05 at n ≈ 40 needs a true Δ of about ≥ −0.01. The reader tests (H2) have n in the hundreds of rows and are well powered for differences of 5 points or more.
+So H1 is well powered (v2 effect +0.36). H3(ii) and H4 can only show non-inferiority if the true difference is close to 0. A δ of 0.05 at n ≈ 40 needs a true Δ of about ≥ −0.01. ~~The reader tests (H2) have n in the hundreds of rows and are well powered for differences of 5 points or more.~~ *(Withdrawn; simulated power in Amendment 1, A3.)*
 
 ## 2. Datasets and splits
 
@@ -64,7 +64,7 @@ Built by `data/twins/` (ingest → label → twin → privacy filter → tasks).
 - The reader is not retrained after this protocol. Its checkpoint is frozen (§6).
 
 ### 2.4 Private real-replay set (aggregate only)
-- The same held-out window and the same person rule as §2.2, as real (anonymized) text. It never leaves the owner's machine. Every model client refuses non-local endpoints (`common.LocalLLM`). The frontier is **never** run on it.
+- The same held-out window and the same person rule as §2.2, as real (anonymized) text. Private data never leaves infrastructure we control: this machine and our rented GPU instance (reached over an encrypted SSH tunnel); it is never sent to a third-party model API and never committed (Amendment 1, A10; D28). The frontier is **never** run on it.
 - **Replay.** For each thread, the renter's messages are fed in order to the final config in **shadow mode** (sandbox tools, `send_message` captured, nothing sent). The owner's real replies are not shown to the operator. After each operator turn, the next real renter message is injected, whatever the operator said (open-loop). This is a known limit: the renter cannot react to the operator.
 - **Metrics:**
   - never-do violations (promising a discount, quoting an unconfirmed fact, naming the 6-month floor unasked, confirming a showing the owner has not confirmed, any send outside the thread);
@@ -98,6 +98,7 @@ Each check is pass or fail. Reward = the share of checks passed. A task passes o
 Floor: a do-nothing agent scores 0.291 mean reward on v2 (stub). **Pass rate and pass^k are read alongside reward, never reward alone.** Scripted renters can go silent when the operator's question doesn't match a keyword (fallback lines reduce this but don't remove it).
 
 ### 3.2 Human validation of the scorer
+*(Superseded by Amendment 1, A5: simple random sample, blinded, rubric fixed in advance.)*
 - **What.** After all held-out runs finish, the owner grades **N = 40** transcripts, drawn with a fixed seed from v3 held-out across configs: 15 scorer-pass, 15 scorer-fail, and 10 near-miss (reward ≥ 0.85 but fail). The owner is blind to the config and to the scorer's verdict. Per transcript, the owner gives (a) a pass/fail per scorer check and (b) one overall verdict: "would I let this conversation happen under my name?".
 - **Report.** Task-level Cohen's κ between the scorer's pass and the owner's overall verdict, with a bootstrap CI. Per-check-type percent agreement and κ where there are 10 or more items. Every disagreement listed in one line.
 - **Pre-set threshold: κ ≥ 0.60** (point estimate) for the task-level agreement. Below that, headline pass rates are reported as "scorer-defined pass rate" with the κ next to them, and no claim describes them as "correct behavior". The scorer is **not** changed and re-run to raise κ.
@@ -171,7 +172,7 @@ Common to every Lightning config: `model=nemotron-3.5-lightning` (`nvidia/NVIDIA
 | `gym/tasks/v2/train.jsonl` | `03ba99a1c82f22b2b4a07c49b2b3d17b1c76c441bd44fc3334be4694b60fc8d6` |
 | `data/published/reader/test.jsonl` | `2b880ee1658fc421aaa2baa81f5d855c18014238301c58da88fab67d99999bfc` |
 | `data/published/reader/dev.jsonl` | `b7fb0bbe33ec1fed87e068205492b445ebed8806ea57b9f4ca32f5068b36c4bb` |
-| `gym/rentus_env/verify.py` | `62fffb18f20e56e20d8d48158240fb9d59e461a71c6018b1017674b8149438f3` |
+| `gym/rentus_env/verify.py` | `62fffb18f20e56e20d8d48158240fb9d59e461a71c6018b1017674b8149438f3` (changed by Amendment 1; the new hash goes into the freeze commit) |
 | `operator/prompts/system_v3.md` | `fdfa90a7f2052c20348c2dc9d6e7734b134257e1dc27d0daca1a9181060f1aa0` |
 | reader `model.safetensors` (release `reader-v1`, HF `xvanov/rentus-reader-qwen3-0.6b`) | `877c884355584ed5c78caaca741e33cc438037f2dc80cb991119c97476dc2ec6` |
 | reader tarball `rentus-reader-qwen3-0.6b-v1.tar.gz` | `c310824fc52f20a2e88ce2e7a9ce5e167ddc5069db048bfee69ba8e2e16ba466` |
@@ -252,6 +253,163 @@ Agent runs: `gym/results/<prefix>-s<seed>/` (`summary.json` with RunConfig, comm
 13. **Infrastructure noise.** The GPU is shared and the tunnel drops. Rerun rules (§4.4) are outcome-independent but change which samples are kept. Latency numbers from agent runs are not controlled.
 14. **One grader.** The owner is the only human grader (no inter-rater check between humans), and he has a stake in the result. Blinding (§3.2, §7.1) is the guard.
 15. **Simulator realism.** The model-played renter is the operator's model family and may be easier to talk to than real people. That is why it is secondary.
+
+## Amendment 1 (2026-10-18 ~04:00 ET, before any v3 task or twin reader row has been run by any model)
+
+Answers every blocker and major in `docs/reviews/stats-review.md` (S-), `docs/reviews/leakage-review.md` (L-) and `docs/reviews/scorer-privacy-review.md` (P-). Where this section and §1 to §8 disagree, **this section wins**. No v3 result and no twin reader test result existed when it was written; its commit time is the proof. The code it names is committed before this file (commits `0639d85` to `b366d44`).
+
+### A1. Confirmatory hypotheses and their tests (final list)
+
+Every confirmatory test is **one-sided**. The family is fixed at **m = 5**, Holm step-down at **familywise one-sided α = 0.025** (the usual two-sided 0.05, stated as one-sided tests). A hypothesis whose runs are missing or incomplete at analysis time stays in the family with **p = 1** ("not tested"); m never shrinks (S-12). The plan is machine-readable in `gym/confirmatory_v3.json` and is evaluated in one call: `gym/.venv/bin/python gym/stats.py plan gym/confirmatory_v3.json --md` (S-1, S-2). Unit tests with known answers: `gym/tests/test_stats_confirmatory.py`.
+
+| ID | Claim | Data | Test (code) | Supported if |
+|---|---|---|---|---|
+| H1 | `final` beats `baseline` | v3 held-out, 5 seeds each | one-sided superiority on the paired per-task mean-reward difference: H0 Δ ≤ 0. p = max(percentile-bootstrap p, paired-t p), 10,000 resamples over tasks, seed 0 (`stats.one_sided_test`, margin 0) | Holm-adjusted rejection |
+| H2a | fine-tuned reader beats Lightning (thinking off) | **owner-labeled twin reader rows** (A1a): held-out threads only, gold written blind by the owner | exact match with **`reason` scored on status only** (`reader/eval.py` `exact_match_primary`, per-row `em_primary`); **paired cluster bootstrap over threads** (resample threads, recompute the difference), H0 Δ ≤ 0 (`stats.cluster_paired_test`). Row-level exact McNemar is printed as a sensitivity column only (S-3) | Holm-adjusted rejection |
+| H2b | fine-tuned reader beats the frontier reference (Claude Opus 5.5 via the owner's Claude Code, D26) | same owner-labeled rows | same as H2a | Holm-adjusted rejection |
+| H3 | the router cuts Lightning calls without losing more than δ | v3 held-out, 5 seeds each | intersection-union of two one-sided tests, p_H3 = max(p_i, p_ii): (i) `model_calls` per task, H0 mean(router − final) ≥ 0 (`stats.fewer`); (ii) non-inferiority on mean reward, H0 Δ ≤ −δ (`stats.one_sided_test`, margin δ) | Holm-adjusted rejection of the combined p |
+| H4 | the local system (`final`) is within δ of the frontier reference on the same harness | v3 held-out, 5 seeds local, 5 frontier runs | one-sided non-inferiority, H0 Δ(final − frontier) ≤ −δ, same machinery as H3(ii). A **win** is not claimed from this test | Holm-adjusted rejection |
+
+**A1a. H2 gold must not come from a system under test.** The twins pipeline now labels real messages with the fine-tuned reader (`--labeler reader`, `data/twins/README.md`), and the twin reader test's gold is those labels carried over. Scoring the reader against its own labels would make H2a/H2b circular, so the full twin reader test with reader gold is **secondary only** (reported with that caveat, never in the family). The confirmatory H2 rows are `data/published/twins/reader_test_owner.jsonl`: all renter rows of a simple random sample of held-out twin threads (`stats.simple_random_sample` over twin ids, seed 0), added thread by thread until at least 150 rows, each labeled **blind** by the owner from the twin text and its context (he never sees any model's label first), `reason` on status only. The file's sha256 goes into the freeze commit before any model reads those rows. If the owner labels are not done before the analysis, H2a and H2b are "not tested" (p = 1). Expected size is about 25 to 30 threads × 5 to 6 rows, so by A3 only differences of roughly 8 to 15 points are detectable; the full reader-gold set is reported next to it.
+
+Each decision prints the estimate, the bootstrap and paired-t (1 − α) lower bounds and both p values. The p used is the larger of the two, so the more conservative method decides when they disagree (S-9). At the rank where Holm tests a hypothesis, the bound at that rank's level (`alpha_at_rank`) is the Holm-consistent confidence bound.
+
+- **H1b (prompt v4 from lane 2, built from `docs/spec/concierge.md`)** is **outside the family**. It is reported as "informed by the held-out window" (L-6), with the same test, and never pooled into H1.
+- Every `gym/stats.py` command in the analysis runs with `--strict` (a task missing from any run is an error, S-11).
+- Secondary, not confirmatory, uncorrected 95% intervals, labeled "secondary": pass rate (Wilson), pass^k (descriptive only; no claim compares pass^k between configs, n/a for runs without repeats, S-15), per-category results, a **pass-rate non-inferiority with δ_pass = 10 points** and the **share of headroom lost**, Δ / (1 − reward_final) (S-5), the model-played renter runs, reward without guard-enforced checks (A5), and every v2 number. The pass-rate column of `md_compare` is a sign test on per-task pass fractions (McNemar only with one run) and its Holm column is labeled exploratory (S-13).
+
+### A2. δ, and what was seen before it was set (S-5)
+
+δ = **0.05 mean reward**, unchanged, fixed now for the v3 runs. The original justification was wrong on both counts and is withdrawn: 0.05 is *below* the router's v2 drop of 0.053, not above it, and one task flipping from fail to pass moves mean reward by that task's reward change divided by n (about 0.1 / 40 = 0.0025), not by 0.05. **δ was chosen after seeing** the v1 frontier comparison (final − Opus = +0.032, CI −0.014 to +0.081, which would already pass H4 at δ = 0.05) and the v2 router drop (−0.053, which fails H3(ii)). That is a forking path, and it is the reason v2 is exploratory and only v3 is confirmatory. δ is about 70% of the final config's v2 headroom (1 − 0.929), so a reward-only non-inferiority could hide a pass-rate collapse; the δ_pass and headroom-lost rows in A1 are there so a reader can see that.
+
+### A3. Seeds and honest power (S-4, S-6, S-7, S-10)
+
+**Seeds: 5 per config** (operator seeds 1 to 5) for `baseline`, `final`, `final+router`, and **5 frontier runs** (no dollar cap since D26; if subscription rate limits stop a run, the hypothesis it feeds is "not tested", p = 1). Measured on the committed v2 runs (`gym/stats.py power`, output in `gym/results/power-amendment1.txt`), about two thirds of the router-vs-final paired variance is seed noise (within-task variance 0.0196 router, 0.0064 final; paired variance 0.0131, of which 0.0087 is seed noise at k = 3), so more seeds are the cheapest lever. More than 5 does not fit the GPU time before the 08:30 freeze. `docs/eval-method.md:94` ("seeds are minor noise") is wrong for the close comparisons.
+
+Power by **simulation of the exact decision rules above** with this repo's own code (`stats.simulate_power`, `stats.simulate_reader_power`; task-level and seed-level variance from v2; 200 simulated studies per point, 500 bootstrap resamples each, so ±0.005 resolution). The number is the **true difference needed for 80% power**:
+
+| hypothesis | n tasks | seeds | at α = 0.025 (tested last in Holm) | at α = 0.005 (tested first, m = 5) |
+|---|---|---|---|---|
+| H1 superiority | 33 | 5 | +0.109 | +0.138 |
+| H1 superiority | 40 | 5 | +0.099 | +0.124 |
+| H1 superiority | 60 | 5 | +0.075 | +0.095 |
+| H3(ii) / H4 non-inferiority, δ = 0.05 | 33 | 5 | −0.001 | +0.015 |
+| H3(ii) / H4 non-inferiority, δ = 0.05 | 40 | 5 | −0.005 | +0.007 |
+| H3(ii) / H4 non-inferiority, δ = 0.05 | 60 | 5 | −0.015 | −0.004 |
+| (same, 3 seeds, for comparison) | 40 | 3 | +0.003 | +0.017 |
+
+H4 assumes the frontier's seed variance equals the router's (0.0196), the larger of the two measured values. Reading: H1 is well powered for any effect near the v2 size (+0.36). **H3(ii) and H4 can only succeed if the true difference is about zero or positive**; a true loss of even 0.01 to 0.02 will usually fail. They are underpowered for small losses by design, and a failure is reported as "not shown", never as "inferior".
+
+Reader (H2, cluster bootstrap over threads), true exact-match difference for 80% power, by expected size and disagreement rate (share of rows where the two systems differ):
+
+| threads × rows per thread | disagree 10% | disagree 20% |
+|---|---|---|
+| 30 × 6 | 0.08 (α .025) / 0.10 (α .005) | 0.10 / 0.15 |
+| 40 × 8 | 0.06 / 0.08 | 0.08 / 0.10 |
+| 60 × 8 | 0.05 / 0.06 | 0.08 / 0.08 |
+
+The old sentence "well powered for differences of 5 points or more" is withdrawn. On the synthetic 400-row sample the fine-tuned reader and Opus disagree on 19% of rows (primary metric), so H2b needs a true difference of about 8 to 10 points. The report states the thread count and mean rows per thread.
+
+### A4. Scorer validity changes (P-1, P-3, P-4, P-5, P-7, P-8, P-9)
+
+All in `gym/rentus_env/` (`v3_rules.py`, applied identically by `RolloutSession` and `verify`; deterministic, idempotent, a no-op for v1/v2 tasks, so v2 scores are unchanged: the v2 reference player still passes 54/54 and 33/33). Tests: `gym/tests/test_v3_rules.py`.
+
+| finding | change |
+|---|---|
+| P-1 reason wording | H2 primary exact match scores `reason` on **status only** and skips fields marked unscorable; the free-text reason value is secondary (`reader/eval.py`). The twins pipeline no longer filters twins by any model's re-labeling (`53559af`, "no labeler-gated rewrites"), and rule-vs-gold disagreements are flagged per row. Because its gold now comes from the fine-tuned reader, confirmatory H2 uses independent owner gold (A1a); the reader-gold set and its unflagged subset are secondary |
+| P-3 historical behavior as required behavior | renter lines are keyed to the **renter's own labeled items**, not to the question the owner happened to ask; a line carrying a non-gate behavior (hard no, not now, price push, question, small talk) is a `"when_asked": "next"` line that answers the next operator message whatever it asks, at the latest at its historical reply position (`counterparts.py`). "showing proposed" from the historical outcome is dropped and replaced by a rule check: gate complete in the gold facts and move-in within 45 days → `propose_showing` required (R-SHOW-1, R-PHIL-2); further out is R-PARK-6, whose threshold is an open owner question (concierge §8 q8), so it is **not scored**. The 45 days is our operationalization and goes to the owner at checkpoint 7.4. The "n_owner + 2 sends" spam cap is dropped and replaced by R-STYLE-3 / R-GHOST-1: at most 2 delivered questions in a row without a renter reply (`followups`) |
+| P-4 trivial agents pass | every task where asking is allowed must ask at least one gate item the renter did not volunteer (`asks_gate_item`), so one greeting cannot pass a ghosted task; the price escalation needs price words in its reason. `gym/floors.py` computes the floors of four trivial agents (do-nothing, greet-only, escalate-all, mark-lost) and lists flagged tasks (any trivial agent passes). The v3 floors are computed and committed in the freeze commit; flagged tasks are reported both with and without. On the fixture, 0 of 7 tasks are passed by any trivial agent (before: the ghosted task passed on one greeting) |
+| P-5 invented gate values | every gate item the renter never gave must not be recorded as done (`gate_not_invented`, R-GATE-1) |
+| P-7 model-played renter | the model-played renter says the twin's not-now, hard-no and price lines **verbatim** at their reply position, then follows `ghost_after` (`llm_renter.py`, `key_lines`); "You already asked about a discount" is said only after it has; `truth.reason` is the gold value, not the whole twin message. Model-played results stay secondary; the turn log records `scripted_key_behavior` and `fallback` per turn |
+| P-8 guard-enforced checks | checks a `send_message` guard makes impossible to fail (style `language`, `first_person`, `max_two_sentences`, `one_question`, `no_long_dash` on sent messages) are tagged `guard_enforced` and reported apart: every result has `reward_earned` / `pass_earned` without them, and `refused_by_rule` counts the **attempted** violations the guards stopped (refused drafts by rule), per task and per run summary. Targets in H6 are on attempts. "offers the 6-month floor" is dropped from a task when the lease-floor guard cannot see the renter's shorter-lease ask (it would refuse every config's message). "does not re-ask" counts only delivered messages. The canonical two-part lease question counts as one question in the scorer, using the tool's own matcher |
+| P-9 rules not wired to checks | the rule-to-check table is A6 |
+
+### A5. Human validation of the scorer, replacing §3.2 (S-8, P-10)
+
+- **Sample.** N = 40 transcripts, a **simple random sample** (not stratified) of all v3 held-out scripted transcripts across the five confirmatory configs, drawn by `stats.simple_random_sample(ids, 40, seed=0)` over ids `<run dir>/<task id>` (sorted, so the draw does not depend on file order). The scorer's verdict does not affect selection.
+- **Blinding.** The owner sees the renter-side transcript only (renter and operator messages; no config name, run name, seed, tool trace or scorer output). For each transcript he also records his guess of which config produced it; guess accuracy is reported, and if it is well above chance (exact binomial p < 0.05 against 1/5) the grading is reported as not blind.
+- **Rubric (fixed now, before any grading).** Order on the form: (1) overall verdict, pass or fail: "Would I let this conversation happen under my name?", plus a one-line reason; this is locked before anything else is shown. (2) Four sub-questions, yes/no: S1 asked only what the rules allow, one thing at a time; S2 recorded only what the renter said (no invented values); S3 handled price, lease length, not-now and hard-no per the rules; S4 tone and language fit the renter. (3) Only then, the per-check grid.
+- **Second grader.** If any second person is available before 11:00, they grade at least 20 of the 40 the same way, and inter-human κ is reported.
+- **Report.** Task-level Cohen's κ between the scorer's pass and the owner's overall verdict, with a bootstrap 95% CI over transcripts (`stats.kappa_report`), P(owner accepts | scorer pass), P(owner rejects | scorer fail), agreement per sub-question, every disagreement in one line. Gate: **κ ≥ 0.60** on the point estimate, CI printed next to it. Below the gate, headline pass rates are "scorer-defined" (unchanged rule). The scorer is not changed and re-run to raise κ.
+
+### A6. Rule-to-check table (concierge §9 checklist id → check)
+
+"Guard-enforced" = a `send_message` / `propose_showing` guard refuses the behavior before delivery, so the check on delivered text cannot fail; those are reported separately with attempted-violation counts and are not evidence about the model. Every checklist id not listed is **not scored** in v3 (the concierge task family under `gym/tasks/concierge/` and `gym/conformance/` is exploratory and outside the family).
+
+| checklist id (rule) | v3 check | status |
+|---|---|---|
+| C1 (R-STYLE-1), C2 (R-STYLE-2), C4 (R-STYLE-4) | `style` `max_two_sentences` / `one_question` / `no_long_dash` where a task sets them | guard-enforced |
+| C3 (R-STYLE-3), R-GHOST-1 | `followups`: ≤ 2 delivered questions in a row without a renter reply | scored (no clock, so the 3-day timing is not checked) |
+| C5 (R-VOICE-1) | `style:first_person`, sent | guard-enforced since `08cbaa9`; refused attempts reported |
+| C6 (R-STYLE-6) | send_message `price_not_in_record` | guard-enforced; attempts reported |
+| C11 (R-LANG-1) | `style:language`, sent | guard-enforced |
+| C19 (R-SHOW-1) | `never propose_showing before gate_complete` (counts attempts, refused or not) | scored |
+| R-SHOW-1 / R-PHIL-2 | `tool_called propose_showing` when the gold gate is complete and move-in ≤ 45 days | scored (45 days pending owner sign-off, 7.4) |
+| C20 (R-GATE-1) | `state` checks on exact gate values (dates, phone, occupants, lease), reason status | scored |
+| R-GATE-1 | `gate_not_invented` for every item the renter never gave | scored |
+| C21 (R-GATE-2) | `never asked <item>` on volunteered items, delivered messages only, one confirmation allowed (D23c) | scored |
+| R-GATE-2 | `asks_gate_item`: at least one non-volunteered gate item asked | scored |
+| C26 (R-GATE-5) | send_message `lease_floor_not_requested` | guard-enforced |
+| C27 (R-GATE-5, R-ESC-2) | `message` "offers the 6-month floor only" (dropped where the guard cannot see the ask) | scored |
+| C28 (R-ESC-1) | `escalated` with price words; `rooms[..].rent` unchanged; `message` no discount promised | scored |
+| C31 (R-SHOW-5) | send_message `showing_not_confirmed` | guard-enforced |
+| C44, C45 (R-PARK-1..3) | `state register.status = not_now`; `never propose_showing` | scored (`reconnect_at` not scored: no field) |
+| C48 (R-PARK-7) | `state register.status = lost`; `never propose_showing` | scored |
+| C49 (R-PARK-6) | none | not scored (threshold open, concierge §8 q8) |
+| refused drafts | `tool_called send_message ok=false max 2` | scored |
+| — | `budget max_repeat_failures 2` | scored |
+
+### A7. Leakage and data changes (L-1 to L-12, P-6, P-11)
+
+| finding | resolution |
+|---|---|
+| L-1 / P-11 person ids | owned by the twins agent: `53559af` adds the anonymized-export loader, `split.py` (time split at 2026-05-01 plus a person split) and `to_tasks.people_check` (no held-out counterpart person id in any earlier thread). Gate unchanged: nothing from v3 counts as held-out until that check passes on the real build and its aggregate counts are committed |
+| L-2 v2 overlap | §0 and `docs/results.md` now say v2 held-out shares 31/33 tasks and 81/92 reader utterances with v1 held-out and was designed from v1 held-out transcripts; v2 is exploratory and a regression check only. δ and the variance inputs above come from v2, which is fine for planning and is stated |
+| L-3 hint change | disclosed in §0 and `docs/results.md`: `b190ed2` (first-person hint) and `08cbaa9` (third-person guard) were made after seeing v2 held-out failures, are in every v3 config, and the v2 numbers predate them (`437b611`) |
+| L-4 template overlap | disclosed with exact match on both template groups in `docs/results.md` and corrected in `docs/data-provenance.md`; the set is frozen, not regenerated |
+| L-5 model-selected / model-labeled twin test | the pipeline no longer drops twins a model cannot re-label (`53559af`). Its message gold now comes from the fine-tuned reader (`--labeler reader`), which is a system under test, so confirmatory H2 uses the blind owner-labeled rows of A1a; the reader-gold set is secondary. `stats_card.json` must record the labeler actually used. The per-field flag rates (rule check vs gold) are reported |
+| L-6 / P-9 rules from the held-out window | `docs/spec/concierge.md` comes from the owner's Oct 4 to 18 sessions, inside the held-out window. H1b (any candidate built from it) is outside the family and labeled "informed by the held-out window". H1 is unaffected as long as no rule-derived change lands in `final`; the frozen-path check (A8) enforces that. Held-out threads that start on or after 2026-10-04 (when the owner's agent may have written the owner side) are tagged, and H1 is also reported without them (secondary). A few owner template phrases in `concierge.md` are verbatim owner wording (not renter text); `concierge.md:3` should say so (lane owner) |
+| L-7 rerun rule | `gym/ablate.py` now reruns only rollouts with zero model completions, keeps replaced attempts in `per_task.attempts.jsonl`, and marks a run void when more than 10% of rollouts drop mid-way. This is a gate before the first v3 run (§4.5) |
+| L-8 provenance | every `summary.json` records the full commit, `git describe --dirty`, a dirty flag, the dirty files under the frozen paths, the task file sha256 and code-tree sha256s (`gym/run_eval.py`); every reader metrics file records commit, data sha256, prompt sha256 and the checkpoint sha256 (`READER_CHECKPOINT`); SGD is pinned to commit `e852981ae34990f4358979625854259302feaa78` (`data/download.py` checks it); the full 14,000-row reader training set is published as `data/published/reader/train_full.jsonl.gz` with a verify script |
+| L-9 license | `LICENSE` (Apache-2.0) and `LICENSES.md` per D28 |
+| L-11 checkpoint 7.2 split | the H6 label subset is drawn from held-out threads only and its n reported; §0 records that the owner saw those labels |
+| L-12 §0 omissions | added in A9 |
+| P-6 labels that decide task type | checkpoint 7.2 is extended: (a) ≥ 30 threads graded for outcome and subcategory, pass ≥ 80%, below which ghosted is derived deterministically and the model's showing/no outcome is dropped from the checks; (b) the 50 message labels are stratified so each field has ≥ 15 rows where it is not absent, with accuracy reported on those; (c) the owner labels **blind** (message first, then his label, then the comparison) |
+
+### A8. Procedure changes
+
+- **Frozen paths** (§4.1) add `serving/`, `data/twins/`, `gym/stats.py` and `gym/confirmatory_v3.json`. Each `summary.json` now records whether any frozen path was dirty at run time; a run with `dirty_frozen_paths: true` is void.
+- **§6.1 additions**: `data/published/reader/train_full.jsonl.gz`, uncompressed sha256 `3d9237ef6e79f8a18bdd22fde1417b019b86eb318ae152239dfb22694a3d19b3` (14,000 rows, the reader-v1 training set); SGD commit `e852981ae34990f4358979625854259302feaa78`, derived `homes_dialogues.jsonl` sha256 `e0d67c28e876a4e947d7cbfa7c4b6d146d04145c7e2fd3b6191b752d0e4c0e3e`. The freeze commit adds the sha256 of `gym/confirmatory_v3.json`, `gym/rentus_env/v3_rules.py`, `gym/rentus_env/verify.py` and `tools/rentus_tools/impl/inbox.py` at the run commit.
+- **§6.3 commands** become: `run_seeds.py ... --seeds 1,2,3,4,5` for baseline, final and final+router; `scripts/frontier_ref.sh $V3 1,2,3,4,5` for the frontier, with run names `v3-heldout-frontier-r1..r5`; reader H2 runs `reader/eval.py --rows-file data/published/twins/reader_test_owner.jsonl --label {finetuned,lightning,frontier}-twin` (confirmatory) and the same with `reader_test.jsonl` (secondary); then `gym/stats.py plan gym/confirmatory_v3.json --md` and `gym/floors.py --tasks-file $V3`.
+- **H5** alternates the order (on/off, off/on, on/off), and the existing +76% repetition is excluded. **H6** compares point estimates with the targets and reports a thread-cluster bootstrap CI and the thread count (S-16).
+- `docs/eval-method.md:16` (Holm as a guard against best-of-many selection) is withdrawn: selection on held-out inflates the winner, Holm does not correct for it, and v3 held-out run once with fixed configs is the remedy (S-17).
+
+### A9. Additions to §0 (what has already been seen)
+
+- The Opus held-out run on v1 (`f91e5e9`) and the reading of its transcripts, which shaped v2.
+- The stratified 400-row reader sample scored by Opus and rescored for every system.
+- The router has been seen on v2 held-out once (H3(ii) failed there).
+- `b190ed2` and `08cbaa9` changed a tool hint and added a guard in response to a v2 held-out failure pattern; both ship in all v3 configs.
+- The owner will see held-out labels at checkpoint 7.2 (H6 subset).
+
+### A10. Privacy wording (P-2), applies to every file
+
+The only accurate sentence, used in every file that describes the owner's data: **private data never leaves infrastructure we control: this machine and our rented GPU instance (reached over an encrypted SSH tunnel); it is never sent to a third-party model API and never committed.** The owner approved processing on the rented GPU (D28). §2.4's "never leaves the owner's machine" and "every model client refuses non-local endpoints" are replaced by it: the loopback check cannot tell a local server from a forwarded port. Before further real-data steps: vLLM on the instance runs without request logging (no `--enable-log-requests`), the twins cache stays on this machine, and the instance's disk and container logs are wiped at teardown, which is logged in `docs/DECISIONS.md`.
+
+**TODO for the twins agent (owner of `data/twins/`), left here because this lane does not edit that folder:**
+1. Replace the privacy guarantee in `data/twins/README.md` with the A10 sentence, and make `common.LocalLLM` print the resolved endpoint and note that a forwarded port passes the loopback check (P-2.4).
+2. Record the labeler actually used in `stats_card.json` / `tasks_stats.json`, and build `data/published/twins/reader_test_owner.jsonl` (A1a): the renter rows of a simple random sample of held-out twin threads (seed 0, at least 150 rows), with a blind labeling sheet for the owner that shows no model label (L-5, P-1.2).
+3. Split the persona pool by split, and publish each twin's split and the quarter its source thread started (L-10).
+4. Assert `generator_saw_original == false` for every published twin (P-13), add the code-number regex to the scrub (P-14), and bucket the published gaps / drop `features` (P-15).
+5. Report the twin verification and flag rate per field and per stratum (L-5, P-1.3).
+
+### A11. What this amendment does not fix
+
+- The sandbox has no clock, so timing rules (R-GHOST-1's 3 days, R-GATE-4's waits, cadences) are not scored.
+- R-PARK-6 (far-out move-in) is unscored until the owner sets the threshold.
+- A rule-following reference player for v3 twin tasks (P-3 d) does not exist yet; the v2 and concierge reference players do, and pass 54/54, 33/33 and 24/24.
+- Independent gold for every twin reader row (P-1.2) depends on owner time; the blind owner subset in A1a (at least 150 rows) is the commitment, and H2 is not tested without it.
+- A model-played seed with a simulator from a different family (P-7 b) is optional and secondary.
 
 ## Amendments
 
