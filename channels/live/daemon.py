@@ -435,6 +435,11 @@ def needs_answer(text: str) -> bool:
     return "?" in t or len(t) > 15
 
 
+EMERGENCY_RE = re.compile(r"overflow|flood|water (is )?(coming|pouring|leaking) (through|from) the ceiling|"
+                          r"through the (kitchen )?ceiling|burst pipe|gas (smell|leak)|smell(s)? gas|\bfire\b|smoke|"
+                          r"sparks?|carbon monoxide|co alarm|inundaci|fuga de gas|incendio", re.I)
+
+
 def flush(store: Store, thread_id: str, channel: str, renter_text: str, gate: dict | None = None) -> dict | None:
     """Deliver this turn's buffered operator messages as one composed reply. Returns a trace entry."""
     if ADAPTER is None:
@@ -443,7 +448,7 @@ def flush(store: Store, thread_id: str, channel: str, renter_text: str, gate: di
     link = (ADAPTER.links or {}).pop(thread_id, None)
     if link:
         texts = texts + [link]
-    if not texts:
+    if not texts and not EMERGENCY_RE.search(renter_text or ""):
         return None
     with store.locked():
         tt = store.get_thread(thread_id) or {}
@@ -452,6 +457,27 @@ def flush(store: Store, thread_id: str, channel: str, renter_text: str, gate: di
     prospect = tt.get("role", "prospect") == "prospect"
     parts = compose.compose(texts, channel, renter_text, filled=filled if prospect else None, first=first,
                             prospect=prospect)
+    emergency = EMERGENCY_RE.search(renter_text or "")
+    if emergency and prospect and not tt.get("emergency_alerted"):
+        # deterministic safety first: whatever the model wrote, the reply opens with safety advice and no questions
+        gas = re.search(r"gas|fire|smoke|spark|burning|carbon monoxide|co alarm", renter_text, re.I)
+        safety = ("Please leave the house now and call 911." if gas else
+                  "Please turn off the water at the valve behind the toilet or the main shut-off, and stay clear of "
+                  "the wet ceiling.")
+        rest = [p_ for p_ in parts if "?" not in p_]
+        parts = [f"{safety} I've alerted the owner and I'm getting help to you now."] + rest[:1]
+        with store.locked():
+            t = store.get_thread(thread_id)
+            t["emergency_alerted"] = now_iso()
+            t["needs_owner"] = True
+            store.save_thread(t)
+            store.add_approval(thread_id, "EMERGENCY reported: " + (renter_text or "")[:160], "", kind="escalation")
+    if tt.get("demo") and not tt.get("disclosed") and parts and "AI assistant" in parts[0]:
+        with store.locked():
+            t = store.get_thread(thread_id)
+            t["disclosed"] = now_iso()
+            store.save_thread(t)
+        tt = dict(tt, disclosed=True)
     if tt.get("demo") and not tt.get("disclosed") and parts:
         d = demo.disclosure("es" if demo.is_spanish(renter_text) else "en")
         if channel == "email":  # the email already opens with "Hi <name>,"

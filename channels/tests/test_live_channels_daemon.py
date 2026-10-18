@@ -1030,3 +1030,16 @@ def test_email_with_empty_body_uses_subject():
     m["From"], m["To"], m["Subject"], m["Message-ID"] = "a@example.com", "info@rentus.homes", "Re: Is it available?", "<e@x>"
     m.set_content("")
     assert pv.parse_inbox_message(bytes(m), ours=set())["text"] == "Is it available?"
+
+
+def test_stranger_emergency_gets_safety_first_and_alerts_owner(env):
+    import rentus_tools as rt
+    daemon.register_adapters(env["store"])
+    env["tf"].push(OWNER_PHONE, "the toilet upstairs is overflowing and water is coming through the kitchen ceiling!!", "SM-e1")
+    daemon.poll_all(env["store"])
+    tid = api.list_threads()[0]["thread_id"]
+    daemon.run_turn(env["store"], tid, runner=lambda w, i, h: (
+        rt.call(w, "send_message", {"thread_id": i["thread_id"], "text": "Have you tried a plunger yet?"}), _Res([]))[1])
+    sent = env["tf"].sent[0][1]
+    assert sent.startswith("Please turn off the water") and "alerted" in sent and "?" not in sent
+    assert any(a["reason"].startswith("EMERGENCY") for a in api.list_approvals())
