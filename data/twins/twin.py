@@ -33,8 +33,9 @@ from datetime import date, datetime, timedelta
 import personas as persona_pool
 import time
 
-from common import (FIELDS, LocalLLM, Paths, common_args, detect_lang, hid, label_message, log_timing, pii_hits, pmap,
-                    read_jsonl, setup, stratified_sample, to_context, write_jsonl)
+from common import (FIELDS, LocalLLM, Paths, common_args, detect_lang, hid, is_cp, label_message, log_timing, pii_hits,
+                    pmap, read_jsonl, setup, stratified_sample, to_context, write_jsonl)
+from label import RULE_FIELDS, RULE_INTENTS, reader_presence, rule_labels
 
 MONTHS_EN = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
              "November", "December"]
@@ -107,6 +108,44 @@ Hard rules:
 Return JSON only: {"turns": [{"i": <turn number>, "speaker": "renter"|"landlord", "text": "<message>"}, ...]}
 Each entry's speaker must equal the listed speaker for that turn number."""
 
+OPS_SYSTEM = """You write SYNTHETIC "twin" chat threads for a public research dataset about running shared rental houses.
+The chat is between a landlord (he rents rooms in shared houses in Durham, NC) and {who}.
+A twin copies only the structure of a real conversation: who speaks when, and what each message does. You invent all content.
+
+Hard rules:
+1. Write exactly the turns listed, in order, with the given speaker. One JSON entry per turn, nothing added or dropped.
+2. Each message must do what its "does" list says. The matter of the chat is: {topic}. Invent the concrete details
+   (which fixture, symptoms, times, amounts) yourself; keep them consistent across the chat.
+3. Write each message in the language given for it ("en" English, "es" informal Latin American Spanish).
+4. Match the style hint: length (short <= 5 words, medium 6-18, long > 18), lowercase/emoji when asked.
+5. The {cp} is the persona given. The landlord is brief, polite, direct, writes in the first person, no emoji.
+6. Never write a street address, house number, URL, email, phone number, last name, lockbox or door code, or a real
+   business name. Say "the house" or a room name instead of an address.
+7. Originality: every sentence must be newly written; avoid stock template phrases.
+8. Sound like real people texting: casual, natural, varied. Never echo the spec's wording.
+Return JSON only: {{"turns": [{{"i": <turn number>, "speaker": "{cp}"|"landlord", "text": "<message>"}}, ...]}}
+Each entry's speaker must equal the listed speaker for that turn number."""
+
+OPS_ACT_GUIDE = {
+    # owner (ops)
+    "ask_details": "asks for details", "request_photo": "asks for a photo or video", "troubleshoot": "suggests a quick fix to try first",
+    "schedule_visit": "arranges a visit time", "give_access_info": "explains how to get in (no codes)", "confirm": "confirms",
+    "acknowledge": "acknowledges briefly", "rent_or_payment_reminder": "reminds about a payment", "utility_notice": "states this month's utility share",
+    "policy_statement": "states a house policy", "negotiate_price": "pushes back on the price", "approve_or_pay": "approves the work or says payment is sent",
+    "decline": "declines", "follow_up": "checks in", "close": "wraps up", "greet": "a greeting", "other": "replies naturally",
+    # tenant
+    "report_problem": "reports a problem in the house", "send_photo": "sends a photo", "answer_question": "answers the question",
+    "ask_question": "asks a question", "propose_time": "suggests a time", "payment_update": "gives a payment update",
+    "ask_delay_or_partial": "asks to pay later or in part", "housemate_issue": "raises an issue with a housemate",
+    "move_out_or_renewal": "talks about moving out or renewing", "thanks": "says thanks", "complain": "complains",
+    # vendor
+    "introduce_or_reply_to_lead": "introduces themselves / replies to the job request", "send_quote": "gives a price or estimate",
+    "confirm_visit": "confirms the visit", "running_late": "says they are running late", "cancel_or_reschedule": "cancels or moves the visit",
+    "decline_job": "turns the job down", "send_photo_or_proof": "sends photos or proof of the work", "report_done": "says the work is done",
+    "request_payment": "asks to be paid",
+}
+MEDIA_TOKEN = re.compile(r"\[(photo|video|audio|file)\]")
+
 
 # --------------------------------------------------------------------------------------------- helpers
 def date_h(d: date, lang: str) -> str:
@@ -158,12 +197,29 @@ def plan(th: dict, pool: list[dict], salt: str) -> dict:
             "topics": rng.sample(QUESTION_TOPICS, len(QUESTION_TOPICS))}
 
 
+def cp_speaker(th: dict) -> str:
+    return {"leasing": "renter", "ops": "tenant", "contractor": "contractor"}[th.get("category", "leasing")]
+
+
 def skeleton(th: dict, pl: dict) -> list[dict]:
     out = []
+    cat = th.get("category", "leasing")
     for k, t in enumerate(th["turns"]):
+        if t.get("media"):
+            out.append({"i": t["i"], "speaker": "landlord" if t["role"] == "owner" else cp_speaker(th),
+                        "fixed_text": t["text"], "does": ["sends only an attachment; the text is exactly " + t["text"]],
+                        "language": t.get("lang", th["language"]), "_gold": None})
+            continue
         if t["role"] == "owner":
+            guide = ACT_GUIDE if cat == "leasing" else OPS_ACT_GUIDE
             out.append({"i": t["i"], "speaker": "landlord", "language": t.get("lang", th["language"]),
-                        "does": [ACT_GUIDE.get(a, a) for a in t.get("acts", ["other"])]})
+                        "does": [guide.get(a, a) for a in t.get("acts", ["other"])]})
+            continue
+        if cat != "leasing":
+            lab = t.get("labels") or {}
+            out.append({"i": t["i"], "speaker": cp_speaker(th), "language": lab.get("language") or t.get("lang", "en"),
+                        "does": [OPS_ACT_GUIDE.get(a, a) for a in t.get("acts", ["other"])],
+                        "style": {k2: t["style"][k2] for k2 in ("length", "emoji", "casing")}, "_gold": None})
             continue
         lab = t["labels"]
         lang = lab["language"]
@@ -201,31 +257,6 @@ def structure_problem(twin_turns, skel) -> str | None:
     return None
 
 
-def turn_problems(k: int, skel, texts: list[str], pl, ver: LocalLLM, today_of) -> tuple[list[str], dict | None]:
-    """Problems of one turn (PII, language, labels vs its target) and its re-label."""
-    s, text = skel[k], texts[k]
-    probs = []
-    hits = pii_hits(text, (pl["phone"],))
-    if hits:
-        probs.append(f"remove {', '.join(hits)}")
-    if s["speaker"] != "renter":
-        return probs, None
-    if len(text.split()) > 3 and detect_lang(text) != s["language"]:
-        probs.append(f"must be written in {'Spanish' if s['language'] == 'es' else 'English'}")
-    ctx = [{"role": "renter" if x["speaker"] == "renter" else "operator", "text": t} for x, t in zip(skel[:k], texts[:k])]
-    lab = label_message(ver, today_of(s["i"]), ctx, text, tag="twin")
-    if lab is None:
-        return probs + ["could not be read"], None
-    return probs + compare(lab, s["_gold"]), lab
-
-
-TURN_SYSTEM = """You fix ONE message of a synthetic rental-inquiry chat so it does exactly what its spec says.
-Keep the speaker, the language and roughly the length; keep everything else the spec allows. Follow the spec literally:
-mention nothing the spec does not list, use the exact dates and phone number given, never write an address, URL,
-email or last name. Sound like a real person texting; never echo the spec's wording.
-Return JSON only: {"text": "<the new message>"}"""
-
-
 def compare(lab: dict, gold: dict) -> list[str]:
     out = []
     for f in FIELDS:
@@ -251,7 +282,9 @@ def compare(lab: dict, gold: dict) -> list[str]:
     return out
 
 
-def gold_of(s: dict, lab: dict | None, pl: dict) -> dict:
+def gold_of(s: dict, pl: dict) -> dict:
+    """Gold for a twin renter message = the reader's labels of the real message, carried over with the twin's own
+    values (new date, fictional phone). reason is scored on status only (value null)."""
     g = s["_gold"]
     o = {}
     for f in FIELDS:
@@ -261,12 +294,11 @@ def gold_of(s: dict, lab: dict | None, pl: dict) -> dict:
             continue
         st = w["status"]
         if f == "move_in":
-            o[f] = {"status": st, "date": w.get("date") if st in ("answered", "exception") else None,
-                    "raw": (lab or {}).get("move_in", {}).get("raw") if st != "no" else None}
+            o[f] = {"status": st, "date": w.get("date") if st in ("answered", "exception") else None, "raw": None}
         elif f == "phone":
             o[f] = {"status": st, "value": pl["phone"] if st in ("answered", "exception") else None}
         elif f == "reason":
-            o[f] = {"status": st, "value": (lab or {}).get("reason", {}).get("value") if st == "answered" else None}
+            o[f] = {"status": st, "value": None}
         elif f == "lease":
             o[f] = {"status": st, "value": {"answered": True, "exception": True, "no": False}.get(st)}
         else:
@@ -276,126 +308,115 @@ def gold_of(s: dict, lab: dict | None, pl: dict) -> dict:
     return o
 
 
-def make_twin(th: dict, pool, salt, gen: LocalLLM, attempts: int, show_original: bool, ver: LocalLLM) -> dict:
+def rule_flags(text: str, gold: dict) -> list[str]:
+    """Keys where the cheap rules disagree with the gold on presence (flag for review, never a reason to drop)."""
+    r = rule_labels(text)
+    gp = reader_presence(gold)
+    return [k for k in RULE_FIELDS + RULE_INTENTS if r[k] != gp[k]]
+
+
+def make_twin(th: dict, pool, salt, gen: LocalLLM, show_original: bool) -> dict:
+    """One draft of the whole thread, retried only if its structure is broken (turn count or speakers). The twin is
+    NOT rewritten until a model reads it a certain way (that would select for text the labeler finds easy)."""
     pl = plan(th, pool, salt)
     skel = skeleton(th, pl)
     p = pl["persona"]
+    cat = th.get("category", "leasing")
     persona_txt = (f"{pl['name']}, {p.get('age')}, {p.get('occupation') or ''}, from {p.get('city')}, {p.get('state')}. "
                    f"{(p.get('persona') or '')[:500]}")
     public = [{k: v for k, v in s.items() if not k.startswith("_")} for s in skel]
     if show_original:
         for s, t in zip(public, th["turns"]):
             s["tone_reference_do_not_copy"] = t["text"]
-    user = (f"Renter persona: {persona_txt}\nThe thread starts on {pl['ts'][0][:10]}; messages are spread over time like "
-            f"the original.\nTurns:\n{json.dumps(public, ensure_ascii=False, indent=1)}")
-    msgs = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
-    today_of = lambda i: pl["ts"][i][:10]  # noqa: E731
-    # 1. a whole-thread draft (retried only if the structure is broken: turn count or speakers)
+    if cat == "leasing":
+        system = SYSTEM
+    else:
+        who = "a tenant who rents a room in one of his houses" if cat == "ops" else \
+            "a contractor (handyman, tradesperson or service company) doing a job at one of his rental houses"
+        system = OPS_SYSTEM.format(who=who, cp=cp_speaker(th), topic=(th.get("topic") or "other").replace("_", " "))
+    user = (f"{cp_speaker(th).title()} persona: {persona_txt}\nThe thread starts on {pl['ts'][0][:10]}; messages are "
+            f"spread over time like the original.\nTurns:\n{json.dumps(public, ensure_ascii=False, indent=1)}")
+    msgs = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     texts, probs = None, []
-    for d in range(2):
-        out = gen.chat_json(msgs, temperature=0.8, max_tokens=10000, cache_key=f"draft{d}", escalate=False)
+    for d in range(3):
+        out = gen.chat_json(msgs, temperature=0.8, max_tokens=12000, cache_key=f"draft{d}", escalate=False)
         turns = (out or {}).get("turns") or []
+        for x in turns:  # attachment-only turns are fixed; accept them whatever the model wrote
+            sk = next((q for q in skel if q["i"] == (x.get("i") if isinstance(x, dict) else None)), None)
+            if sk and sk.get("fixed_text") and isinstance(x, dict):
+                x["text"], x["speaker"] = sk["fixed_text"], sk["speaker"]
         sp = structure_problem(turns, skel)
         if not sp:
             by_i = {t["i"]: t["text"] for t in turns}
             texts = [by_i[x["i"]] for x in skel]
+            probs = []
             break
         probs = [sp]
         msgs = msgs[:2] + [{"role": "assistant", "content": json.dumps({"turns": turns}, ensure_ascii=False)},
                            {"role": "user", "content": sp + ". Rewrite the whole JSON."}]
-    relab, bad, rounds = {}, {}, 0
-    if texts is not None:
-        # 2. verify every turn, then 3. rewrite only the failing turns (one cheap call + one re-label each)
-        ks = list(range(len(skel)))
-        with cf.ThreadPoolExecutor(max_workers=8) as ex:
-            res = dict(zip(ks, ex.map(lambda k: turn_problems(k, skel, texts, pl, ver, today_of), ks)))
-        for k, (pr, lab) in res.items():
-            relab[skel[k]["i"]] = lab
-            if pr:
-                bad[k] = pr
-        while bad and rounds < attempts:
-            rounds += 1
-
-            def fix(k):
-                spec = {x: v for x, v in public[k].items() if x != "i"}
-                ctx = "\n".join(f"{'renter' if skel[j]['speaker'] == 'renter' else 'landlord'}: {texts[j]}" for j in range(k))
-                user_t = (f"Renter persona: {persona_txt}\nChat so far:\n{ctx or '(none)'}\n\nSpec of this message: "
-                          f"{json.dumps(spec, ensure_ascii=False)}\nCurrent message: {texts[k]}\nWhat is wrong: "
-                          + "; ".join(bad[k]))
-                o = gen.chat_json([{"role": "system", "content": TURN_SYSTEM}, {"role": "user", "content": user_t}],
-                                  temperature=0.9, max_tokens=4000, cache_key=f"fix{rounds}", escalate=False)
-                new = (o or {}).get("text")
-                if not isinstance(new, str) or not new.strip():
-                    return k, texts[k], bad[k], relab.get(skel[k]["i"])
-                trial = texts[:k] + [new] + texts[k + 1:]
-                pr, lab = turn_problems(k, skel, trial, pl, ver, today_of)
-                return k, new, pr, lab
-
-            with cf.ThreadPoolExecutor(max_workers=8) as ex:
-                for k, new, pr, lab in ex.map(fix, list(bad)):
-                    texts[k] = new
-                    relab[skel[k]["i"]] = lab
-                    if pr:
-                        bad[k] = pr
-                    else:
-                        bad.pop(k)
-        probs = [f"turn {skel[k]['i']}: {x}" for k, pr in sorted(bad.items()) for x in pr]
-    turns = [{"i": x["i"], "text": t} for x, t in zip(skel, texts or [""] * len(skel))]
-    att = rounds
-    by_i = {t.get("i"): t.get("text") for t in turns if isinstance(t, dict)}
     out_turns = []
     for k, s in enumerate(skel):
-        t = {"i": s["i"], "role": "renter" if s["speaker"] == "renter" else "owner", "ts": pl["ts"][k],
-             "text": by_i.get(s["i"]) or ""}
         orig = th["turns"][k]
-        if t["role"] == "renter":
-            t["gold"] = gold_of(s, relab.get(s["i"]), pl)
+        text = s.get("fixed_text") or (texts[k] if texts else "")
+        t = {"i": s["i"], "role": "owner" if s["speaker"] == "landlord" else orig["role"], "ts": pl["ts"][k], "text": text}
+        if is_cp(orig):
+            t["style"] = s.get("style")
             t["difficulty"] = orig.get("difficulty")
-            t["style"] = s["style"]
+            t["media"] = bool(orig.get("media"))
+            if cat == "leasing" and s.get("_gold"):
+                t["gold"] = gold_of(s, pl)
+                t["unscorable"] = list(orig.get("unscorable") or [])
+                t["flags"] = {"rule_vs_gold_on_twin": rule_flags(text, t["gold"]),
+                              "reader_vs_rule_on_original": [x for x in RULE_FIELDS + RULE_INTENTS
+                                                             if orig.get("rule") and orig.get("labels") and
+                                                             reader_presence(orig["labels"])[x] != orig["rule"][x]]}
+            else:
+                t["acts"] = orig.get("acts", ["other"])
+                t["language"] = s["language"]
         else:
             t["acts"] = orig.get("acts", ["other"])
             t["language"] = s["language"]
         out_turns.append(t)
+    lang_off = sum(1 for s, t in zip(skel, out_turns) if s["speaker"] != "landlord" and not s.get("fixed_text")
+                   and len(t["text"].split()) > 3 and detect_lang(t["text"]) != s["language"])
     return {
         "twin_id": "tw_" + hid(salt, th["thread_id"], "twin-id"), "source_thread": th["thread_id"],
+        "category": cat, "topic": th.get("topic"), "counterpart": th.get("counterpart", "renter"),
         "persona": {"name": pl["name"], "age": p.get("age"), "sex": p.get("sex"), "occupation": p.get("occupation"),
                     "city": p.get("city"), "state": p.get("state"), "summary": p.get("persona"),
                     "source": persona_pool.DATASET, "source_uuid": p.get("uuid"), "license": persona_pool.LICENSE},
         "phone": pl["phone"], "channel": th["channel"], "language": th["language"],
         "language_switch": th["language_switch"], "start": pl["ts"][0], "turns": out_turns,
         "outcome": th.get("outcome"), "final_stage": th.get("final_stage"), "features": th.get("features"),
-        "verified": texts is not None and not probs, "problems": probs, "repair_rounds": att,
+        "verified": texts is not None, "problems": probs, "language_mismatch_turns": lang_off,
         "generator_saw_original": show_original,
     }
 
 
 def main():
     ap = common_args(argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter))
-    ap.add_argument("--attempts", type=int, default=3, help="repair rounds for turns that fail verification")
     ap.add_argument("--show-original", action="store_true", help="give the generator the real text as a tone reference")
     ap.add_argument("--gen-reasoning", choices=["on", "off"], default="off",
                     help="Lightning reasoning while WRITING twins (default off: on spends ~30k tokens per draft and "
                          "often runs out before answering). Verification always reasons.")
     a = ap.parse_args()
     setup(a)
-    P = Paths.make(a.fixture)
+    P = Paths.make(a.fixture, a.split)
     threads = [t for t in read_jsonl(P.work / "labeled.jsonl") if t.get("labeled")][: a.limit]
     threads = stratified_sample(threads, a.sample, lambda t: (
-        t["channel"], "mixed" if t["language_switch"] else t["language"], t.get("final_stage")))
+        t.get("category", "leasing"), "mixed" if t["language_switch"] else t["language"], t.get("final_stage")))
     t0 = time.time()
     if not threads:
         sys.exit("no labeled threads: run label.py first")
     pool = persona_pool.load()
-    gen = LocalLLM("operator", P.work / "cache", reasoning=a.gen_reasoning == "on")
-    ver = LocalLLM("operator", P.work / "cache", reasoning=True)  # gold labels are confirmed with reasoning on
+    gen = LocalLLM("operator", P.cache, reasoning=a.gen_reasoning == "on")
     salt = P.salt()
-    twins = pmap(lambda th: make_twin(th, pool, salt, gen, a.attempts, a.show_original, ver), threads, a.workers)
-    ver.require_healthy("twin")
+    twins = pmap(lambda th: make_twin(th, pool, salt, gen, a.show_original), threads, a.workers)
     gen.require_healthy("twin")
     write_jsonl(P.work / "twins.jsonl", twins)
     ok = sum(t["verified"] for t in twins)
-    print(f"{len(twins)} twins, {ok} verified within {a.attempts} attempts (generation reasoning {a.gen_reasoning})")
-    log_timing(P.work, "twin", len(twins), time.time() - t0, [gen, ver])
+    print(f"{len(twins)} twins, {ok} structurally complete (generation reasoning {a.gen_reasoning})")
+    log_timing(P.work, "twin", len(twins), time.time() - t0, [gen])
 
 
 if __name__ == "__main__":

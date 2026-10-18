@@ -131,8 +131,19 @@ def live_listing(room, ch):
                                                      "url": f"sandbox://{ch}/{lid}"}}}
 
 
+def move_in_unscorable(twin: dict) -> bool:
+    """True when the move-in answer that sets the gate came from a message whose date the anonymizer destroyed."""
+    last = None
+    for t in twin["turns"]:
+        if t.get("gold") and t["gold"]["move_in"]["status"] != "absent":
+            last = t
+    return bool(last and "move_in" in (last.get("unscorable") or []))
+
+
 def checks_of(twin: dict, tid: str, room: dict, gate: dict, sub: str) -> list[dict]:
     c = []
+    if move_in_unscorable(twin):
+        gate = {k: v for k, v in gate.items() if k != "move_in"}
     for f, g in gate.items():
         base = f"register[{tid}].gate.{f}"
         st = g["status"]
@@ -149,7 +160,7 @@ def checks_of(twin: dict, tid: str, room: dict, gate: dict, sub: str) -> list[di
         if t["role"] == "owner":
             break
         for f in FIELDS:
-            if t["gold"][f]["status"] == "answered":
+            if t.get("gold") and t["gold"][f]["status"] == "answered":
                 c.append({"type": "never", "asked": f, "thread": tid, "name": f"does not re-ask {f}"})
     intents = {i for t in twin["turns"] if t["role"] == "renter" for i in t["gold"]["intents"]}
     oc = twin.get("outcome") or {}
@@ -221,9 +232,32 @@ def to_task(twin: dict, n: int, rooms: list[dict]) -> dict:
                           for t in twin["turns"]],
                 "gold_facts": gate, "phone": twin["phone"],
                 "ghosts_after_turn": last_renter if ends_silent else None,
+                "key_behaviors": key_behaviors(twin, sub, ends_silent),
                 "ends_with": twin.get("final_stage"), "deviation_policy": DEVIATION}}],
         "faults": [], "max_turns": 30, "checks": checks_of(twin, tid, room, gate, sub),
     }
+
+
+def key_behaviors(twin: dict, sub: str, ends_silent: bool) -> list[dict]:
+    """The behaviours a model-played renter must reproduce, with the turn where each happens."""
+    out = []
+    for t in twin["turns"]:
+        if t["role"] == "owner" or not t.get("gold"):
+            continue
+        for i in t["gold"]["intents"]:
+            if i in ("not_now", "hard_no", "price_negotiation", "shorter_lease"):
+                out.append({"behavior": i, "turn": t["i"], "say_like": t["text"]})
+        if t["gold"]["move_in"]["status"] == "vague":
+            out.append({"behavior": "vague_move_in", "turn": t["i"], "say_like": t["text"]})
+    langs = [t["gold"]["language"] for t in twin["turns"] if t.get("gold")]
+    for (a, b), t in zip(zip(langs, langs[1:]), [t for t in twin["turns"] if t.get("gold")][1:]):
+        if a != b:
+            out.append({"behavior": "language_switch", "turn": t["i"], "to": b})
+    if ends_silent and (twin.get("outcome") or {}).get("ghosted"):
+        last = max(t["i"] for t in twin["turns"] if t["role"] != "owner")
+        out.append({"behavior": "goes_silent", "after_turn": last,
+                    "note": "stop replying after this turn, whatever the operator sends"})
+    return out
 
 
 def llm_renter_fields(twin: dict, gate: dict, sub: str, ends_silent: bool) -> dict:
@@ -265,36 +299,118 @@ def llm_renter_fields(twin: dict, gate: dict, sub: str, ends_silent: bool) -> di
 
 
 def reader_rows(twin: dict, task_id: str) -> list[dict]:
+    """Every eligible twin renter message (text, not attachment-only) becomes a row; none is dropped for label
+    disagreement. Rule-vs-gold disagreements are flagged in meta for review."""
     rows = []
     for k, t in enumerate(twin["turns"]):
-        if t["role"] != "renter":
+        if t["role"] == "owner" or not t.get("gold") or t.get("media"):
             continue
         rows.append({"id": f"twin-{twin['twin_id'][3:]}-{t['i']:02d}", "source": "twin",
                      "input": {"today": t["ts"][:10], "context": to_context(twin["turns"][:k])[-8:], "message": t["text"]},
                      "output": t["gold"],
                      "meta": {"twin_id": twin["twin_id"], "turn": t["i"], "difficulty": t.get("difficulty"),
-                              "task_id": task_id}})
+                              "task_id": task_id, "gold_source": "reader labels of the real message, carried over",
+                              "unscorable": t.get("unscorable") or [], "reason_scored_on": "status",
+                              "flags": t.get("flags") or {},
+                              "flagged": bool((t.get("flags") or {}).get("rule_vs_gold_on_twin"))}})
     return rows
+
+
+def ops_task(twin: dict, n: int, split: str) -> dict:
+    """Tenant-ops / contractor twins as experimental v3 tasks (separate file, never pooled into H1): the twin as a
+    scripted counterpart plus generic checks (language, first person, refused drafts, no spam when ghosted)."""
+    kind = "tenant" if twin["category"] == "ops" else "vendor"
+    slug = "".join(ch_ for ch_ in twin["persona"]["name"].lower() if ch_.isalnum()) or kind
+    tid = f"t_{slug}_{twin['twin_id'][3:9]}"
+    lines, cur, seen_owner = [], None, False
+    for t in twin["turns"]:
+        if t["role"] == "owner":
+            seen_owner, cur = True, None
+            continue
+        if cur is None:
+            cur = {"after": "start"} if not seen_owner else {"when_asked": "any"}
+            cur["say"] = t["text"]
+            lines.append(cur)
+        else:
+            cur["say"] += " " + t["text"]
+    c = []
+    if not twin["language_switch"]:
+        c.append({"type": "style", "rule": "language", "language": twin["language"], "thread": tid, "scope": "sent"})
+    c += [{"type": "style", "rule": "first_person", "thread": tid, "scope": "sent"},
+          {"type": "tool_called", "tool": "send_message", "ok": False, "args": {"thread_id": tid}, "min": 0, "max": 2,
+           "name": "at most 2 refused drafts"},
+          {"type": "budget", "max_repeat_failures": 2}]
+    if (twin.get("outcome") or {}).get("ghosted"):
+        n_owner = sum(t["role"] == "owner" for t in twin["turns"])
+        c.append({"type": "tool_called", "tool": "send_message", "ok": True, "args": {"thread_id": tid}, "min": 0,
+                  "max": n_owner + 2, "name": "does not spam a silent counterpart"})
+    card = dict(twin["persona"])
+    return {
+        "id": f"twin-{twin['category']}-{twin.get('topic') or 'other'}-{split}-{n:03d}", "split": split, "version": "v3",
+        "category": "ops" if kind == "tenant" else "vendor", "subcategory": f"twin_{twin.get('topic') or 'other'}",
+        "experimental": True, "source": {"kind": "twin", "twin_id": twin["twin_id"]},
+        "initial_state": {"clock": {"now": twin["start"] + ":00"}},
+        "counterparts": [{"id": f"{kind}:{slug}", "name": card["name"], "thread_id": tid, "channel": "sms",
+                          "language": twin["language"], "script": lines, "persona_card": card,
+                          "twin_script": {"turns": [{"i": t["i"], "role": "operator" if t["role"] == "owner" else kind,
+                                                     "text": t["text"], "ts": t["ts"], "acts": t.get("acts")}
+                                                    for t in twin["turns"]],
+                                          "topic": twin.get("topic"), "outcome": twin.get("outcome"),
+                                          "ends_with": twin.get("final_stage"), "deviation_policy": DEVIATION}}],
+        "faults": [], "max_turns": 30, "checks": c,
+    }
+
+
+def people_check(P) -> dict:
+    """Protocol 2.2: no counterpart person id of a held-out thread may appear in any dev thread."""
+    held = read_jsonl(P.root / "heldout" / "threads.jsonl")
+    dev = read_jsonl(P.root / "dev" / "threads.jsonl")
+    pid = lambda ths: {t.get("person") for th in ths for t in th["turns"]  # noqa: E731
+                       if t["role"] != "owner" and t.get("person") not in (None, "me")}
+    shared = pid(held) & pid(dev)
+    assert not shared, f"{len(shared)} held-out people also appear in dev threads"
+    return {"heldout_people": len(pid(held)), "dev_people": len(pid(dev)), "shared": 0}
 
 
 def main():
     ap = common_args(argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter))
     a = ap.parse_args()
-    P = Paths.make(a.fixture)
+    P = Paths.make(a.fixture, a.split)
     twins = sorted(read_jsonl(P.work / "twins_filtered.jsonl"), key=lambda t: t["twin_id"])[: a.limit]
     if not twins:
         sys.exit("no filtered twins: run filter.py first")
+    split = P.split or "heldout"
+    pcheck = people_check(P) if P.split else None
     rooms = json.loads(INVENTORY.read_text())["rooms"]
-    tasks, rrows, pub = [], [], []
-    for n, tw in enumerate(twins, 1):
-        task = to_task(tw, n, rooms)
-        tasks.append(task)
-        rrows += reader_rows(tw, task["id"])
+    tasks, otasks, rrows, pub, excluded = [], [], [], [], 0
+    for tw in twins:
+        tw.setdefault("category", "leasing")
+        if tw["category"] == "leasing":
+            gate = final_gate(tw)
+            if move_in_unscorable(tw) and set(gate) <= {"move_in"}:
+                excluded += 1  # protocol 2.2: move-in was the only gate item and its date is destroyed
+                continue
+            task = to_task(tw, len(tasks) + 1, rooms)
+            task["split"], task["id"] = split, task["id"].replace("-heldout-", f"-{split}-")
+            tasks.append(task)
+            rrows += reader_rows(tw, task["id"])
+        else:
+            otasks.append(ops_task(tw, len(otasks) + 1, split))
         pub.append({k: v for k, v in tw.items() if k not in ("source_thread", "problems", "repair_rounds")})
     write_jsonl(P.published / "twins.jsonl", pub)
     write_jsonl(P.published / "reader_test.jsonl", rrows)
     write_jsonl(P.tasks_out, tasks)
-    stats = {"twins": len(pub), "reader_rows": len(rrows), "tasks": len(tasks),
+    if otasks or P.split:
+        write_jsonl(P.tasks_out.with_name(P.tasks_out.stem + "_ops.jsonl"), otasks)
+    stats = {"split": split, "twins": len(pub), "reader_rows": len(rrows), "tasks": len(tasks),
+             "ops_tasks_experimental": len(otasks),
+             "ops_by_category": dict(Counter(t["category"] for t in otasks)),
+             "excluded_move_in_only_unscorable": excluded,
+             "reader_rows_flagged_rule_vs_gold": sum(r["meta"]["flagged"] for r in rrows),
+             "reader_rows_move_in_unscorable": sum("move_in" in r["meta"]["unscorable"] for r in rrows),
+             "reader_row_selection": "every twin renter message with text (attachment-only excluded); none dropped "
+                                     "for label disagreement; disagreements flagged in meta",
+             "people_check": pcheck,
              "by_subcategory": dict(Counter(t["subcategory"] for t in tasks)),
              "checks": sum(len(t["checks"]) for t in tasks),
              "check_types": dict(Counter(c["type"] for t in tasks for c in t["checks"])),

@@ -66,6 +66,28 @@ def test_grams():
     assert len(grams("hello there")) == len("hello there") - 7
 
 
+def test_anon_export_rules():
+    """Owner-export loader: tap-backs dropped, photo-only kept as [photo], partners map to the owner side,
+    contractors are vendors, anonymizer-damaged dates flagged, episodes capped."""
+    assert ingest.anon_turn_text({"text": "Liked \u201cok see you then\u201d", "attachments": []}) is None
+    assert ingest.anon_turn_text({"text": "Le gust\u00f3 \u201cgracias\u201d", "attachments": []}) is None
+    assert ingest.anon_turn_text({"text": "", "attachments": ["image .heic"]}) == "[photo]"
+    assert ingest.anon_turn_text({"text": "", "attachments": ["file .pluginpayloadattachment"]}) is None
+    assert ingest.anon_turn_text({"text": "I liked the room", "attachments": []}) == "I liked the room"
+    assert ingest.anon_role({"sender": "me"}, {"P9"}, "tenants") == "owner"
+    assert ingest.anon_role({"sender": "P9"}, {"P9"}, "tenants") == "owner"
+    assert ingest.anon_role({"sender": "P1"}, {"P9"}, "contractors") == "vendor"
+    assert ingest.anon_role({"sender": "P1"}, {"P9"}, "tenants") == "renter"
+    ingest.STREET_WORDS.clear()
+    ingest.STREET_WORDS.update({"thornbury"})
+    assert ingest.date_damaged("moving in November Thornbury if ok")
+    assert not ingest.date_damaged("moving in November 12")
+    assert ingest.date_damaged("the 15th [state] 16th works")
+    turns = [{"role": "renter" if k % 2 else "owner", "text": "hi"} for k in range(100)]
+    eps = ingest.episode_bounds(turns, "leasing", None)
+    assert eps == [("leasing", 0, ingest.EPISODE_TURNS)]
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

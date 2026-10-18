@@ -59,27 +59,43 @@ class Paths:
     published: Path
     tasks_out: Path
 
+    split: str | None = None
+    cache: Path | None = None
+    root: Path | None = None
+
     @classmethod
-    def make(cls, fixture: bool) -> "Paths":
+    def make(cls, fixture: bool, split: str | None = None) -> "Paths":
+        """split (real mode only): 'heldout' or 'dev' (eval-protocol section 2.2). Each split has its own
+        work/<split>/ files and published outputs; the model cache and the salt are shared."""
         if fixture:
             fx = HERE / "fixtures"
             p = cls(True, fx / "input", fx / "out" / "work", fx / "out" / "published",
                     fx / "out" / "published" / "gym_tasks_v3.jsonl")
+            p.root = p.work
         else:
             priv = Path(os.environ.get("RENTUS_PRIVATE_DIR", Path.home() / "rentus-private-data")).expanduser().resolve()
             for d in (priv, priv / "input", priv / "work"):
                 if d == REPO or REPO in d.parents:
                     sys.exit(f"refusing: private data dir {d} is inside the repo")
-            p = cls(False, priv / "input", priv / "work", REPO / "data" / "published" / "twins",
-                    REPO / "gym" / "tasks" / "v3" / "heldout.jsonl")
-        for d in (p.work, p.published, p.tasks_out.parent):
+            root = priv / "work" / "twins"
+            if split:
+                pub = REPO / "data" / "published" / "twins" / ("" if split == "heldout" else split)
+                p = cls(False, priv / "input", root / split, pub, REPO / "gym" / "tasks" / "v3" / f"{split}.jsonl")
+            else:
+                p = cls(False, priv / "input", root, REPO / "data" / "published" / "twins",
+                        REPO / "gym" / "tasks" / "v3" / "heldout.jsonl")
+            p.root = root
+        p.split = split
+        p.cache = p.root / "cache"
+        for d in (p.root, p.work, p.published, p.tasks_out.parent):
             d.mkdir(parents=True, exist_ok=True)
         if not fixture:
-            os.chmod(p.work, 0o700)
+            for d in (p.root, p.work):
+                os.chmod(d, 0o700)
         return p
 
     def salt(self) -> str:
-        f = self.work / "salt"
+        f = (self.root or self.work) / "salt"
         if not f.exists():
             f.write_text(secrets.token_hex(16))
             os.chmod(f, 0o600)
@@ -105,6 +121,8 @@ def common_args(ap):
     ap.add_argument("--concurrency", type=int, default=int(os.environ.get("TWINS_CONCURRENCY", "32")),
                     help="model requests in flight (default 32, env TWINS_CONCURRENCY)")
     ap.add_argument("--workers", type=int, default=None, help=argparse_suppress())
+    ap.add_argument("--split", choices=["heldout", "dev"], default=None,
+                    help="real data split (eval-protocol 2.2): work/<split>/ files, split-specific outputs")
     return ap
 
 
@@ -341,11 +359,18 @@ class LocalLLM:
             with self._lock:
                 self.cache_hits += 1
             return json.loads(f.read_text())["text"]
-        for attempt in range(3):
+        # Connection errors, timeouts and 5xx (the vLLM container being restarted) are retried with backoff
+        # for up to TWINS_MAX_WAIT_S seconds (default 1800); other errors get 3 attempts.
+        max_wait = float(os.environ.get("TWINS_MAX_WAIT_S", "1800"))
+        waited, attempt, other = 0.0, 0, 0
+        while True:
+            attempt += 1
             try:
                 with _INFLIGHT:
                     resp = requests.post(self.base + "/chat/completions", headers=self._headers(), json=body,
                                          timeout=900)
+                if resp.status_code >= 500:
+                    raise ConnectionError(f"HTTP {resp.status_code}")
                 resp.raise_for_status()
                 js = resp.json()
                 msg = js["choices"][0]["message"]
@@ -357,18 +382,30 @@ class LocalLLM:
                 if "</think>" in text:
                     text = text.split("</think>")[-1]
                 if not text.strip():  # reasoning ran out of tokens before answering
-                    if not escalate:
+                    if not escalate or other >= 2:
                         f.write_text(json.dumps({"text": ""}))
                         return ""
+                    other += 1
                     body["max_tokens"] = int(body["max_tokens"] * 1.5)
                     continue
                 with self._lock:
                     self.calls += 1
                 f.write_text(json.dumps({"text": text}, ensure_ascii=False))
                 return text
+            except (requests.ConnectionError, requests.Timeout, ConnectionError) as e:
+                if waited >= max_wait:
+                    break
+                pause = min(60.0, 3.0 * attempt)
+                print(f"  [{self.role}] endpoint unavailable ({type(e).__name__}); retry in {pause:.0f}s "
+                      f"(waited {waited:.0f}s)", file=sys.stderr)
+                time.sleep(pause)
+                waited += pause
             except Exception as e:  # noqa: BLE001
-                print(f"  [{self.role}] retry {attempt + 1}: {type(e).__name__}", file=sys.stderr)
-                time.sleep(2 * (attempt + 1))
+                other += 1
+                print(f"  [{self.role}] retry {other}: {type(e).__name__}", file=sys.stderr)
+                if other >= 3:
+                    break
+                time.sleep(2 * other)
         with self._lock:
             self.failures += 1
         return None
@@ -411,7 +448,11 @@ PLACEHOLDER_NOTE = (
 def label_message(llm: LocalLLM, today: str, context: list[dict], message: str, tag: str = "") -> dict | None:
     """Reader-schema labels for one renter message, using the reader's own prompt (reader/prompt.py),
     so labels mean exactly what the reader and the Gym mean. Returns the canonical dict or None."""
-    inp = {"today": today, "context": context[-8:], "message": message}
+    ctx = context[-8:]
+    if llm.role == "reader":  # the reader serves a 4k context: keep long earlier messages short
+        ctx = [{**c, "text": c["text"][:300]} for c in ctx]
+        message = message[:1200]
+    inp = {"today": today, "context": ctx, "message": message}
     msgs = reader_prompt.build_messages(inp)
     msgs[0] = {"role": "system", "content": msgs[0]["content"] + PLACEHOLDER_NOTE}
     for k in range(2):
@@ -422,8 +463,13 @@ def label_message(llm: LocalLLM, today: str, context: list[dict], message: str, 
     return None
 
 
+def is_cp(t: dict) -> bool:
+    """A counterpart turn (renter, tenant or vendor): anything not written by the owner side."""
+    return t["role"] != "owner"
+
+
 def to_context(turns: list[dict]) -> list[dict]:
-    return [{"role": "renter" if t["role"] == "renter" else "operator", "text": t["text"]} for t in turns]
+    return [{"role": "renter" if is_cp(t) else "operator", "text": t["text"]} for t in turns]
 
 
 def norm_text(t: str) -> str:

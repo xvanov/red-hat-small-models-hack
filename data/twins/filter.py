@@ -14,7 +14,8 @@ similarity tests (they still get the PII test). A real line is "common", and not
 near-identical line appears in --common-k or more different real threads: a phrase many different
 people wrote identifies none of them.
 
-Unverified twins (labels did not match their target after twin.py's attempts) are dropped here too.
+Twins whose draft never had a complete structure (twin.py) are dropped here too. Privacy rewrites are accepted
+on the privacy tests alone (no labeler gate), so the filter does not select for easy-to-read text.
 
 Output: work/twins_filtered.jsonl and <published>/filter_report.json (counts and thresholds only).
 Usage: data/twins/.venv/bin/python data/twins/filter.py [--fixture] [--limit N]
@@ -31,9 +32,10 @@ import numpy as np
 
 import time
 
-from common import (LocalLLM, Paths, common_args, log_timing, setup, label_message, norm_text, pii_hits, pmap, read_jsonl, write_json,
-                    write_jsonl)
-from twin import compare
+import hashlib
+
+from common import (LocalLLM, Paths, common_args, is_cp, log_timing, setup, norm_text, pii_hits, pmap, read_jsonl,
+                    write_json, write_jsonl)
 
 EMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 N = 8
@@ -63,7 +65,7 @@ class RealIndex:
         for k, t in enumerate(self.norm):
             self.exact[t].add(k)
         self.embedder = embedder
-        self.emb = self._embed(self.texts) if self.texts else np.zeros((0, 384), dtype=np.float32)
+        self.emb = self._cached_embed(self.texts) if self.texts else np.zeros((0, 384), dtype=np.float32)
         # distinctiveness: in how many different threads does a near-identical line appear?
         threads = np.array([tid for tid, _ in real_lines])
         self.common = np.zeros(len(self.texts), dtype=bool)
@@ -77,6 +79,18 @@ class RealIndex:
                 self.common[list(ks)] = True
 
     _lock = threading.Lock()
+    cache_dir = None
+
+    def _cached_embed(self, texts):
+        if self.cache_dir is None:
+            return self._embed(texts)
+        key = hashlib.sha256("\x1f".join(texts).encode()).hexdigest()[:16]
+        f = self.cache_dir / f"real_emb_{key}.npy"
+        if f.exists():
+            return np.load(f)
+        e = self._embed(texts)
+        np.save(f, e)
+        return e
 
     def _embed(self, texts):
         with self._lock:
@@ -137,23 +151,19 @@ def filter_twin(tw: dict, idx: RealIndex, llm: LocalLLM, a) -> dict:
             for f in fl:
                 res["flagged"][f] += 1
             tries += 1
-            spec = (f"Its labels (must stay true): {json.dumps(t['gold'], ensure_ascii=False)}" if t["role"] == "renter"
+            spec = (f"Its labels (must stay true): {json.dumps(t['gold'], ensure_ascii=False)}" if t.get("gold")
                     else f"What it does: {', '.join(t.get('acts', []))}")
+            who = "landlord" if t["role"] == "owner" else tw.get("counterpart", "renter")
             user = (f"Chat so far:\n" + "\n".join(f"{c['role']}: {c['text']}" for c in ctx[-6:]) +
-                    f"\n\nMessage to rewrite ({'renter' if t['role'] == 'renter' else 'landlord'}): {t['text']}\n{spec}")
+                    f"\n\nMessage to rewrite ({who}): {t['text']}\n{spec}")
             out = llm.chat_json([{"role": "system", "content": REWRITE_SYSTEM}, {"role": "user", "content": user}],
                                 temperature=0.9, max_tokens=8000, cache_key=f"rewrite{tries}")
             new = (out or {}).get("text")
             if not isinstance(new, str) or not new.strip():
                 continue
-            if t["role"] == "renter":
-                lab = label_message(llm, t["ts"][:10], ctx, new, tag="twin")
-                if lab is None or compare(lab, t["gold"]):
-                    continue
-                t["gold"]["move_in"]["raw"] = lab["move_in"]["raw"] if t["gold"]["move_in"]["status"] != "absent" else None
-                if t["gold"]["reason"]["status"] == "answered":
-                    t["gold"]["reason"]["value"] = lab["reason"]["value"]
+            # accepted on the privacy test alone: no model has to "read it correctly" first (no selection by labeler)
             t["text"] = new
+            t["privacy_rewritten"] = True
             fl, sc = flags(new, idx, a, tw["phone"])
             if not fl:
                 res["regenerated"] += 1
@@ -182,15 +192,20 @@ def main():
     ap.add_argument("--rewrites", type=int, default=3)
     a = ap.parse_args()
     setup(a)
-    P = Paths.make(a.fixture)
+    P = Paths.make(a.fixture, a.split)
     twins = read_jsonl(P.work / "twins.jsonl")[: a.limit]
-    real = [(th["thread_id"], t["text"]) for th in read_jsonl(P.work / "labeled.jsonl") for t in th["turns"]]
+    every = (P.root / "real_lines.jsonl") if P.split else None
+    if every and every.exists():  # owner's export: EVERY real line of tenants + contractors, not just this split
+        real = [(r["thread_id"], r["text"]) for r in read_jsonl(every)]
+    else:
+        real = [(th["thread_id"], t["text"]) for th in read_jsonl(P.work / "labeled.jsonl") for t in th["turns"]]
     if not twins:
         sys.exit("no twins: run twin.py first")
     from sentence_transformers import SentenceTransformer
     embedder = SentenceTransformer(EMBED_MODEL, device="cpu")
+    RealIndex.cache_dir = P.root
     idx = RealIndex(real, embedder, a.common_k, a.cos_common)
-    llm = LocalLLM("operator", P.work / "cache")
+    llm = LocalLLM("operator", P.cache)
     t0 = time.time()
 
     unverified = [t for t in twins if not t.get("verified")]
@@ -212,7 +227,8 @@ def main():
     best = [s for tw, r in zip(todo, results) if not r["dropped"] for s in r["best"]]
     report = {
         "what": "Privacy filter for synthetic twins: every twin line vs every real line. Counts and thresholds only.",
-        "twins_in": len(twins), "dropped_unverified_labels": len(unverified),
+        "twins_in": len(twins), "dropped_incomplete_structure": len(unverified),
+        "by_category_out": {c: sum(tw.get("category", "leasing") == c for tw in kept) for c in ("leasing", "ops", "contractor")},
         "twins_checked": len(todo), "lines_checked": sum(r["lines"] for r in results),
         "lines_short_exempt_from_similarity": sum(r["short_exempt"] for r in results),
         "real_lines": len(real), "real_lines_common": int(idx.common.sum()),
@@ -231,7 +247,7 @@ def main():
     }
     write_json(P.published / "filter_report.json", report)
     log_timing(P.work, "filter", len(twins), time.time() - t0, [llm])
-    print(json.dumps({k: report[k] for k in ("twins_in", "dropped_unverified_labels", "flag_events",
+    print(json.dumps({k: report[k] for k in ("twins_in", "dropped_incomplete_structure", "by_category_out", "flag_events",
                                              "lines_rewritten_and_passed", "twins_dropped_privacy", "twins_out")}, indent=1))
 
 

@@ -38,7 +38,9 @@ from zoneinfo import ZoneInfo
 from common import LocalLLM, Paths, common_args, setup, detect_lang, hid, pmap, scrub, write_json, write_jsonl
 
 TZ = ZoneInfo(os.environ.get("TWINS_TZ", "America/New_York"))
-MAX_TURNS = 80
+MAX_TURNS = 80          # imazing / facebook / generic threads
+ANON_MAX_TURNS = 600    # anonymized owner export: whole threads are kept; episodes are cut below
+EPISODE_TURNS = 40      # a twin mirrors one episode of at most this many messages
 
 FB_SYSTEM = re.compile(
     r"^(you can now (message|call)|you are now connected|say hi to your new|.* sent an attachment\.?$|"
@@ -193,6 +195,159 @@ def load_generic(root: Path):
         yield {"key": key, "source": "generic", "channel": channel[key], "msgs": msgs}
 
 
+# --------------------------------------------------------------------------------------------- anonymized export
+# The owner's anonymized phone-message export (raw/anonymized-YYYY-MM-DD/): {tenants,contractors}/messages.jsonl,
+# one message per line: conv, dataset, type ("1:1"|"group"), house, ts, sender ("me" or a person id), sender_name,
+# text, attachments, edited; plus people.csv (id, roles incl. "partner", conversations). Selection and the
+# held-out/dev split come from split.py (work/twins/selection.json).
+TAPBACK = re.compile(
+    r"^(Liked|Loved|Laughed at|Emphasized|Disliked|Questioned|Reacted|Removed an? \w+ from|Le gustó|Le encantó|"
+    r"Se rió de|Enfatizó|No le gustó|Cuestionó|Reaccionó)\b.*[“\"]|^\S{1,3} (to|a) [“\"]", re.S)
+MEDIA_KIND = {"image": "[photo]", "video": "[video]", "audio": "[audio]", "application": "[file]", "file": "[file]",
+              "text": "[file]"}
+OPS_KW = re.compile(
+    r"\b(leak|leaking|clog|toilet|sink|shower|drain|water heater|hot water|plumb|breaker|outlet|power|electric|"
+    r"wifi|wi-fi|internet|router|lock|key|door|ac\b|a/c|heat|hvac|thermostat|fridge|washer|dryer|stove|oven|"
+    r"dishwasher|mold|pest|roach|mice|rent|late|pay|paid|zelle|cash ?app|utilit|bill|deposit|move[- ]?out|"
+    r"trash|clean|noise|guest|parking|package|renew|repair|fix|broken|not working|"
+    r"fuga|gotera|baño|inodoro|ducha|agua caliente|luz|internet|llave|puerta|renta|pago|pagar|utilidades|"
+    r"basura|limpi|ruido|arregl|roto|no funciona)", re.I)
+CYRILLIC = re.compile(r"[Ѐ-ӿ]")
+
+
+def anon_people(raw_dir: Path) -> tuple[set[str], dict[str, set[str]]]:
+    """(partner ids, conv -> person ids listed as participants)."""
+    partners, conv_people = set(), defaultdict(set)
+    with open(raw_dir / "people.csv", encoding="utf-8-sig") as f:
+        for r in csv.DictReader(f):
+            if "partner" in (r.get("roles") or ""):
+                partners.add(r["id"])
+            for c in (r.get("conversations") or "").split():
+                conv_people[c].add(r["id"])
+    return partners, conv_people
+
+
+def anon_messages(raw_dir: Path, datasets=("tenants", "contractors")) -> dict[str, list[dict]]:
+    by = defaultdict(list)
+    for ds in datasets:
+        path = raw_dir / ds / "messages.jsonl"
+        if not path.exists():
+            continue
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    m = json.loads(line)
+                    by[m["conv"]].append(m)
+    for msgs in by.values():
+        msgs.sort(key=lambda m: m["ts"])
+    return by
+
+
+def anon_turn_text(m: dict) -> str | None:
+    """Message text for a twin: tap-back reactions dropped, photo-only messages kept as [photo]/[video]/[file]."""
+    text = (m.get("text") or "").strip()
+    if text:
+        return None if TAPBACK.match(text) else text
+    kinds = [a.split()[0].lower() for a in m.get("attachments") or [] if "pluginpayload" not in a]
+    return MEDIA_KIND.get(kinds[0], "[file]") if kinds else None
+
+
+def anon_role(m: dict, partners: set[str], dataset: str) -> str:
+    if m["sender"] == "me" or m["sender"] in partners:
+        return "owner"  # partners speak for the operator side (lead hand-offs, team)
+    return "vendor" if dataset == "contractors" else "renter"
+
+
+def episode_bounds(turns: list[dict], category: str, tenancy_start: int | None) -> list[tuple[str, int, int]]:
+    """[(episode category, start, end)] windows of at most EPISODE_TURNS messages."""
+    n = len(turns)
+    out = []
+    if category in ("leasing", "leasing_then_tenancy"):
+        end = min(n, tenancy_start or n) if category == "leasing_then_tenancy" else n
+        out.append(("leasing", 0, min(end, EPISODE_TURNS)))
+    if category in ("tenancy_ops", "leasing_then_tenancy"):
+        lo = (tenancy_start or 0) if category == "leasing_then_tenancy" else 0
+        hit = next((k for k in range(lo, n) if turns[k]["role"] != "owner" and OPS_KW.search(turns[k]["text"])), None)
+        if hit is not None:
+            s0 = max(lo, hit - 2)
+            out.append(("ops", s0, min(n, s0 + 30)))
+    if category == "contractor":
+        out.append(("contractor", 0, min(n, EPISODE_TURNS)))
+    return [(c, a, b) for c, a, b in out if b - a >= 2]
+
+
+def load_anon_selected(raw_dir: Path, selection: dict, salt: str, scrub_counts: Counter) -> dict[str, list[dict]]:
+    """Normalized episode threads per split, from split.py's selection (conv -> split, category, ...)."""
+    partners, _ = anon_people(raw_dir)
+    msgs = anon_messages(raw_dir)
+    out = defaultdict(list)
+    for conv, sel in sorted(selection["threads"].items()):
+        if sel["split"] not in ("heldout", "dev"):
+            continue
+        ds = sel["dataset"]
+        turns, prev_lang = [], None
+        for m in msgs[conv][:ANON_MAX_TURNS]:
+            text = anon_turn_text(m)
+            if text is None:
+                continue
+            ts = parse_ts(m["ts"])
+            role = anon_role(m, partners, ds)
+            clean, counts = scrub(text)
+            scrub_counts.update(counts)
+            lang = detect_lang(clean, prev_lang)
+            if role != "owner":
+                prev_lang = lang
+            turns.append({"role": role, "person": m["sender"], "ts": ts.replace(tzinfo=None).isoformat(timespec="minutes"), "text": clean,
+                          "lang": lang, "media": bool(re.fullmatch(r"\[(photo|video|audio|file)\]", clean)),
+                          "date_damaged": date_damaged(text)})
+        for cat, a, b in episode_bounds(turns, sel["category"], sel.get("tenancy_start")):
+            ep = [dict(t, i=k) for k, t in enumerate(turns[a:b])]
+            if not any(t["role"] != "owner" and not t["media"] for t in ep):
+                continue
+            rl = [t["lang"] for t in ep if t["role"] != "owner" and not t["media"]]
+            out[sel["split"]].append({
+                "thread_id": "th_" + hid(salt, "anon", conv, cat), "conv": conv, "source": "anon", "channel": "sms",
+                "category": cat, "counterpart": {"leasing": "renter", "ops": "tenant", "contractor": "vendor"}[cat],
+                "split": sel["split"], "language": Counter(rl).most_common(1)[0][0], "languages": sorted(set(rl)),
+                "language_switch": any(x != y for x, y in zip(rl, rl[1:])), "start": ep[0]["ts"],
+                "episode": [a, b], "thread_turns": len(turns), "turns": ep,
+                "rental": {"kept": True, "by": "selection", "category": cat}})
+    return out
+
+
+STREET_WORDS: set[str] = set()
+MONTH_RE = (r"(?:January|February|March|April|May|June|July|August|September|October|November|December|"
+            r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec|enero|febrero|marzo|abril|mayo|junio|julio|agosto|"
+            r"septiembre|octubre|noviembre|diciembre)")
+
+
+def load_street_words(raw_dir: Path) -> None:
+    """Words the anonymizer uses in fake street names (houses.csv, people.csv): it sometimes put one where the day
+    of a date was ("<Month> <StreetWord>"), which destroys exact move-in dates (eval-protocol 2.2)."""
+    words = set()
+    for name in ("houses.csv", "people.csv"):
+        with open(raw_dir / name, encoding="utf-8-sig") as f:
+            for r in csv.DictReader(f):
+                for addr in re.split(r";", (r.get("address") or "") + ";" + (r.get("houses") or "")):
+                    m = re.match(r"\s*\d+\s+(.+?),", addr)
+                    if m:
+                        words |= {w for w in m.group(1).split() if len(w) > 3}
+    STREET_WORDS.clear()
+    STREET_WORDS.update(w.lower() for w in words)
+
+
+def date_damaged(raw_text: str) -> bool:
+    t = raw_text or ""
+    for m in re.finditer(MONTH_RE + r"\.?\s+([A-Za-z]+)", t):
+        if m.group(1).lower() in STREET_WORDS:
+            return True
+    for m in re.finditer(r"\[state\]", t):
+        win = t[max(0, m.start() - 25): m.end() + 25]
+        if re.search(MONTH_RE + r"|\b\d{1,2}(st|nd|rd|th)?\b|\d{1,2}/\d{1,2}", win, re.I):
+            return True
+    return False
+
+
 # --------------------------------------------------------------------------------------------- normalize
 def normalize(raw: dict, owners: set[str], salt: str, scrub_counts: Counter) -> dict | None:
     msgs = sorted([m for m in raw["msgs"] if m[0] is not None], key=lambda m: m[0])
@@ -243,9 +398,14 @@ def main():
                     help="auto: keyword score decides clear cases, Lightning the ambiguous ones; all: Lightning "
                          "for every thread; none: keywords only")
     ap.add_argument("--keep-tenant", action="store_true", help="also keep existing-tenant threads")
+    ap.add_argument("--anon", default=None, metavar="RAW_DIR",
+                    help="read the owner's anonymized export (raw/anonymized-*/) instead of input/; needs split.py's "
+                         "selection.json; writes work/twins/<split>/threads.jsonl for every split at once")
     a = ap.parse_args()
     setup(a)
-    P = Paths.make(a.fixture)
+    if a.anon:
+        return main_anon(a)
+    P = Paths.make(a.fixture, a.split)
     names = a.owner_names or os.environ.get("TWINS_OWNER_NAMES") or ("Fixture Owner" if a.fixture else "")
     owners = {n.strip().casefold() for n in names.split(",") if n.strip()}
     if not owners:
@@ -271,7 +431,7 @@ def main():
         t["rental"] = {"score": len({m.group().lower() for x in t["turns"] for m in RENTAL_KW.finditer(x["text"])})}
     need = [t for t in threads if a.classify == "all" or (a.classify == "auto" and t["rental"]["score"] in (1, 2))]
     if need:
-        llm = LocalLLM("operator", P.work / "cache")
+        llm = LocalLLM("operator", P.cache)
         cats = pmap(lambda t: classify(llm, t), need, a.workers)
         for t, c in zip(need, cats):
             t["rental"]["category"], t["rental"]["by"] = c, "lightning"
@@ -302,6 +462,45 @@ def main():
     print(json.dumps(report, indent=1))
     if no_owner:
         print(f"WARNING: {no_owner} threads have no owner turns; check --owner-names", file=sys.stderr)
+
+
+def main_anon(a) -> None:
+    raw = Path(a.anon).expanduser().resolve()
+    P = Paths.make(False)
+    sel_path = P.root / "selection.json"
+    if not sel_path.exists():
+        sys.exit("run split.py first (work/twins/selection.json)")
+    selection = json.loads(sel_path.read_text())
+    load_street_words(raw)
+    scrub_counts = Counter()
+    by_split = load_anon_selected(raw, selection, P.salt(), scrub_counts)
+    report = {"pii_scrubbed": dict(scrub_counts), "splits": {}}
+    for split in ("heldout", "dev"):
+        threads = sorted(by_split.get(split, []), key=lambda t: (t["start"], t["thread_id"]))
+        SP = Paths.make(False, split)
+        write_jsonl(SP.work / "threads.jsonl", threads)
+        cp = [t for th in threads for t in th["turns"] if t["role"] != "owner"]
+        report["splits"][split] = {
+            "episodes": len(threads), "conversations": len({t["conv"] for t in threads}),
+            "by_category": dict(Counter(t["category"] for t in threads)),
+            "by_language": dict(Counter("mixed" if t["language_switch"] else t["language"] for t in threads)),
+            "messages": sum(len(t["turns"]) for t in threads), "counterpart_messages": len(cp),
+            "media_only_messages": sum(t["media"] for th in threads for t in th["turns"]),
+            "date_damaged_messages": sum(t["date_damaged"] for t in cp),
+            "date_damaged_threads": sum(any(t["date_damaged"] for t in th["turns"] if t["role"] != "owner")
+                                        for th in threads)}
+    # every real line of the export (tenants + contractors, scrubbed): the privacy filter's reference set
+    partners, _ = anon_people(raw)
+    lines = []
+    for conv, msgs in anon_messages(raw).items():
+        for m in msgs:
+            text = anon_turn_text(m)
+            if text and not re.fullmatch(r"\[(photo|video|audio|file)\]", text):
+                lines.append({"thread_id": conv, "text": scrub(text)[0]})
+    write_jsonl(P.root / "real_lines.jsonl", lines)
+    report["real_lines"] = len(lines)
+    write_json(P.root / "ingest_report.json", report)
+    print(json.dumps(report, indent=1))
 
 
 if __name__ == "__main__":
