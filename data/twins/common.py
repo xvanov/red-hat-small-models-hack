@@ -315,6 +315,13 @@ class LocalLLM:
     def chat_json(self, messages, **kw) -> dict | None:
         return reader_prompt.parse_output(self.chat(messages, **kw))
 
+    def require_healthy(self, what: str) -> None:
+        """Stop before writing outputs if any call failed (endpoint down or timing out). Finished calls are
+        cached, so a rerun resumes where this one stopped."""
+        if self.failures:
+            sys.exit(f"{what}: {self.failures} model calls failed ({self.role} endpoint down?). Nothing written; "
+                     f"rerun when the endpoint is back (finished calls are cached).")
+
     def stats(self) -> dict:
         return {"model": self.model, "calls": self.calls, "cache_hits": self.cache_hits, "failures": self.failures}
 

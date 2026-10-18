@@ -62,4 +62,9 @@ Limits: the scrub regexes are a second layer and miss free-form identifiers (a n
 ```bash
 data/twins/.venv/bin/python data/twins/make_fixture.py
 data/twins/run.sh --fixture
+data/twins/.venv/bin/python data/twins/test_twins.py   # offline tests: loaders, mojibake, scrub, local-only guard
 ```
+
+Fixture result (2026-10-17): 10 threads in, 1 non-rental dropped, 9 labeled, 9 twins written, 7 verified (2 still failed label verification after 4 attempts), 6 lines flagged by the privacy filter and 2 rewritten, 0 twins dropped for privacy, 7 v3 tasks and 31 reader rows. The v3 tasks load and score in the Gym (`run_eval.py --tasks-file ... --stub`, 0 errors). Runtime is about 20 minutes for 9 twins because Lightning reasons on every call. For a large real set use `--workers 32` and try `--limit` first. `TWINS_REASONING=off` is faster but labels worse.
+
+If an endpoint call fails, a step stops before writing anything. Finished calls are cached, so rerunning resumes where it stopped.

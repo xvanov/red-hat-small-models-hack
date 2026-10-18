@@ -192,6 +192,7 @@ def main():
     unverified = [t for t in twins if not t.get("verified")]
     todo = [t for t in twins if t.get("verified")]
     results = pmap(lambda tw: filter_twin(tw, idx, llm, a), todo, min(a.workers, 4))
+    llm.require_healthy("filter")
     kept = [tw for tw, r in zip(todo, results) if not r["dropped"]]
     # final pass: nothing published may still be over a threshold
     for tw in kept:

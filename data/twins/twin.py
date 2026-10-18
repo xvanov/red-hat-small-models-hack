@@ -335,6 +335,7 @@ def main():
     llm = LocalLLM("operator", P.work / "cache")
     salt = P.salt()
     twins = pmap(lambda th: make_twin(th, pool, salt, llm, a.attempts, a.show_original), threads, a.workers)
+    llm.require_healthy("twin")
     write_jsonl(P.work / "twins.jsonl", twins)
     ok = sum(t["verified"] for t in twins)
     print(f"{len(twins)} twins, {ok} verified on the first {a.attempts} attempts; model calls {llm.stats()}")

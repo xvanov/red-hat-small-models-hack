@@ -186,6 +186,8 @@ def main():
     jobs = [(th, k) for th in threads for k, t in enumerate(th["turns"]) if t["role"] == "renter"]
     pmap(lambda j: label_renter_turn(lab, *j), jobs, a.workers)  # every message in parallel, then each thread
     out = pmap(lambda th: label_thread(op, th), threads, a.workers)
+    op.require_healthy("label")
+    lab.require_healthy("label")
     write_jsonl(P.work / "labeled.jsonl", out)
     k = a.min_cell if a.min_cell is not None else (1 if a.fixture else 5)
     card = stats_card(out, k, a.labeler)

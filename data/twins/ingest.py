@@ -284,6 +284,8 @@ def main():
         r["kept"] = r["category"] == "inquiry" or (a.keep_tenant and r["category"] == "tenant")
         t.pop("_owner_turns", None)
 
+    if need:
+        llm.require_healthy("ingest")
     kept = [t for t in threads if t["rental"]["kept"]]
     write_jsonl(P.work / "threads.jsonl", kept)
     report = {
