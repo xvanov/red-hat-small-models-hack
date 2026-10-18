@@ -59,13 +59,29 @@ def lease_terms(text: str) -> list[tuple[str, int | None]]:
     return out
 
 
+# The owner's canonical two-part lease question is ONE pending item (concierge spec R-STYLE-5, §3.4):
+# "How long do you want to stay? Is a one year lease okay with you?" and its Spanish form. Its first "?" does
+# not count toward the one-question rule; any other second question still does.
+LEASE_PAIR = re.compile(
+    r"how long (?:do|would) you (?:want|like|plan|intend) to stay\s*\?\s*"
+    r"(?:and\s+)?(?:is|would|will) (?:a )?(?:one|1|12)[- ](?:year|month)s?(?: lease)? (?:be )?(?:okay|ok|fine|good|work)(?: (?:with|for) you)?\s*\?"
+    r"|¿?\s*cu[aá]nto tiempo (?:quieres|quiere|deseas|desea|piensas|planeas|te gustar[ií]a) quedarte\s*\?\s*"
+    r"¿?\s*(?:te|le) (?:funciona|parece bien|sirve|queda bien|est[aá] bien|va bien) (?:un )?contrato de (?:un|1|12) (?:a[nñ]o|meses)\s*\?",
+    re.IGNORECASE)
+
+
+def question_count(text: str) -> int:
+    """Question marks, counting the canonical two-part lease question as one."""
+    return text.count("?") - len(LEASE_PAIR.findall(text))
+
+
 def style_violations(text: str) -> list[tuple[str, str]]:
     """Return (rule, message) pairs; empty when the text passes."""
     v = []
-    n = len(sentences(text))
+    n = len(sentences(text)) - len(LEASE_PAIR.findall(text))   # the canonical lease pair is one unit
     if n > 2:
         v.append(("max_two_sentences", f"text has {n} sentences; the limit is 2"))
-    q = text.count("?")
+    q = question_count(text)
     if q > 1:
         v.append(("one_question", f"text asks {q} questions; ask one thing at a time"))
     if LONG_DASH.search(text):

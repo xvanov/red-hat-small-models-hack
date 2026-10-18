@@ -54,3 +54,35 @@ def test_send_message_owner_name_from_policy(world):
 def test_send_message_first_person_passes(world):
     out = call_ok(world, "send_message", {"thread_id": "T001", "text": "Yes, it is available. I'll confirm the details shortly."})
     assert out["status"] == "sent"
+
+
+# ----------------------------------------------------------------------------- canonical lease question
+
+LEASE_OK = [
+    "How long do you want to stay? Is a one year lease okay with you?",
+    "How long would you like to stay? Is a 1 year lease ok with you?",
+    "Thanks Sam. How long do you want to stay? Would a one-year lease work for you?",
+    "¿Cuánto tiempo quieres quedarte? ¿Te funciona un contrato de un año?",
+    "Cuánto tiempo piensas quedarte? ¿Te parece bien un contrato de 1 año?",
+]
+STILL_TWO = [
+    "How long do you want to stay? What is your exact move-in date?",
+    "How long do you want to stay? Is a one year lease okay with you? What is your phone?",
+    "Is a one year lease okay with you? How long do you want to stay?",
+]
+
+
+@pytest.mark.parametrize("text", LEASE_OK)
+def test_canonical_lease_question_is_one_item(world, text):
+    from rentus_tools.impl.style import style_violations
+    assert style_violations(text) == [], text
+
+
+@pytest.mark.parametrize("text", STILL_TWO)
+def test_other_double_questions_still_refused(text):
+    from rentus_tools.impl.style import style_violations
+    assert "one_question" in [r for r, _ in style_violations(text)], text
+
+
+def test_send_message_accepts_canonical_lease_question(world):
+    call_ok(world, "send_message", {"thread_id": "T001", "text": LEASE_OK[0]})
