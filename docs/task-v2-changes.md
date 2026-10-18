@@ -1,5 +1,7 @@
 # Task set v2: what changed and why
 
+**Update (2026-10-18):** approved (D23) and run: see the v2 section at the top of `docs/results.md`.
+
 **Status (2026-10-17):** v2 is built, and the privileged reference player and the gym tests check it. **No model has run on it** (no GPU, no API calls). Please approve it before any paid reruns. The flaws it fixes are listed task by task in `docs/task-review.md`.
 
 - v1 is untouched: `gym/tasks/{train,heldout}.jsonl`. Regenerating with `python gym/build_tasks.py` reproduces it byte for byte, and every committed result used it.

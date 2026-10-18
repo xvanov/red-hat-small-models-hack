@@ -1,4 +1,86 @@
-# Results: Gym-driven improvement of the operator (P2.1)
+# Results: Gym-driven improvement of the operator
+
+## v2 results (approved task set)
+
+**These are the numbers to quote.** Task set v2 (`gym/tasks/v2/heldout.jsonl`, 33 held-out tasks, approved by the owner as decision D23) fixes flaws found in an audit of v1 (`docs/task-review.md`, `docs/task-v2-changes.md`). Everything under "v1 results" further down used the flawed v1 tasks and is superseded. v1 and v2 numbers are not comparable with each other.
+
+Run 2026-10-18 02:20 to 03:10 ET at commit `437b611`. Model: Nemotron 3.5 Lightning 30B-A3B (NVFP4) on vLLM on our one rented GPU, temperature 0.2, no paid APIs. Each config ran 3 times with operator seeds 1, 2, 3 (NeMo path: 2 runs, seeds 1, 2). Tasks, tools and scorer (`gym/rentus_env/verify.py`) were not changed. Statistics from `gym/stats.py` (method in `docs/eval-method.md`).
+
+### Headline (held-out v2, 33 tasks)
+
+| config | runner | runs | pass rate (95% CI) | mean reward (95% CI) | pass^3 (passes in all 3 runs) |
+|---|---|---|---|---|---|
+| Baseline (v1 settings: `RunConfig()`, prompt v1, rule-based reader) | our loop | 3 | 12.1% (5 to 27%) | 0.570 (0.493 to 0.648) | 6.1% |
+| **Final** (guard + prompt v3 + style pre-check + reasoning history + fine-tuned 0.6B reader) | our loop | 3 | **45.5% (30 to 62%)** | **0.929 (0.911 to 0.945)** | 18.2% |
+| Final + router | our loop | 3 | 46.5% (31 to 63%) | 0.876 (0.834 to 0.914) | 21.2% |
+| Final, NeMo Gym `simple_agent` (prompt v3 + fine-tuned reader) | NeMo Gym | 2 | 54.5% (38 to 70%) | 0.887 (0.842 to 0.930) | n/a (pass^2 30.3%) |
+
+Pass rate = share of tasks where every check passed, averaged over runs (Wilson interval). Mean reward = average share of checks passed (bootstrap interval over tasks). pass^3 = share of tasks that passed in all 3 runs, a reliability measure.
+
+**Paired tests** (same 33 tasks; task is the resampling unit; Holm-corrected over the three comparisons):
+
+| A vs B | Δ mean reward (95% paired bootstrap) | Holm p (reward) | Δ pass rate | tasks A better / B better | Holm p (pass, exact McNemar) |
+|---|---|---|---|---|---|
+| Final vs baseline | **+0.359 (+0.281 to +0.436)** | <0.001 | **+33.3 pts** | 22 / 2 | <0.001 |
+| Final + router vs final | **−0.053 (−0.093 to −0.016)** | 0.016 | +1.0 pts | 9 / 12 | 0.664 |
+| Final NeMo vs final (our loop) | −0.042 (−0.092 to +0.005) | 0.093 | +9.1 pts | 18 / 9 | 0.244 |
+
+### Per category
+
+Pass rate (95% Wilson) and mean reward (95% bootstrap); n = tasks in the category.
+
+| config | leasing (20) | listing (4) | ops (4) | recovery (5) |
+|---|---|---|---|---|
+| baseline | pass 5.0% (1 to 24%); reward 0.425 (0.360 to 0.492) | pass 8.3% (1 to 57%); reward 0.799 (0.750 to 0.847) | pass 50.0% (15 to 85%); reward 0.893 (0.786 to 1.000) | pass 13.3% (2 to 57%); reward 0.710 (0.596 to 0.824) |
+| final | pass 26.7% (12 to 49%); reward 0.919 (0.902 to 0.937) | pass 83.3% (36 to 98%); reward 0.965 (0.931 to 1.000) | pass 83.3% (36 to 98%); reward 0.962 (0.925 to 1.000) | pass 60.0% (23 to 88%); reward 0.911 (0.837 to 0.967) |
+| final + router | pass 40.0% (22 to 61%); reward 0.871 (0.818 to 0.918) | pass 50.0% (15 to 85%); reward 0.896 (0.854 to 0.931) | pass 83.3% (36 to 98%); reward 0.972 (0.944 to 1.000) | pass 40.0% (12 to 77%); reward 0.800 (0.675 to 0.928) |
+| final, NeMo | pass 45.0% (26 to 66%); reward 0.887 (0.833 to 0.936) | pass 75.0% (30 to 95%); reward 0.948 (0.896 to 1.000) | pass 87.5% (40 to 99%); reward 0.917 (0.750 to 1.000) | pass 50.0% (17 to 83%); reward 0.817 (0.667 to 0.967) |
+
+Per check type (share passed over all runs): baseline → final: style 20% → 77%, state 39% → 95%, tool_called 67% → 97%, escalated 61% → 94%, message 52% → 95%, never 84% → 89%, budget 100% → 100%. Final + router: style 97%, state 82%, tool_called 88%, escalated 78%, message 95%, never 80%, budget 99%.
+
+### Cost per task (our loop, 99 rollouts per config)
+
+| config | Lightning calls / task | input tokens / task | output tokens / task | task time p50 / mean | runs that hit the 30-step cap |
+|---|---|---|---|---|---|
+| baseline | 8.4 | 66k | 2.2k | 23 s / 31 s | 5 of 99 |
+| final | 20.9 | 249k | 8.5k | 105 s / 99 s | 47 of 99 |
+| final + router | **11.2** | **110k** | **5.3k** | **61 s / 71 s** | 1 of 99 |
+
+Router decisions (377 routed events over 3 runs): LIGHTNING 300, RECORD_ONLY 59, BATCH 18, ESCALATE_DIRECT 0, NO_OP 0. The GPU was shared with other work during the runs, so times are indicative only.
+
+### How to read this
+
+- **The final config is a large, statistically clear gain over the baseline**: +0.36 mean reward and +33 pass-rate points, with 22 tasks better and 2 worse. This is the defensible headline.
+- **Pass rate is low relative to reward (45% vs 0.93) mainly because of one new v2 check.** `style:first_person` (never refer to the owner in the third person) failed 30 times across the final's 99 rollouts, almost always on the same phrase after proposing a showing: "...pending the owner's confirmation" ("pendiente de confirmación del dueño"). One failed check fails the whole task. Not-now and hard-no tasks also miss the required register status (`not_now` / `lost`) in about half the runs. We did not change prompts after seeing held-out results; these are the next things to fix on train.
+- **Reliability is the weak spot.** Only 18% of tasks pass in all 3 runs (pass^3), while 76% pass in at least one (pass@3). 19 of 33 tasks flip between runs. Quote pass^3 next to the pass rate.
+- **The router halves the cost but loses some quality.** It cuts Lightning calls per task from 20.9 to 11.2, input tokens by 56% and task time p50 from 105 s to 61 s, and almost nothing hits the step cap any more (1 vs 47 of 99). Pass rate is unchanged (+1 pt, not significant), but mean reward is 0.053 lower (Holm p 0.016). Most lost checks are in leasing (84 of 127 failed checks over 3 runs), led by the recorded move-in date: missing, empty, or a wrong date left in the register (for example, in `early_date` the renter's first, too-early date instead of the correction). Escalation checks also drop (94% → 78%), and listing and recovery lose some reward. The router stays off in the final config until that is fixed on train.
+- **NeMo Gym path**: `simple_agent` has no renter guard and no style pre-check (those live in our loop), and reasoning history is NeMo's default. With prompt v3 and the fine-tuned reader it is statistically level with our loop: higher pass rate (+9 pts, p 0.24), lower reward (−0.04, p 0.09). Its two runs differ a lot (0.938 vs 0.837 reward; in run 2 several rollouts ended after 0 to 3 tool calls with a plain-text answer, the failure the guard exists for).
+- **Endpoint drops.** As in every committed run, a rollout that never reached the model (`APIConnectionError`, tunnel drop) was rerun once the endpoint answered again; rollouts that reached the model were never rerun. Reruns per config (of 99): baseline 12, final 52, final + router 35, NeMo 0. Each `summary.json` lists them (`model_error_retries`); none remained failed. The fine-tuned reader answered every `read_reply` call in the final runs (345 calls, 0 fallbacks).
+
+### Runs and reproduce
+
+Run dirs: `gym/results/v2-heldout-{baseline,final,final-router}-s{1,2,3}/` and `gym/results/v2-heldout-final-nemo-s{1,2}/`; per-config reports `gym/results/v2-heldout-*-report.md` (with per-task pass matrices).
+
+```bash
+F=guard+prompt3+style+rhist+readermodel
+gym/.venv/bin/python gym/run_seeds.py --variant base     --split heldout --tasks-version v2 --seeds 1,2,3 --prefix v2-heldout-baseline     --workers 5
+gym/.venv/bin/python gym/run_seeds.py --variant $F       --split heldout --tasks-version v2 --seeds 1,2,3 --prefix v2-heldout-final        --workers 5
+gym/.venv/bin/python gym/run_seeds.py --variant $F+router --split heldout --tasks-version v2 --seeds 1,2,3 --prefix v2-heldout-final-router --workers 5
+gym/.venv/bin/python gym/run_seeds.py --via nemo --variant prompt3+readermodel --split heldout --tasks-version v2 --seeds 1,2 --prefix v2-heldout-final-nemo --workers 5
+gym/.venv/bin/python gym/stats.py --md --categories \
+  --config baseline=v2-heldout-baseline-s1,v2-heldout-baseline-s2,v2-heldout-baseline-s3 \
+  --config final=v2-heldout-final-s1,v2-heldout-final-s2,v2-heldout-final-s3 \
+  --config final+router=v2-heldout-final-router-s1,v2-heldout-final-router-s2,v2-heldout-final-router-s3 \
+  --config final-nemo=v2-heldout-final-nemo-s1,v2-heldout-final-nemo-s2 \
+  --compare final:baseline --compare final+router:final --compare final-nemo:final
+```
+
+---
+
+# v1 results (superseded by v2)
+
+**Superseded.** Everything below used task set v1, which an audit found flawed (move-in dates before the room was free, style scored on drafts the renter never saw, a "discount" word ban, and more; see `docs/task-review.md`). Kept for the record and for the change-by-change ablation history. Quote the v2 section above instead.
+
 
 Model: Nemotron 3.5 Lightning 30B-A3B (NVFP4) on vLLM, temperature 0.2, the same weights in every row. No training: every change is to the harness, the prompt or the verifier. Environment: `gym/` (NeMo Gym 0.6.0 resources server, 31 held-out tasks, 51 train tasks).
 
