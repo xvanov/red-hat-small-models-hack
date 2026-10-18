@@ -49,3 +49,15 @@ def register(channel: str, adapter: LiveAdapter) -> None:
 
 def adapter_for(channel: str) -> LiveAdapter:
     return ADAPTERS.get(channel, _STUB)
+
+
+def register_live(target: str = "live", base_url: str | None = None, photo_dir: str | None = None, store=None) -> dict:
+    """Lane 3 one-call setup: browser listing adapters (marketplace, roomies, craigslist, padsplit) on
+    `target` plus the email and SMS draft channels with live-mode thread sync. Nothing it registers
+    submits a listing or sends a message."""
+    from .channels_adapter import register_all
+    from .inbound_adapter import register_inbound
+
+    browser = register_all(target, base_url=base_url, photo_dir=photo_dir)
+    inbound = register_inbound(store)
+    return {"browser": browser, **inbound}
