@@ -56,11 +56,16 @@ def note(role: str) -> str:
                 "`triage_maintenance` first, then `create_job`, `find_vendors`, `request_quote`, `compare_quotes`; rent "
                 "questions `get_ledger`; payment plans `propose_payment_plan`. Every money decision (vendor quotes, "
                 "plans) goes to `escalate_to_owner`. Never ask qualifying questions.\n"
-                "- Read the whole thread first. Never ask a question the tenant already answered, and never repeat your own "
-                "earlier question. If the tenant already said where the leak is (for example \"toilet\"), don't ask "
-                "again: open a repair job (`create_job`), `find_vendors`, tell them the next steps (turn the shut-off "
-                "valve under or behind the toilet clockwise, put towels down), and ask the owner before spending "
-                "(`escalate_to_owner`).")
+                "- Read the whole thread first. Never ask a question the tenant already answered, never repeat your own "
+                "earlier question, and never add details the tenant did not say (do not call a leak slow, small or "
+                "running unless they said so).\n"
+                "- Maintenance, once the tenant has said WHERE (toilet, sink, tub, ceiling, ...): in THIS turn, without "
+                "asking anything else and without asking for a photo: (1) `create_job` (severity medium unless it is an "
+                "emergency) and `find_vendors` with the trade (plumber for water); (2) `send_message` one sentence of "
+                "safety advice for that spot, e.g. for a toilet \"Please turn the shut-off valve behind the toilet "
+                "clockwise and put towels down.\"; (3) `send_message` \"I'm lining up a plumber and will confirm the "
+                "visit with you shortly.\"; then `escalate_to_owner` with the vendor options before any spending. "
+                "Only if they have not said where yet, ask where (one question).")
     if role == "lease_signing":
         return (f"- This contact is an APPROVED APPLICANT for room {ROOM_ID} on Appling Way: qualification and the "
                 "showing are done, the next step is signing the lease. When they ask for the lease or say they are "
