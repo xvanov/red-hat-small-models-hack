@@ -272,7 +272,7 @@ def path_assistant(p, timeout=240):
         states = ", ".join(f"{r['channel']}={r['label']}" for r in rows)
         check("every platform is Ready / Needs login (never Posted or sandbox)", rows and all(r["state"] in ("ready", "login") for r in rows), states)
         if ls and ls[0].get("photos"):
-            check("photo strip on the listing card", len(pg.query_selector_all(".listing-prev .strip img")) == len(ls[0]["photos"]),
+            check("photo strip on the listing card", len(pg.query_selector_all(".listing-prev .strip:not(.sm) img")) == len(ls[0]["photos"]),
                   f"{len(ls[0]['photos'])} photos")
     check("listing card with per-channel status", pg.is_visible(".listing-prev") and len(pg.query_selector_all(".listing-prev .rows > div")) >= 1)
     check("no page errors", not pg._errors, "; ".join(pg._errors[:2]))

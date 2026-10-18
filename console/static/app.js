@@ -14,7 +14,7 @@ function humanize(t) {
     .replace(/\b(?:messenger_personal|messenger|sms|email|craigslist|roomies|padsplit|marketplace):[0-9a-f]{6,}\b/gi, "")
     .replace(/\b[0-9a-f]{12,}\b/gi, "")
     .replace(/\s+([,.;:)])/g, "$1").replace(/,(\s*,)+/g, ",").replace(/\(\s*\)/g, "")
-    .replace(/\s{2,}/g, " ").trim().replace(/^./, (c) => c.toUpperCase());
+    .replace(/\s{2,}/g, " ").trim().replace(/^[,;:\s]+/, "").replace(/^[a-z]+(_[a-z]+)+$/, (w) => w.replace(/_/g, " ")).replace(/^./, (c) => c.toUpperCase());
 }
 function shortSummary(s) {
   // tool results often arrive as JSON: show a short plain line; the full text is one click away
