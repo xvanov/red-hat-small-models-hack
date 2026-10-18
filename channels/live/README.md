@@ -101,3 +101,23 @@ separate processes. Sends from the API go out immediately with the same gates.
 - `api.archive_thread(id|"all")`, `api.unarchive_thread(id)`, `api.dismiss_approval(id)`,
   `list_threads(include_archived=False)`; CLI `python -m channels.live archive <thread_id|all>`. A new message from
   an archived thread's contact starts a new thread `<id>:2` with fresh history in the same role.
+
+## Email look and threading
+
+Replies come from "Rentus Homes <info@rentus.homes>" (`LIVE_EMAIL_FROM_NAME`), subject "Re: <the conversation's
+subject>" (first outbound: "Your room at Appling Way – next steps"), with In-Reply-To + the full References chain,
+so Gmail keeps them in the renter's conversation (verified by X-GM-THRID). Body: "Hi <first name>,", the reply,
+link lines as their own paragraph, "Best,\nKalin\nRentus Homes" (`LIVE_EMAIL_SIGNOFF`), and the renter's last
+message quoted ("On <date>, <name> wrote:" + "> "), plain text + HTML. A hidden `X-Rentus-Ref` header identifies
+each send.
+
+## Public demo mode (off by default; `demo.py`)
+
+`LIVE_PUBLIC_DEMO=1` lets anyone try the assistant on the production 888 line / Page / demo email address, only if
+the FIRST message the daemon sees from them contains `LIVE_DEMO_CODE` (default `DEMO`, whole word, any case).
+Unlisted senders without the code are ignored exactly as before (a hash of the contact is kept so a later "DEMO"
+does not enroll a real renter or tenant; their text is never stored). Demo contacts: prospect role, `demo: true` on
+the thread, first reply starts with "You're chatting with Rentus Homes' AI assistant (demo). Reply STOP to end.",
+at most `LIVE_DEMO_MAX_PER_DAY` (20) replies a day, no approval items, STOP ends it; global cap
+`LIVE_MAX_PER_HOUR` defaults to 120 in demo mode. Email demo only counts mail addressed to `LIVE_DEMO_EMAIL_TO`
+(default the Reply-To plus-address), never info@rentus.homes.

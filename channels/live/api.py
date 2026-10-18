@@ -71,7 +71,7 @@ def _summary(t: dict) -> dict:
               # busy: an operator turn is running now ("Operator is typing..."); queued: a reply is waiting for one
               "busy": bool(t.get("busy")), "busy_since": t.get("busy_since") if t.get("busy") else None,
               "queued": bool(t.get("pending_turn")) and not t.get("busy"),
-              "role": t.get("role", "prospect"), "context": roles.context(t)})
+              "role": t.get("role", "prospect"), "context": roles.context(t), "demo": bool(t.get("demo"))})
     return s
 
 

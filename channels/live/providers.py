@@ -96,11 +96,16 @@ class TwilioSms:
         return {"status": body.get("status"), "error_code": body.get("error_code"),
                 "error": body.get("error_message")}
 
-    def poll(self, allow: config.Allowlist, since: datetime, seen: set) -> list[dict]:
+    def poll(self, allow: config.Allowlist, since: datetime, seen: set, include_unlisted: bool = False) -> list[dict]:
+        """include_unlisted (public demo mode): every inbound text to this line, so the daemon can look for the demo
+        code; unlisted senders without it are dropped by the daemon before anything is stored."""
         out = []
-        for phone in sorted(allow.phones):
-            code, body = self._req("GET", "Messages.json", params={
-                "To": self.line.number, "From": phone, "DateSent>": since.strftime("%Y-%m-%d"), "PageSize": 50})
+        senders = [None] if include_unlisted else sorted(allow.phones)
+        for phone in senders:
+            params = {"To": self.line.number, "DateSent>": since.strftime("%Y-%m-%d"), "PageSize": 100}
+            if phone:
+                params["From"] = phone
+            code, body = self._req("GET", "Messages.json", params=params)
             if code != 200:
                 continue
             for m in body.get("messages", []):
@@ -109,9 +114,10 @@ class TwilioSms:
                 ts = _dt(m.get("date_sent") or m.get("date_created"))
                 if ts and ts < since:
                     continue
-                if config.normalize_phone(m.get("from")) != phone:  # defensive: provider filter is the first check
+                frm = config.normalize_phone(m.get("from"))
+                if phone and frm != phone:  # defensive: provider filter is the first check
                     continue
-                out.append({"channel": "sms", "contact": phone, "text": m.get("body") or "", "ext_id": m["sid"],
+                out.append({"channel": "sms", "contact": frm, "text": m.get("body") or "", "ext_id": m["sid"],
                             "ts": ts.isoformat() if ts else None, "line": self.line.name,
                             "line_last4": self.line.last4, "renter_name": None, "meta": {}})
         return sorted(out, key=lambda x: x["ts"] or "")
@@ -200,7 +206,9 @@ class ResendGmailEmail:
         rcpts = {a.lower() for _, a in getaddresses(msg.get_all("To", []) + msg.get_all("Cc", []))}
         return bool(ours & rcpts) or bool(REF_RE.search(str(msg.get("Subject", ""))))
 
-    def poll(self, allow: config.Allowlist, since: datetime, seen: set) -> list[dict]:
+    def poll(self, allow: config.Allowlist, since: datetime, seen: set, include_unlisted: bool = False,
+             demo_to: str | None = None) -> list[dict]:
+        """include_unlisted (public demo mode): also mail from anyone addressed TO `demo_to` (never info@)."""
         out = []
         c = self.imap_factory()
         try:
@@ -218,6 +226,15 @@ class ResendGmailEmail:
                         item = None
                     if item:
                         out.append(item)
+            if include_unlisted and demo_to and demo_to != self.cfg.from_addr.lower():
+                typ, data = c.uid("SEARCH", None, "TO", f'"{demo_to}"', "SINCE", since.strftime("%d-%b-%Y"))
+                for uid in ((data[0] or b"").split() if typ == "OK" else [])[-40:]:
+                    try:
+                        item = self._one(c, uid, None, since, seen, demo_to=demo_to)
+                    except Exception:
+                        item = None
+                    if item and item["contact"] not in allow.emails and not any(o["ext_id"] == item["ext_id"] for o in out):
+                        out.append(item)
         finally:
             try:
                 c.logout()
@@ -225,7 +242,7 @@ class ResendGmailEmail:
                 pass
         return sorted(out, key=lambda x: x["ts"] or "")
 
-    def _one(self, c, uid, addr: str, since: datetime, seen: set) -> dict | None:
+    def _one(self, c, uid, addr: str | None, since: datetime, seen: set, demo_to: str | None = None) -> dict | None:
         typ, parts = c.uid("FETCH", uid, "(BODY.PEEK[])")
         raw = next((p[1] for p in parts or [] if isinstance(p, tuple) and len(p) > 1), None)
         if typ != "OK" or raw is None:
@@ -235,7 +252,12 @@ class ResendGmailEmail:
         if mid in seen:
             return None
         frm = [a.lower() for _, a in getaddresses(msg.get_all("From", []))]
-        if addr not in frm or not self._addressed_to_us(msg):
+        if addr is None:  # demo: any sender, but only mail addressed to the demo address, never our own mail
+            rcpts = {a.lower() for _, a in getaddresses(msg.get_all("To", []) + msg.get_all("Cc", []))}
+            if not frm or demo_to not in rcpts or frm[0] in (self.cfg.from_addr.lower(), self.cfg.imap_user.lower()):
+                return None
+            addr = frm[0]
+        elif addr not in frm or not self._addressed_to_us(msg):
             return None
         ts = _dt(str(msg.get("Date", "")))
         if ts and ts < since:
@@ -349,8 +371,10 @@ class Messenger:
             "platform": "messenger", "fields": "participants,updated_time", "limit": limit})
         return body.get("data", []) if code == 200 else []
 
-    def poll(self, allow: config.Allowlist, since: datetime, seen: set) -> list[dict]:
-        if not allow.psids:
+    def poll(self, allow: config.Allowlist, since: datetime, seen: set, include_unlisted: bool = False) -> list[dict]:
+        """include_unlisted (public demo mode): read recent conversations of anyone, so the daemon can look for the
+        demo code; otherwise conversations without an allowlisted participant are skipped before any text is read."""
+        if not allow.psids and not include_unlisted:
             return []
         page_id, _ = self.creds()
         out = []
@@ -360,6 +384,8 @@ class Messenger:
                 continue
             parts = (conv.get("participants") or {}).get("data", [])
             psid = next((p.get("id") for p in parts if p.get("id") in allow.psids), None)
+            if not psid and include_unlisted:
+                psid = next((p.get("id") for p in parts if p.get("id") != page_id), None)
             if not psid:
                 continue  # not allowlisted: no message text is fetched
             name = next((p.get("name") for p in parts if p.get("id") == psid), None)

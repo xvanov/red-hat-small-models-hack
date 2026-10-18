@@ -55,8 +55,12 @@ def email_subject(t: dict) -> str:
 def _gate(store: Store, t: dict, allow: config.Allowlist, *, skip_allowlist: bool = False) -> str | None:
     """Why this send may not go out now, or None. skip_allowlist (owner-approved / owner-typed sends) lifts ONLY
     the allowlist check; opt-out, the kill switch and the rate cap always apply."""
-    if not skip_allowlist and not allow.allows(t["channel"], t["contact"]):
+    from . import demo
+    is_demo = bool(t.get("demo")) and demo.is_enrolled(store, t["channel"], t["contact"])
+    if not skip_allowlist and not allow.allows(t["channel"], t["contact"]) and not is_demo:
         return "contact is not on the live allowlist: the owner must approve this draft"
+    if t.get("demo") and store.sends_last_day(t["thread_id"]) >= demo.max_per_day():
+        return DEMO_CAP
     if t.get("opted_out"):
         return OPTED_OUT
     if not config.send_enabled():
@@ -67,6 +71,7 @@ def _gate(store: Store, t: dict, allow: config.Allowlist, *, skip_allowlist: boo
 
 
 OPTED_OUT = "this contact opted out (STOP): nothing can be sent"
+DEMO_CAP = "demo daily reply limit reached for this contact"
 
 
 def _provider_send(t: dict, text: str) -> dict:
@@ -122,7 +127,7 @@ def deliver(store: Store, thread_id: str, text: str, *, origin: str, approved: b
             msg["text"] = text
         reason = _gate(store, t, allow, skip_allowlist=approved)
         if reason:
-            if reason == OPTED_OUT:
+            if reason in (OPTED_OUT, DEMO_CAP) or (t.get("demo") and not approved):  # demo: no approval spam
                 msg["status"] = "failed"
                 msg["error"] = reason
                 store.save_thread(t)

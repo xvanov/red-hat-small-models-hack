@@ -19,7 +19,7 @@ import traceback
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from . import compose, config, outbound, providers, registry, roles
+from . import compose, config, demo, outbound, providers, registry, roles
 from .store import CHANNEL_WORLD, Store, now_iso
 
 REPO = config.REPO
@@ -119,10 +119,17 @@ def poll_all(store: Store, provs: dict | None = None, allow: config.Allowlist | 
     sources += [(name, spec.provider) for name, spec in registry.EXTRA.items()]
     touched: list[str] = []
     errors = st.setdefault("errors", {})
+    demo_on = demo.enabled()
     for key, prov in sources:
         seen = set(seen_all.get(key, []))
         try:
-            items = prov.poll(allow, since, seen)
+            if demo_on and key.split(":")[0] in ("sms", "email", "messenger"):
+                kw = {"include_unlisted": True}
+                if key == "email":
+                    kw["demo_to"] = demo.email_to()
+                items = prov.poll(allow, since, seen, **kw)
+            else:
+                items = prov.poll(allow, since, seen)
             errors.pop(key, None)
         except Exception as e:
             errors[key] = f"{type(e).__name__}: {str(e)[:150]}"
@@ -131,12 +138,18 @@ def poll_all(store: Store, provs: dict | None = None, allow: config.Allowlist | 
             seen.add(it["ext_id"])
             listed = allow.allows(it["channel"], it["contact"])
             spec = registry.EXTRA.get(it["channel"])
-            if not listed and not (spec and spec.drafts_for_unlisted()):
+            is_demo = False
+            if not listed and demo_on and it["channel"] in ("sms", "email", "messenger"):
+                with store.locked():
+                    is_demo = demo.admit(store, it["channel"], it["contact"], it["text"])
+            if not listed and not is_demo and not (spec and spec.drafts_for_unlisted()):
                 continue  # never stored, never passed to a model
             with store.locked():
                 t = store.ensure_thread(it["channel"], it["contact"], line=it.get("line"),
                                         line_last4=it.get("line_last4"), renter_name=it.get("renter_name"))
                 t["allowlisted"] = listed  # unlisted (drafts-only channel): every reply waits for the owner
+                if is_demo and not t.get("demo"):
+                    t.update(demo=True, role="prospect", stage="inquiry")
                 if any(m.get("ext_id") == it["ext_id"] for m in t["messages"]):
                     continue
                 store.add_message(t, "in", it["text"], "received", ext_id=it["ext_id"], ts=it.get("ts"))
@@ -149,11 +162,12 @@ def poll_all(store: Store, provs: dict | None = None, allow: config.Allowlist | 
                             s = s.split(":", 1)[1].strip()
                         em["subject"] = s
                     em["references"] = (meta.get("references") or []) + [meta.get("message_id")]
-                if it["channel"] == "sms" and providers.is_opt_out(it["text"]):
+                if providers.is_opt_out(it["text"]) and (it["channel"] == "sms" or t.get("demo")):
                     t["opted_out"] = True
+                    t["pending_turn"] = False
                     t["trace"].append({"ts": now_iso(), "actor": "tool", "name": "opt_out",
-                                       "summary": "contact texted STOP: no more messages on this thread", "ok": True})
-                else:
+                                       "summary": "contact sent STOP: no more messages on this thread", "ok": True})
+                elif not t.get("opted_out"):  # after STOP: stored, but no more turns
                     t["pending_turn"] = True
                     t["turn_attempts"] = 0
                 store.save_thread(t)
@@ -312,8 +326,17 @@ def flush(store: Store, thread_id: str, channel: str, renter_text: str) -> dict 
     if not texts:
         return None
     parts = compose.compose(texts, channel, renter_text)
+    with store.locked():
+        tt = store.get_thread(thread_id) or {}
+    if tt.get("demo") and not tt.get("disclosed") and parts:
+        parts[0] = demo.DISCLOSURE + ("\n\n" if channel == "email" else " ") + parts[0]
     results = [outbound.deliver(store, thread_id, p, origin="operator") for p in parts]
     ok = all(r.get("status") in ("sent", "awaiting_approval") for r in results)
+    if tt.get("demo") and any(r.get("status") == "sent" for r in results):
+        with store.locked():
+            t = store.get_thread(thread_id)
+            t["disclosed"] = t.get("disclosed") or now_iso()
+            store.save_thread(t)
     if link and any(r.get("status") == "sent" for r in results):
         with store.locked():
             t = store.get_thread(thread_id)
@@ -360,7 +383,7 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
             return {"skipped": True}
         if t.get("busy") and t.get("turn_owner") != os.getpid() and _pid_alive(t.get("turn_owner")):
             return {"skipped": True, "busy": True}
-        want = roles.role_for(t["channel"])
+        want = "prospect" if t.get("demo") else roles.role_for(t["channel"])
         if t.get("role", "prospect") != want:  # role changed in .env: start this contact's World fresh in the new role
             t.update(role=want, world=None, history=None, stage=roles.initial_stage(want), lease_sent=None,
                      world_synced=[m["id"] for m in t["messages"] if m["direction"] == "in"
@@ -509,7 +532,7 @@ def main(once: bool = False) -> int:
             if t.get("busy") and not _pid_alive(t.get("turn_owner")):
                 t["busy"], t["busy_since"], t["turn_owner"] = False, None, None
                 changed = True
-            want = roles.role_for(t["channel"])
+            want = "prospect" if t.get("demo") else roles.role_for(t["channel"])
             if t.get("role", "prospect") != want:  # role changed in .env: fresh World in the new role; old messages
                 t.update(role=want, world=None, history=None, stage=roles.initial_stage(want), lease_sent=None,
                          world_synced=[m["id"] for m in t["messages"] if m["direction"] == "in"])

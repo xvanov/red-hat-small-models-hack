@@ -177,6 +177,21 @@ class Store:
                 n += 1
         return n
 
+    def sends_last_day(self, thread_id: str, now: float | None = None) -> int:
+        now = now or time.time()
+        p = self.root / "sends.jsonl"
+        if not p.exists():
+            return 0
+        n = 0
+        for line in p.read_text().splitlines():
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if r.get("attempted") and r.get("thread_id") == thread_id and now - float(r.get("at", 0)) < 86400:
+                n += 1
+        return n
+
     # ---------------------------------------------------------------- poll state
     def state(self) -> dict:
         st = self._read(self.root / "state.json", {})

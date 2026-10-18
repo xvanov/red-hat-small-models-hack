@@ -13,7 +13,7 @@ for p in (REPO, REPO / "tools", REPO / "operator"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from channels.live import api, config, daemon, outbound  # noqa: E402
+from channels.live import api, config, daemon, demo, outbound  # noqa: E402
 from channels.live.store import Store  # noqa: E402
 
 OWNER_PHONE = "+12135550100"
@@ -39,8 +39,9 @@ class FakeSms:
     def connected(self):
         return True, "fake"
 
-    def poll(self, allow, since, seen):  # like Twilio: provider filters From=allowlisted
-        return [m for m in self.inbox if m["ext_id"] not in seen and config.normalize_phone(m["contact"]) in allow.phones]
+    def poll(self, allow, since, seen, include_unlisted=False):  # like Twilio: From=allowlisted unless demo mode
+        return [m for m in self.inbox if m["ext_id"] not in seen
+                and (include_unlisted or config.normalize_phone(m["contact"]) in allow.phones)]
 
     def push(self, frm, text, sid):
         self.inbox.append({"channel": "sms", "contact": frm, "text": text, "ext_id": sid,
@@ -621,3 +622,72 @@ def test_local_910_line_is_opt_in(monkeypatch):
     from channels.live import config as cfg
     monkeypatch.setattr(cfg, "_repo_env", lambda: {})
     assert all(l.name == "tollfree" for l in cfg.sms_lines())
+
+
+
+# ---------------------------------------------------------------- public demo mode
+
+@pytest.fixture
+def demo_env(env, monkeypatch):
+    import rentus_tools as rt
+    monkeypatch.setenv("LIVE_PUBLIC_DEMO", "1")
+    monkeypatch.setenv("LIVE_DEMO_CODE", "DEMO")
+    daemon.register_adapters(env["store"])
+
+    def runner(w, inbound, h):
+        rt.call(w, "send_message", {"thread_id": inbound["thread_id"], "text": "Rent is $750 a month. When do you want to move in?"})
+        return _Res([])
+
+    env["runner"] = runner
+    return env
+
+
+def _tick(env):
+    daemon.poll_all(env["store"])
+    for t in env["store"].all_threads():
+        if t.get("pending_turn"):
+            daemon.run_turn(env["store"], t["thread_id"], runner=env["runner"])
+
+
+def test_demo_off_by_default_ignores_code(env):
+    env["tf"].push(STRANGER, "DEMO hi", "SM-d0")
+    daemon.poll_all(env["store"])
+    assert api.list_threads() == []
+
+
+def test_demo_stranger_without_code_is_ignored_for_good(demo_env):
+    demo_env["tf"].push(STRANGER, "Hi, is my rent due Friday?", "SM-d1")
+    _tick(demo_env)
+    demo_env["tf"].push(STRANGER, "demo", "SM-d2")  # code only counts in the FIRST message
+    _tick(demo_env)
+    assert api.list_threads() == [] and demo_env["tf"].sent == []
+    assert "rent due Friday" not in _all_text(demo_env["dir"])
+
+
+def test_demo_code_enrolls_and_discloses_once(demo_env):
+    demo_env["tf"].push(STRANGER, "Demo: how much is the room?", "SM-d3")
+    _tick(demo_env)
+    s = api.list_threads()[0]
+    assert s["demo"] is True and s["role"] == "prospect"
+    assert demo_env["tf"].sent[0][1].startswith("You're chatting with Rentus Homes' AI assistant (demo). Reply STOP to end.")
+    demo_env["tf"].push(STRANGER, "next month", "SM-d4")
+    _tick(demo_env)
+    assert len(demo_env["tf"].sent) == 2 and "AI assistant" not in demo_env["tf"].sent[1][1]
+    assert not demo.has_code("DEMOS please") and demo.has_code("this is a demo.")
+
+
+def test_demo_per_contact_daily_cap(demo_env, monkeypatch):
+    monkeypatch.setenv("LIVE_DEMO_MAX_PER_DAY", "2")
+    for i, txt in enumerate(["DEMO hi", "a", "b", "c"]):
+        demo_env["tf"].push(STRANGER, txt, f"SM-c{i}")
+        _tick(demo_env)
+    assert len(demo_env["tf"].sent) == 2 and api.list_approvals() == []
+
+
+def test_demo_stop_ends_it(demo_env):
+    demo_env["tf"].push(STRANGER, "DEMO hi", "SM-s1")
+    _tick(demo_env)
+    demo_env["tf"].push(STRANGER, "STOP", "SM-s2")
+    demo_env["tf"].push(STRANGER, "hello again", "SM-s3")
+    _tick(demo_env)
+    assert len(demo_env["tf"].sent) == 1 and api.list_threads()[0]["opted_out"]
