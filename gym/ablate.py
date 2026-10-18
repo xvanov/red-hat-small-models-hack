@@ -48,6 +48,7 @@ VARIANTS = {
     "noverif": {"verifier": False},                                    # verifier off
     "noreader": {"reader": False},                                     # (f) reader out of the loop
     "readermodel": {"_reader_backend": "model"},                       # (f) fine-tuned reader instead of fallback
+    "router": {"router": True},                                        # triage router: reader reads every inbound first
 }
 
 

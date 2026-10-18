@@ -160,6 +160,33 @@ class SeededClient:
         return getattr(self._inner, k)
 
 
+def _timed(s: RolloutSession, name, fn):
+    """Record wall-clock start/end of every tool call on s.timing (reply-latency metric only)."""
+    t0 = time.time()
+    env = fn()
+    s.__dict__.setdefault("timing", []).append({"tool": name, "t0": t0, "t1": time.time(), "i": len(s.trace) - 1})
+    return env
+
+
+def reply_latencies(s: RolloutSession, t_start: float) -> list[float]:
+    """Seconds from each renter message arriving (the rollout start for the opening, the end of the
+    send_message that drew a reply otherwise) to the next delivered send_message on that thread."""
+    timing = {x["i"]: x for x in getattr(s, "timing", [])}
+    arrivals, out = {}, []
+    for tid in s.counterparts:
+        arrivals[tid] = t_start
+    for e in s.trace:
+        if e.get("tool") != "send_message" or not e.get("ok"):
+            continue
+        tid, tm = (e.get("args") or {}).get("thread_id"), timing.get(e["i"])
+        if tm is None or tid not in arrivals:
+            continue
+        if arrivals[tid] is not None:
+            out.append(round(tm["t1"] - arrivals[tid], 2))
+        arrivals[tid] = tm["t1"] if e.get("reply") else None
+    return out
+
+
 def operator_backend(s: RolloutSession):
     """A module-like backend for rentus_operator.run that routes every call through the session."""
     be = s.backend
@@ -169,8 +196,8 @@ def operator_backend(s: RolloutSession):
         tool_schemas=be.tool_schemas,
         EventSink=getattr(be.mod, "EventSink", None),
         load=lambda patch=None: be.new_world(patch),
-        call=lambda world, name, args, sink=None, actor="operator", call_id=None:
-            s.call(name, args, **({} if be.name == "shim" else {"sink": sink, "actor": actor, "call_id": call_id})),
+        call=lambda world, name, args, sink=None, actor="operator", call_id=None: _timed(s, name, lambda:
+            s.call(name, args, **({} if be.name == "shim" else {"sink": sink, "actor": actor, "call_id": call_id}))),
     )
 
 
@@ -184,10 +211,16 @@ def run_local_task(task: dict, cfg, run_dir: Path) -> dict:
     if OPERATOR_SEED is not None and cfg.api == "openai":
         client = SeededClient(client, OPERATOR_SEED)
     run_id = f"{task['id']}-{uuid.uuid4().hex[:6]}"
-    status, final_text, steps, err, messages = "error", "", 0, None, []
+    status, final_text, steps, err, messages, decisions = "error", "", 0, None, [], None
+    tcfg = cfg.with_(max_steps=min(cfg.max_steps, task.get("max_turns", 30)))
     try:
-        res = run(s.world, goal, client=client, config=cfg.with_(max_steps=min(cfg.max_steps, task.get("max_turns", 30))),
-                  backend=operator_backend(s), run_id=run_id)
+        if getattr(cfg, "router", False) and isinstance(goal, dict) and goal.get("thread_id"):
+            # router on: event-driven; each renter message is routed, Lightning's turn ends on its send_message
+            from rentus_operator.router import run_conversation
+            res = run_conversation(s.world, goal, client=client, config=tcfg, backend=operator_backend(s), run_id=run_id)
+            decisions = res.decisions
+        else:
+            res = run(s.world, goal, client=client, config=tcfg, backend=operator_backend(s), run_id=run_id)
         status, final_text, steps, messages = res.status, res.final_text, res.steps, res.messages
     except Exception as e:  # noqa: BLE001 - a crashed rollout scores what it did
         err = f"{type(e).__name__}: {e}"
@@ -196,10 +229,14 @@ def run_local_task(task: dict, cfg, run_dir: Path) -> dict:
     (run_dir / "transcripts").mkdir(exist_ok=True)
     (run_dir / "transcripts" / f"{task['id']}.json").write_text(json.dumps(
         {"task_id": task["id"], "status": status, "messages": messages, "trace": s.trace, "renter_view": s.transcript,
-         **({"simulator": s.simulator_log()} if s.simulator_log() else {})},
+         **({"simulator": s.simulator_log()} if s.simulator_log() else {}),
+         **({"router_decisions": decisions} if decisions is not None else {})},
         default=str, ensure_ascii=False, indent=1))
     out = {**r, "subcategory": task.get("subcategory"), "status": status, "steps": steps, "error": err,
-           "final_text": final_text[:2000], "seconds": round(time.time() - t0, 2)}
+           "final_text": final_text[:2000], "seconds": round(time.time() - t0, 2),
+           "reply_latency_s": reply_latencies(s, t0)}
+    if decisions is not None:
+        out["router_decisions"] = [d["decision"] for d in decisions]
     if getattr(client, "calls", None) is not None:   # reference backend: per-task model cost and latency
         out["model_calls"] = len(client.calls)
         out["cost_usd"] = round(sum(c.get("cost_usd") or 0 for c in client.calls), 5)

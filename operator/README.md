@@ -38,6 +38,7 @@ res.final_text, res.ledger, res.escalations, res.self_check, res.messages, res.e
 | `verifier` | on / off | off = raw calls: no repair, no result checks, no retries, no loop guard, no self-check |
 | `reader` | on / off | on = `read_reply` tool + `prompts/reader_on.md`; off = tool removed, `reader_off.md` |
 | `reasoning` | None / True / False | sent as `chat_template_kwargs.enable_thinking` |
+| `router` | off / on | on = triage router (`router.py`): the 0.6B reader reads every inbound renter message first; easy events skip Lightning or shrink its turn; Lightning still writes every renter reply. Adds `prompts/router_on.md`. See below |
 
 ## Files
 
@@ -45,6 +46,7 @@ res.final_text, res.ledger, res.escalations, res.self_check, res.messages, res.e
 |---|---|
 | `prompts/system_v1.md` | system prompt: first person as the owner, 2 sentences max, one question at a time, no long dashes, renter's language, strict 5-item gate with exact answers, never commit without the owner, listing and ops procedures |
 | `rentus_operator/loop.py` | the loop: calls the model, strips reasoning (separate field or inline `<think>`), recovers tool calls left in text (JSON or qwen3_coder XML), runs parallel calls in order, self-check before ending |
+| `rentus_operator/router.py` | triage router + `run_conversation()`, the event-driven driver used when `router` is on |
 | `rentus_operator/verifier.py` | pre-call checks + one JSON repair pass, result shape checks (contract §3 to §5), retry policy, loop guard, self-check |
 | `rentus_operator/toolbox.py` | adapter: real `rentus_tools` when importable, else `shim.py` |
 | `rentus_operator/stub_model.py` | scripted fake OpenAI client for offline tests |
@@ -63,6 +65,20 @@ res.final_text, res.ledger, res.escalations, res.self_check, res.messages, res.e
 | the same failing call 3 times | verifier itself calls `escalate_to_owner` and tells the model to stop |
 | step limit reached | forced escalation |
 | final answer | every successful call must show in the world, and claims in the summary ("published on X", "booked", "proposed a showing", "escalated", "I sent") must match new state; on a mismatch the model gets one chance to fix it, otherwise the run ends `done_unverified` |
+
+## Triage router (`RunConfig(router=True)`, default off)
+
+Every inbound renter message is routed before Lightning sees it. The reader (`read_reply`, the 0.6B model at `READER_BASE_URL`) reads it, cheap deterministic signals run next to it, and one decision is logged as a `verifier` event with actor `router` (`data.stage = "router"`):
+
+| decision | when | what happens |
+|---|---|---|
+| `NO_OP` | platform system text ("X reacted to your message"), a duplicate, or an emoji-only / thank-you ack while our last message asked nothing | nothing; Lightning is not called |
+| `RECORD_ONLY` | pure data: every field the reader found is high-confidence (the model reader and the rule reader agree, the value validates) and there is no intent | code writes it with `upsert_renter` (actor `router`); Lightning is called only if a reply is owed (it is, unless the renter's file is closed and they asked nothing) |
+| `BATCH` | 2+ renter messages before we answered | each is read, the parses are merged, one Lightning turn |
+| `ESCALATE_DIRECT` | hard no (both readers agree) or abuse | code escalates to the owner with the reader's summary; a hard no is marked `lost` and Lightning writes the one courteous close; abuse gets no reply |
+| `LIGHTNING` | everything else | one Lightning turn |
+
+When Lightning is called, its turn opens with a `[router]` note (the reader's parse, what code already recorded, the gate items still missing) and ends, without another model call, the moment its `send_message` to the thread succeeds. The renter's answer is the next routed event. The router never sends a renter anything. If the model reader is down (`read_reply` fell back to rules), nothing counts as high-confidence and every message goes to Lightning. `router_quiet_s` is the live-inbox quiet window that turns a burst into one BATCH (the Gym's renters answer instantly, so it is 0 there).
 
 ## Known limitations
 

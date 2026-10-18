@@ -91,7 +91,7 @@ Append-only JSONL, one line per event, written to `runs/<run_id>/events.jsonl` a
 
 ```json
 {"ts": "2026-10-17T14:03:11Z", "run_id": "r_abc", "seq": 12, "type": "tool_call|tool_result|model_message|verifier|retry|fallback|escalation|owner_message|renter_message|score",
- "actor": "operator|reader|verifier|renter:<id>|vendor:<id>|owner|system", "data": { ... }}
+ "actor": "operator|reader|verifier|router|renter:<id>|vendor:<id>|owner|system", "data": { ... }}
 ```
 
 ## 7. Scenarios (Gym tasks)

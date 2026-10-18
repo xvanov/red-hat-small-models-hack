@@ -22,6 +22,11 @@ class RunConfig:
                                           # instead of the raw policy dict
     style_precheck: bool = False          # P2.1 (d): verifier checks send_message style rules BEFORE the call and
                                           # returns a rewrite request instead of sending (needs verifier on)
+    router: bool = False                  # triage router (rentus_operator.router): the reader reads every inbound
+                                          # renter message first; NO_OP / RECORD_ONLY / BATCH / ESCALATE_DIRECT skip or
+                                          # shrink Lightning's turn; renter replies are still written only by Lightning
+    router_quiet_s: float = 0.0           # live inbox: wait this long after a renter's last message before routing,
+                                          # so a burst is one BATCH (the Gym's renters answer instantly: 0)
 
     # model / endpoint
     model: str = field(default_factory=lambda: os.environ.get("OPERATOR_MODEL", "nemotron"))
@@ -56,6 +61,8 @@ class RunConfig:
             out += " format_facts=on"
         if self.keep_reasoning_in_history:
             out += " reasoning_history=on"
+        if self.router:
+            out += " router=on"
         if self.api != "openai":
             out += f" api={self.api} model={self.model}" + (f" effort={self.effort}" if self.effort else "")
         if self.reasoning is not None:
@@ -66,6 +73,8 @@ class RunConfig:
 def load_prompt(cfg: RunConfig, world_facts: dict) -> str:
     template = (PROMPTS_DIR / f"system_{cfg.prompt_version}.md").read_text()
     reader = (PROMPTS_DIR / ("reader_on.md" if cfg.reader else "reader_off.md")).read_text().strip()
+    if cfg.router:
+        reader += "\n" + (PROMPTS_DIR / "router_on.md").read_text().strip()
     if cfg.format_facts and isinstance(world_facts.get("showing_hours"), dict):
         sh = world_facts["showing_hours"]
         world_facts = {**world_facts, "showing_hours": f"{sh.get('start')} to {sh.get('end')}"}

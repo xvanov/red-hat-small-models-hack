@@ -113,6 +113,8 @@ def _opening(goal) -> tuple[str, str | None]:
     if isinstance(goal, str):
         return f"Owner: {goal}", "owner"
     g = dict(goal)
+    if g.get("router_note"):   # router on: the router's note (reader parse, what it recorded) opens the turn
+        return g["router_note"], None
     if g.get("owner_instruction"):
         return f"Owner: {g['owner_instruction']}", "owner"
     if g.get("thread_id"):
@@ -297,21 +299,48 @@ class _Runner:
                                            "work or finish with a summary."}}
 
 
+class _MeteredCompletions:
+    def __init__(self, inner, calls):
+        self._inner, self._calls = inner, calls
+
+    def create(self, **kw):
+        t0 = time.time()
+        resp = self._inner.create(**kw)
+        u = _as_dict(getattr(resp, "usage", None) if not isinstance(resp, dict) else resp.get("usage"))
+        self._calls.append({"latency_s": round(time.time() - t0, 3), "cost_usd": None,
+                            "usage": {"input_tokens": u.get("prompt_tokens") or 0,
+                                      "output_tokens": u.get("completion_tokens") or 0}})
+        return resp
+
+
+class MeteredClient:
+    """Wraps an OpenAI-style client and records one entry per model call (usage, latency) in .calls,
+    the same shape the reference Anthropic adapter keeps, so the Gym can count model calls and tokens."""
+
+    def __init__(self, inner):
+        self.inner, self.calls = inner, []
+        self.chat = type("Chat", (), {})()
+        self.chat.completions = _MeteredCompletions(inner.chat.completions, self.calls)
+
+
 def make_client(cfg: RunConfig, timeout: float | None = None, max_retries: int | None = None):
     """The model client for cfg.api. "openai" (default) is the running system; "anthropic" is the
-    reference-only frontier backend (rentus_operator.anthropic_client)."""
+    reference-only frontier backend (rentus_operator.anthropic_client). Both keep per-call usage in .calls."""
     if cfg.api == "anthropic":
         from .anthropic_client import AnthropicChatAdapter
         return AnthropicChatAdapter(model=cfg.model, effort=cfg.effort or "high",
                                     max_tokens=max(cfg.max_tokens, 16000))
     from openai import OpenAI
     kw = {k: v for k, v in (("timeout", timeout), ("max_retries", max_retries)) if v is not None}
-    return OpenAI(base_url=cfg.base_url, api_key=cfg.api_key, **kw)
+    return MeteredClient(OpenAI(base_url=cfg.base_url, api_key=cfg.api_key, **kw))
 
 
 def run(world, goal_or_inbound, client=None, model: str | None = None, max_steps: int | None = None, *,
         config: RunConfig | None = None, sink=None, backend=None, history: list[dict] | None = None,
-        run_id: str | None = None, sleep=time.sleep) -> RunResult:
+        run_id: str | None = None, sleep=time.sleep, end_on_send: str | None = None) -> RunResult:
+    """end_on_send (router mode): the turn ends, without another model call, as soon as a send_message to
+    that thread succeeds; the renter's replies are kept out of the tool result (they arrive as the next
+    routed inbound message)."""
     cfg = config or RunConfig()
     if model:
         cfg = cfg.with_(model=model)
@@ -378,10 +407,21 @@ def run(world, goal_or_inbound, client=None, model: str | None = None, max_steps
         messages.append(am)
 
         if calls:
+            sent = False
             for tc in calls:
+                n_ledger = len(R.ledger)
                 out = R.execute(tc)
+                if end_on_send and tc["function"]["name"] == "send_message" and len(R.ledger) > n_ledger \
+                        and (R.ledger[-1].get("args") or {}).get("thread_id") == end_on_send:
+                    sent = True
+                    if isinstance(out.get("data"), dict) and "replies" in out["data"]:
+                        out = {**out, "data": {k: v for k, v in out["data"].items() if k != "replies"}}
                 messages.append({"role": "tool", "tool_call_id": tc["id"],
                                  "content": json.dumps(out, default=str, ensure_ascii=False)})
+            if sent:
+                status, final_text = "done", m["content"]
+                R.emit("verifier", "harness", {"stage": "end-on-send", "ok": True, "thread_id": end_on_send})
+                break
             continue
 
         final_text = m["content"]
