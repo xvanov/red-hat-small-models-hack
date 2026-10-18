@@ -40,6 +40,7 @@ channels/.venv/bin/python -m pytest -q channels/tests               # 52 tests, 
 | `inbound/` | Email + SMS: `email_parse.py` (lead email -> `Lead`), `imap_reader.py` (read-only IMAP), `store.py` (threads + drafts outboxes in `channels/.inbox/`, gitignored), `email_channel.py`, `sms.py` (outbox, disabled `TwilioSender`), CLI `python -m channels.inbound`. |
 | `tests/fixtures/email/` | Hand-written fake notification emails (Roomies, Furnished Finder, Zillow, craigslist relay, a direct Spanish email, two non-leads). |
 | `../tools/rentus_tools/live/channels_adapter.py` | `LiveAdapter` for W3's tools: `register_all("mock"|"live")` routes `publish_listing`/`send_message` here when `world.mode == "live"`. Live `send_message` only returns a draft. |
+| `../tools/rentus_tools/live/calendar_adapter.py` | Google Calendar behind `find_showing_slots`/`propose_showing` in live mode (D29): 08:00-20:00 daily, real NY clock, Google free/busy blocks every room (no overlaps), one `PROPOSED: Showing with <first name>` event only on `CHANNELS_SHOWINGS_CALENDAR_ID`, no attendees, `sendUpdates=none`. Dry run: `PYTHONPATH=tools channels/.venv/bin/python -m rentus_tools.live.calendar_adapter slots`. |
 | `../tools/rentus_tools/live/inbound_adapter.py` | Email/SMS `LiveAdapter`s: `send_message` -> `draft_saved`; in live mode `list_threads`/`read_thread` first sync the inbound store into `world.threads`. `live.register_live("live")` registers all six channels in one call. |
 
 ## Live channels (lane 3)
@@ -163,6 +164,9 @@ To restore the shipped files: `git checkout channels/adapters/selectors/mock`.
 | `CHANNELS_INBOX_DIR` | inbound store (threads + drafts), default `channels/.inbox/` |
 | `CHANNELS_IMAP_CONFIRMED`, `CHANNELS_IMAP_USER`, `CHANNELS_IMAP_PASSWORD`, `CHANNELS_IMAP_HOST`, `CHANNELS_IMAP_PORT`, `CHANNELS_IMAP_FOLDER` | IMAP inbox (read-only); nothing connects until `CONFIRMED=1` |
 | `CHANNELS_IMAP_ENV_FILE`, `CHANNELS_IMAP_USER_VAR`, `CHANNELS_IMAP_PASSWORD_VAR` | read the login from another env file by variable name (e.g. `GMAIL_USER`) |
+| `CHANNELS_SHOWINGS_CALENDAR_ID` | the ONLY calendar showing events are created on (unset = nothing is written); also read for free/busy |
+| `CHANNELS_SHOWINGS_BUSY_CALENDAR_IDS`, `CHANNELS_SHOWINGS_HOURS`, `CHANNELS_SHOWINGS_SLOT_MINUTES`, `CHANNELS_SHOWINGS_TZ` | extra read-only busy calendars; hours (default `08:00-20:00`), slot length (30), zone (`America/New_York`) |
+| `CHANNELS_GOOGLE_ENV_FILE`, `CHANNELS_GOOGLE_CREDENTIALS_VAR` | where the service account lives (default `~/rental-management/.env.production`: `GOOGLE_SERVICE_ACCOUNT_EMAIL` + `GOOGLE_PRIVATE_KEY`) |
 
 ## Known limitations
 

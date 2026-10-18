@@ -95,5 +95,8 @@ def test_register_live_wires_everything(tmp_path, monkeypatch):
         with pytest.raises(rt.ToolError) as e:
             out["email"].publish_listing(None, {}, "email")
         assert e.value.code == "POLICY_BLOCKED"
+        assert out["calendar"] == "google" and getattr(rt.core.REGISTRY["propose_showing"], "_calendar_live", False)
     finally:
         inbound_adapter.uninstall_sync()
+        from rentus_tools.live import calendar_adapter
+        calendar_adapter.uninstall_calendar()

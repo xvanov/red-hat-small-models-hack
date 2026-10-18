@@ -90,6 +90,21 @@ channels/.venv/bin/python -m channels.inbound threads          # thread ids, pla
 channels/.venv/bin/python -m channels.inbound drafts           # every reply the operator drafted, with its reason
 ```
 
+## Showings calendar (Google)
+
+Showings go on a Google calendar you choose, 8 AM-8 PM, no overlaps. The operator only ever creates events
+titled `PROPOSED: Showing with <first name>`, never invites anyone, and writes nothing until you name the calendar:
+
+1. In Google Calendar, open the calendar's **Settings and sharing > Share with specific people**, add the
+   rental-management service account (`GOOGLE_SERVICE_ACCOUNT_EMAIL` in `~/rental-management/.env.production`)
+   with **Make changes to events**.
+2. Put the calendar's id (Settings > Integrate calendar > Calendar ID) in the repo `.env` as
+   `CHANNELS_SHOWINGS_CALENDAR_ID=...`.
+
+```bash
+PYTHONPATH=tools channels/.venv/bin/python -m rentus_tools.live.calendar_adapter slots   # tomorrow's free slots, read-only
+```
+
 ## SMS (drafts only)
 
 There is no SMS reader and no sender. Record a text you received, and read the drafted replies:

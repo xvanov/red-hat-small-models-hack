@@ -53,11 +53,14 @@ def adapter_for(channel: str) -> LiveAdapter:
 
 def register_live(target: str = "live", base_url: str | None = None, photo_dir: str | None = None, store=None) -> dict:
     """Lane 3 one-call setup: browser listing adapters (marketplace, roomies, craigslist, padsplit) on
-    `target` plus the email and SMS draft channels with live-mode thread sync. Nothing it registers
-    submits a listing or sends a message."""
+    `target` plus the email and SMS draft channels with live-mode thread sync, and the Google Calendar
+    showing adapter (writes only to CHANNELS_SHOWINGS_CALENDAR_ID, never invites anyone). Nothing it
+    registers submits a listing or sends a message."""
     from .channels_adapter import register_all
+    from .calendar_adapter import register_calendar
     from .inbound_adapter import register_inbound
 
     browser = register_all(target, base_url=base_url, photo_dir=photo_dir)
     inbound = register_inbound(store)
-    return {"browser": browser, **inbound}
+    register_calendar()
+    return {"browser": browser, **inbound, "calendar": "google"}
