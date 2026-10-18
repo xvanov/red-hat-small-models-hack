@@ -397,6 +397,8 @@ def content_free_skip(store: Store, thread_id: str, new_in: list[dict]) -> dict 
         t = store.get_thread(thread_id)
         last_out = next((m for m in reversed(t["messages"]) if m["direction"] == "out" and m.get("status") == "sent"),
                         None)
+        if last_out is None:  # never a canned first reply: the model answers (with the disclosure)
+            return None
         t["world_synced"] = sorted(set(t.get("world_synced") or []) | {m["id"] for m in new_in})
         t["pending_turn"] = False
         t["busy"], t["busy_since"], t["turn_owner"] = False, None, None
@@ -447,8 +449,9 @@ def flush(store: Store, thread_id: str, channel: str, renter_text: str, gate: di
         tt = store.get_thread(thread_id) or {}
     filled = {k if k != "people" else "occupants" for k, v in (gate or tt.get("gate") or {}).items() if v == "exact"}
     first = not any(m["direction"] == "out" and m.get("status") == "sent" for m in tt.get("messages", []))
-    parts = compose.compose(texts, channel, renter_text, filled=filled if tt.get("role", "prospect") == "prospect"
-                            else None, first=first)
+    prospect = tt.get("role", "prospect") == "prospect"
+    parts = compose.compose(texts, channel, renter_text, filled=filled if prospect else None, first=first,
+                            prospect=prospect)
     if tt.get("demo") and not tt.get("disclosed") and parts:
         d = demo.disclosure("es" if demo.is_spanish(renter_text) else "en")
         if channel == "email":  # the email already opens with "Hi <name>,"

@@ -520,7 +520,8 @@ def test_live_note_is_added_to_the_system_prompt(env):
 def test_compose_drops_a_restated_fact_but_keeps_different_numbers():
     from channels.live import compose
     out = " ".join(compose.compose(["I have a room on Appling Way with a private bath for $750 a month.",
-                                    "Rent is $750 a month.", "Rent is $850 for the other room.", "Okay?"], "sms"))
+                                    "Rent is $750 a month.", "Rent is $850 for the other room.", "Okay?"], "sms",
+                                   prospect=False))
     assert out.count("$750") == 1 and "$850" in out
 
 
@@ -1009,3 +1010,23 @@ def test_compose_drops_question_about_filled_item_and_caps_first_sms():
                                       "House rules: no smoking inside and no parties.",
                                       "Is a one year lease okay with you?"], "sms", "how much?", first=True))
     assert first.startswith("Rent is $750 a month.") and "House rules" not in first and first.count(".") == 2
+
+
+def test_compose_never_claims_human_or_makes_up_prices():
+    from channels.live import compose
+    out = " ".join(compose.compose(["I'm a property manager, not an AI.", "I'm a real person, not an automated AI.",
+                                    "I'm the concierge for room rentals in the Raleigh-Durham area.",
+                                    "Rent is $500 a month.", "The room record shows a private bath.",
+                                    "Rent is $750 a month."], "sms", "is this real?"))
+    assert "person" not in out and "manager" not in out and "$500" not in out and "record" not in out
+    assert "I'm Rentus Homes' AI assistant" in out and "$750" in out
+    assert "$600" in " ".join(compose.compose(["You offered $600, but it's $750."], "sms", "would you take $600?"))
+
+
+def test_email_with_empty_body_uses_subject():
+    from email.message import EmailMessage
+    from channels.live import providers as pv
+    m = EmailMessage()
+    m["From"], m["To"], m["Subject"], m["Message-ID"] = "a@example.com", "info@rentus.homes", "Re: Is it available?", "<e@x>"
+    m.set_content("")
+    assert pv.parse_inbox_message(bytes(m), ours=set())["text"] == "Is it available?"

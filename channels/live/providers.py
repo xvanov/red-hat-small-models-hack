@@ -204,7 +204,10 @@ def parse_inbox_message(raw: bytes, *, ours: set, internal_ts: datetime | None =
     if not mid:
         return None
     ts = internal_ts or _dt(str(msg.get("Date", "")))
-    return {"channel": "email", "contact": addr, "text": strip_quoted(body_text(msg)), "ext_id": mid,
+    text = strip_quoted(body_text(msg))
+    if not text.strip():  # empty body: the subject is the message
+        text = re.sub(r"^\s*((re|fwd?|aw)\s*:\s*)+", "", str(msg.get("Subject", "")), flags=re.I).strip()
+    return {"channel": "email", "contact": addr, "text": text, "ext_id": mid,
             "ts": ts.isoformat() if ts else None, "line": "info@rentus.homes", "line_last4": None,
             "renter_name": frm[0][0] or None,
             "meta": {"subject": str(msg.get("Subject", "")), "message_id": mid,

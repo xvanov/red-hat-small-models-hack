@@ -98,6 +98,24 @@ def _invented_phone(s: str, renter_text: str) -> bool:
     return False
 
 
+# never claim to be human (the reply opens with an AI disclosure on first contact)
+HUMAN_CLAIM = re.compile(r"\bnot an? (ai|bot|robot|automated|machine)\b|\bI'?m (a |an )?(real |actual )?(person|human|"
+                         r"property manager|landlord|owner|agent)\b|\breal person\b|\bnot automated\b|"
+                         r"\bI am (a |an )?(real |actual )?(person|human|property manager)\b|no soy (un )?(bot|robot|ia)|"
+                         r"soy (una )?persona", re.I)
+SELF_DESC = re.compile(r"\bI'?m (the |a |your )?(concierge|assistant)\b[^.?!]*", re.I)
+STAFF_PHRASES = re.compile(r"room record|the record shows|waiting on (owner )?approval|concierge for|message us for "
+                           r"details|my (tools|records) (show|say)", re.I)
+MONEY = re.compile(r"\$\s?(\d[\d,]*(?:\.\d+)?)")
+ROOM_RENT = {"750"}
+
+
+def _bad_money(s: str, renter_text: str) -> bool:
+    """A dollar figure that is not the room's rent and that the renter did not write themselves (made-up price)."""
+    said = {m.replace(",", "") for m in MONEY.findall(renter_text or "")}
+    return any(m.replace(",", "").split(".")[0] not in ROOM_RENT | said for m in MONEY.findall(s))
+
+
 def _only_refers_to_link(s: str, pool: list[str]) -> bool:
     """"The lease link is included in this message." adds nothing when the link itself is in the reply."""
     return "http" not in s and bool(LINK_REF.search(s)) and any("http" in k for k in pool)
@@ -114,15 +132,18 @@ FIRST_KEEP = re.compile(r"\$\s?\d|available|disponible|private bath|baño privad
 FIRST_DROP = re.compile(r"house rules|reglas de la casa|I'll confirm|confirmar[eé]|pets?|mascotas", re.I)
 
 
-def merge(texts: list[str], renter_text: str = "", filled: set | None = None, first_sms: bool = False) -> list[str]:
+def merge(texts: list[str], renter_text: str = "", filled: set | None = None, first_sms: bool = False,
+          prospect: bool = True) -> list[str]:
     """Pooled, de-duplicated sentences: statements (answer first), then the last question."""
     pool: list[str] = []
+    texts = [SELF_DESC.sub("I'm Rentus Homes' AI assistant", t) for t in texts]
     for t in texts:
         for s in sentences(t):
             if not any(_near_dup(s, k) for k in pool) and not _covered(s, pool):
                 pool.append(s)
     pool = [s for s in pool if not _only_refers_to_link(s, pool) and not INTERNAL.search(s)
-            and not _invented_phone(s, renter_text)]
+            and not _invented_phone(s, renter_text) and not HUMAN_CLAIM.search(s) and not STAFF_PHRASES.search(s)
+            and not (prospect and _bad_money(s, renter_text))]
     questions = [s for s in pool if s.rstrip().endswith("?")]
     statements = [s for s in pool if not s.rstrip().endswith("?")]
     if filled:  # never re-ask a gate item the register already has
@@ -157,8 +178,8 @@ def _pack(sents: list[str], limit: int, max_parts: int) -> list[str]:
 
 
 def compose(texts: list[str], channel: str, renter_text: str = "", filled: set | None = None,
-            first: bool = False) -> list[str]:
-    sents = merge(texts, renter_text, filled, first_sms=first and channel in ("sms", "messenger"))
+            first: bool = False, prospect: bool = True) -> list[str]:
+    sents = merge(texts, renter_text, filled, first_sms=first and channel in ("sms", "messenger"), prospect=prospect)
     if not sents:
         return []
     if channel == "email":  # one email, no length limit: statements, each link line, the question
@@ -176,6 +197,10 @@ LIVE_NOTE = """## Live channel (real renter, real phone)
 - Answer the renter's actual question first, in the first sentence (for example the rent amount if they asked about rent). Then ask exactly one qualifying question that has not been answered yet. Never repeat a question in the same reply.
 - Your send_message calls in this turn are combined into ONE reply to the renter, so do not repeat facts or questions across them. Each send_message is still at most 2 short sentences: put a third sentence in another send_message.
 - Never send a message you already sent on this thread; read the thread and move the conversation forward.
+- You are Rentus Homes' AI assistant. Never claim to be a human, a person, a property manager or the owner. Asked if you are a bot, how this works or what runs you: "I'm Rentus Homes' AI assistant, running on an open model on our own GPU. I can answer questions about the room and set up a showing." Then continue normally.
+- Asked for a real person: "I'll have someone from Rentus Homes follow up with you personally." and `escalate_to_owner` (reason: renter asked for a person); no qualifying question in that reply.
+- Anyone reporting an emergency (overflowing toilet, flooding, water through a ceiling, gas, fire, sparks): first one sentence of safety advice (shut the water valve behind the toilet or the main shut-off; leave and call 911 for gas or fire), then "I've alerted the owner and help is on the way." and `escalate_to_owner`; no diagnostic questions.
+- A question you have no confirmed fact for (parking, laundry, pets, deposit, utilities, furnishing, housemates, distance): "I'll confirm that and get back to you." Never guess, never quote a price other than the room's.
 - Before replying to anything the renter states, record it: `read_reply` on their message, then `upsert_renter` with every answered gate item (lease, move_in, phone, reason, occupants) and `capture_demand` with new criteria."""
 
 
