@@ -6,6 +6,9 @@
 - `times`: how many matching calls fail before the tool recovers (default 1).
 - `after`: optional; let this many matching calls succeed first (default 0).
 - `match`: optional extension; an args subset, e.g. {"channel": "marketplace"}, that a call must contain.
+- `field` (malformed only, optional extension): corrupt this key wherever it appears in `data` (for example
+  `"rent"` in get_room or every room of list_rooms) instead of the default first-key corruption.
+  `field_mode`: "wrong_type" (default, e.g. 875 -> "N/A") or "drop" (the key is missing).
 
 Counters are kept on the fault dict itself (`_seen`, `_fired`), so they are part of world state and
 show up in snapshots. `malformed` lets the tool run (side effects happen) and then corrupts `data`.
@@ -72,6 +75,26 @@ def _wrong_type(v):
     if isinstance(v, dict):
         return []
     return "corrupt"
+
+
+def corrupt_field(data, field: str, mode: str = "wrong_type"):
+    """Targeted corruption: every `field` key anywhere in `data` is dropped or given a wrong type."""
+    data = copy.deepcopy(data)
+
+    def walk(x):
+        if isinstance(x, dict):
+            if field in x:
+                if mode == "drop":
+                    del x[field]
+                else:
+                    x[field] = _wrong_type(x[field])
+            for v in x.values():
+                walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+    walk(data)
+    return data
 
 
 def corrupt(data):

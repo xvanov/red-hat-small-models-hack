@@ -130,8 +130,13 @@ def test_compliance_clean_and_cautions(world):
     assert soi["ok"] is True and soi["findings"][0]["severity"] == "caution"
     world.policy["source_of_income_protected"] = True
     assert call_ok(world, "check_listing_compliance", {"text": "No Section 8."})["ok"] is False
-    fem = call_ok(world, "check_listing_compliance", {"text": "Female roommates only for shared bath"})
-    assert fem["findings"][0]["rule"] == "sex" and fem["findings"][0]["severity"] == "caution"
+    # Owner decision D23 (b): gender wording in a shared room is a warning the owner decides, not a block
+    for text in ("Female roommates only for shared bath", "Males only.", "females only", "Solo mujeres."):
+        fem = call_ok(world, "check_listing_compliance", {"text": text})
+        assert fem["ok"] is True and fem["findings"][0]["rule"] == "sex"
+        assert fem["findings"][0]["severity"] == "warning" and fem["findings"][0]["owner_decides"] is True
+    mixed = call_ok(world, "check_listing_compliance", {"text": "Males only, no kids."})
+    assert mixed["ok"] is False and {f["severity"] for f in mixed["findings"]} == {"warning", "violation"}
 
 
 # ---------------------------------------------------------------- market
@@ -193,11 +198,50 @@ def test_send_message_price_and_term_refusals(world):
     assert "price_not_in_record" in e["details"]["rules"] and "escalate" in e["hint"]
     call_err(world, "send_message", {"thread_id": "T001", "text": "We can do 700 dollars."}, "POLICY_BLOCKED")
     e = call_err(world, "send_message", {"thread_id": "T001", "text": "A 6-month lease works for us."}, "POLICY_BLOCKED")
+    assert "lease_floor_not_requested" in e["details"]["rules"]
+    e = call_err(world, "send_message", {"thread_id": "T001", "text": "Month-to-month is fine."}, "POLICY_BLOCKED")
     assert "lease_term_not_in_record" in e["details"]["rules"]
-    call_err(world, "send_message", {"thread_id": "T001", "text": "Month-to-month is fine."}, "POLICY_BLOCKED")
     call_ok(world, "send_message", {"thread_id": "T001", "text": "The lease is 12 months and the deposit is $750."})
     call_err(world, "send_message", {"thread_id": "T001", "text": "Here you go.", "attachments": ["nope.jpg"]}, "INVALID_ARGS")
     call_err(world, "send_message", {"thread_id": "T001", "text": "   "}, "INVALID_ARGS")
+
+
+def _renter_says(world, text):
+    world.threads[0]["messages"].append({"from": "renter", "text": text, "id": f"r{len(world.threads[0]['messages'])}",
+                                         "attachments": [], "ts": "t"})
+
+
+@pytest.mark.parametrize("text", ["The shortest lease I can do is a 6-month lease.", "6 months is the shortest I can do.",
+                                  "The minimum is six months.", "El contrato más corto es de 6 meses."])
+def test_six_month_floor_only_after_renter_asks(world, text):
+    """Owner decision D23 (a): the 6-month floor is named only after the renter asks for a shorter lease."""
+    e = call_err(world, "send_message", {"thread_id": "T001", "text": text}, "POLICY_BLOCKED")
+    assert "lease_floor_not_requested" in e["details"]["rules"]
+    _renter_says(world, "could I sign for 9 months instead?")
+    call_ok(world, "send_message", {"thread_id": "T001", "text": text})
+    # below the floor stays blocked even after the request
+    e = call_err(world, "send_message", {"thread_id": "T001", "text": "A 3-month lease works."}, "POLICY_BLOCKED")
+    assert "lease_term_not_in_record" in e["details"]["rules"]
+
+
+@pytest.mark.parametrize("ask", ["no, not a full year", "¿puede ser por menos tiempo?", "only need it for the semester",
+                                 "Is month-to-month possible?"])
+def test_shorter_lease_request_phrasings(world, ask):
+    _renter_says(world, ask)
+    call_ok(world, "send_message", {"thread_id": "T001", "text": "The shortest lease I can do is a 6-month lease."})
+
+
+def test_renter_accepting_six_months_passes_the_gate(world):
+    """Owner decision D23 (a): a renter who accepts 6 months or more passes the lease item."""
+    six = {"status": "answered", "value": False, "months": 6}
+    d = call_ok(world, "upsert_renter", {"thread_id": "T001", "fields": {"gate": {**COMPLETE_GATE, "lease": six}}})
+    assert d["gate_missing"] == [] and rt.gate_complete(world, d["renter"]["renter_id"])
+    call_ok(world, "propose_showing", {"renter_id": d["renter"]["renter_id"], "room_id": "R023", "start": "2026-10-18T11:00"})
+    three = {"status": "answered", "value": True, "months": 3}
+    d = call_ok(world, "upsert_renter", {"thread_id": "T001", "fields": {"gate": {**COMPLETE_GATE, "lease": three}}})
+    assert d["gate_missing"] == ["lease"]
+    call_err(world, "upsert_renter", {"thread_id": "T001", "fields": {"gate": {"lease": {"status": "answered", "months": "six"}}}},
+             "INVALID_ARGS")
 
 
 def test_send_message_unlinked_thread_allows_any_record_figure():

@@ -44,12 +44,12 @@ The sandbox clock is `world.clock["now"]`. Tools never read the wall clock; scen
 | Group | Tools | Rules the tool enforces |
 |---|---|---|
 | Inventory | `list_rooms`, `get_room`, `update_room` | editable fields only, typed values |
-| Listings | `create_listing`, `publish_listing`, `update_listing`, `mark_filled`, `get_listing_media`, `check_listing_compliance` | price must equal the room's rent and any `$` figure must be in the room record (`POLICY_BLOCKED`, hint: `update_room` first); publishing is refused while the fair-housing check finds a violation; one active listing per room (`CONFLICT`) |
+| Listings | `create_listing`, `publish_listing`, `update_listing`, `mark_filled`, `get_listing_media`, `check_listing_compliance` | price must equal the room's rent and any `$` figure must be in the room record (`POLICY_BLOCKED`, hint: `update_room` first); publishing is refused while the fair-housing check finds a violation (gender wording in a shared room is a `warning` the owner decides, D23); one active listing per room (`CONFLICT`) |
 | Market | `get_market_rent` | Zillow ZORI for NC ZIPs, from `data/raw/zori/zori_nc.csv` when present, else the committed `rentus_tools/data/zori_nc_latest.csv` (rebuild it with `scripts/build_zori_table.py`) |
-| Inbox | `list_threads`, `read_thread`, `send_message` | `POLICY_BLOCKED` for more than 2 sentences, more than one `?`, em or en dashes, a dollar figure not in the thread's room/listing record, or a lease term shorter than `policy.lease_min_months_public` |
+| Inbox | `list_threads`, `read_thread`, `send_message` | `POLICY_BLOCKED` for more than 2 sentences, more than one `?`, em or en dashes, a dollar figure not in the thread's room/listing record, or a lease term shorter than `policy.lease_min_months_public`; a term at or above `policy.lease_floor_months` (6) only once the renter has asked for a shorter lease (D23) |
 | Reader | `read_reply` | reader JSON per `data/reader_schema.md`, plus `backend` (`model` or `fallback`) |
 | Register | `upsert_renter`, `match_renters` | gate items use the reader's shapes (`{"status","value"}`, move_in `{"status","date","raw"}`); scalar shorthand accepted (`"lease": true`, `"move_in": "2026-11-01"`); phones normalized to E.164 |
-| Calendar | `find_showing_slots`, `propose_showing` | `POLICY_BLOCKED` unless lease is an explicit yes (status `answered`, value true), move_in has an exact date (`answered` or `exception`), and phone, reason and occupants are filled; occupants must fit `max_occupants`; slots stay inside `policy.showing_hours` |
+| Calendar | `find_showing_slots`, `propose_showing` | `POLICY_BLOCKED` unless lease is an explicit answer (status `answered` and value true, or `months` >= `policy.lease_floor_months`; when `months` is given it decides), move_in has an exact date (`answered` or `exception`), and phone, reason and occupants are filled; occupants must fit `max_occupants`; slots stay inside `policy.showing_hours` |
 | Ops | `web_search`, `fetch_page`, `find_vendors`, `create_job`, `request_quote`, `book_vendor` | vendors with `responds: false` return `TIMEOUT` (not retryable, hint: try another vendor); `BUDGET_EXCEEDED` above `policy.spend_limit_usd` (default $500); quote amounts are deterministic within each vendor's range |
 | Owner | `escalate_to_owner`, `report_to_owner` | `ref_id` must exist (thread, job, renter, listing, quote, room or event) |
 
@@ -72,7 +72,7 @@ Set `world.faults` to a list of `{tool, kind, times=1, after=0, match?}`:
 - `after`: let this many matching calls succeed first; `times`: then fail this many before recovering
 - `match` (an extension to the contract): an args subset, for example `{"channel": "marketplace"}`
 
-An error fault skips the tool, so nothing changes. `malformed` runs the tool (side effects happen) and then returns `ok: true` with the data deterministically corrupted: a key dropped and another given the wrong type, for the verifier to catch. Fault counters (`_seen`, `_fired`) live on the fault dicts, so they show up in snapshots. Invalid arguments never consume a fault.
+An error fault skips the tool, so nothing changes. `malformed` runs the tool (side effects happen) and then returns `ok: true` with the data deterministically corrupted: a key dropped and another given the wrong type, for the verifier to catch. With `field` (for example `"rent"`) the fault corrupts that key wherever it appears instead (`field_mode`: `wrong_type`, the default, or `drop`). Fault counters (`_seen`, `_fired`) live on the fault dicts, so they show up in snapshots. Invalid arguments never consume a fault.
 
 ## Live mode
 

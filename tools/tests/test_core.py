@@ -209,6 +209,18 @@ def test_malformed_list_result(world):
     assert not (isinstance(rooms, list) and rooms and set(rooms[0]) == set(world.rooms[0]) - {"amenities", "photos", "price_basis", "address"})
 
 
+@pytest.mark.parametrize("mode", ["wrong_type", "drop"])
+def test_malformed_field_targets_rent(world, mode):
+    """Owner decision D23 (d): the malformed fault can corrupt rent itself."""
+    world.faults = [{"tool": "get_room", "kind": "malformed", "times": 1, "field": "rent", "field_mode": mode}]
+    room = rt.call(world, "get_room", {"room_id": "R023"})["data"]["room"]
+    assert (room.get("rent") == "N/A") if mode == "wrong_type" else ("rent" not in room)
+    assert room["deposit"] == world.get("rooms", "R023")["deposit"]  # only the named field is touched
+    assert rt.call(world, "get_room", {"room_id": "R023"})["data"]["room"]["rent"] == 750  # recovers
+    world.faults = [{"tool": "list_rooms", "kind": "malformed", "times": 1, "field": "rent"}]
+    assert all(r["rent"] == "N/A" for r in rt.call(world, "list_rooms", {})["data"]["rooms"])
+
+
 def test_validation_without_jsonschema(world, monkeypatch):
     import rentus_tools.core as core
     monkeypatch.setattr(core, "jsonschema", None)

@@ -2,13 +2,42 @@
 from __future__ import annotations
 
 import copy
+import re
 
 from .. import live
 from ..core import tool
 from ..errors import ToolError
 from ._util import dollar_figures, need
 from .listings import allowed_figures
+from .reader import read_reply_fallback
 from .style import lease_terms, style_violations
+
+# A renter asking for less than a year, in words the regex reader's shorter_lease intent can miss
+# ("could I sign for 9 months instead?", "no, not a full year", "¿puede ser por menos tiempo?").
+_NUM = r"(?:[1-9]|1[01]|one|two|three|four|five|six|seven|eight|nine|ten|eleven|un|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once)"
+SHORTER_ASK = re.compile(
+    r"\b" + _NUM + r"[- ]?(?:months?|meses?)\b(?!\s+(?:upfront|up front|in advance|por adelantado|adelantad))"
+    r"|\b(?:not|no) (?:a )?(?:full|whole) year\b|\bun año completo no\b|\bno (?:puedo|quiero) (?:un año|comprometerme)"
+    r"|can.?t commit to (?:a |the )?(?:full |whole )?year|\b(?:less|shorter) (?:time|than a year|than 12 months|lease|term)\b"
+    r"|\bmenos tiempo\b|\bm[aá]s corto\b|\bsemester\b|\bsemestre\b|\bsummer only\b|\bjust (?:for )?the summer\b"
+    r"|\bsolo (?:por )?(?:el )?verano\b|\bmonth[- ]to[- ]month\b|\bmes a mes\b|\bshort[- ]term\b", re.IGNORECASE)
+
+
+def renter_asked_shorter(world, thread: dict) -> bool:
+    """True once the renter on this thread has asked for a lease shorter than a year (reader intent
+    shorter_lease, an equivalent phrase, or a register row recording that they refused a year)."""
+    for m in thread.get("messages", []):
+        if m.get("from") != "renter":
+            continue
+        text = m.get("text") or ""
+        if SHORTER_ASK.search(text) or "shorter_lease" in read_reply_fallback(text).get("intents", []):
+            return True
+    for r in world.register:
+        if thread["thread_id"] in r.get("thread_ids", []):
+            lease = (r.get("gate") or {}).get("lease") or {}
+            if lease.get("status") == "answered" and lease.get("value") is False:
+                return True
+    return False
 
 
 def thread_room(world, thread: dict) -> tuple[dict | None, dict | None]:
@@ -77,13 +106,23 @@ def send_message(world, thread_id: str, text: str, attachments: list[str] | None
                             f"message quotes {', '.join(f'${b:g}' for b in bad)}, which is not in the record for {where}",
                             hint="quote the record's rent/deposit; price changes and discounts go to escalate_to_owner",
                             details={"rules": ["price_not_in_record"]})
+    # Lease terms (owner decision D23): the public minimum is the default; the private floor
+    # (policy.lease_floor_months, 6) may be named only after the renter asked for a shorter lease.
     floor = world.policy.get("lease_min_months_public", 12)
+    hard_floor = world.policy.get("lease_floor_months", 6)
     for phrase, months in lease_terms(text):
         room_min = (room or {}).get("lease_min_months", floor)
-        if months is not None and months < min(floor, room_min):
-            raise ToolError("POLICY_BLOCKED", f"message offers a lease term ('{phrase}') shorter than the public minimum of {floor} months",
-                            hint="shorter leases are the owner's decision; escalate_to_owner with a draft",
-                            details={"rules": ["lease_term_not_in_record"]})
+        if months is None or months >= min(floor, room_min):
+            continue
+        if months >= hard_floor:
+            if renter_asked_shorter(world, t):
+                continue
+            raise ToolError("POLICY_BLOCKED", f"message names a {months}-month lease, but the renter has not asked for a shorter lease",
+                            hint=f"say '1 year minimum'; the {hard_floor}-month floor may be named only after the renter asks for less than a year",
+                            details={"rules": ["lease_floor_not_requested"]})
+        raise ToolError("POLICY_BLOCKED", f"message offers a lease term ('{phrase}') shorter than the {hard_floor}-month floor",
+                        hint="shorter leases are the owner's decision; escalate_to_owner with a draft",
+                        details={"rules": ["lease_term_not_in_record"]})
     known = {p for r in world.rooms for p in r.get("photos", [])}
     unknown = [a for a in attachments if a.rsplit("/", 1)[-1] not in known]
     if unknown:

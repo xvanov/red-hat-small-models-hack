@@ -20,6 +20,6 @@ __all__ = ["call", "validate_args", "REGISTRY", "ToolError", "EventSink", "TOOLS
 
 def gate_complete(world: World, renter_id: str) -> bool:
     """True when propose_showing would accept this renter's gate (scorers use this)."""
-    from .impl.register import gate_missing
+    from .impl.register import _floor, gate_missing
     r = world.get("register", renter_id)
-    return bool(r) and not gate_missing(r)
+    return bool(r) and not gate_missing(r, _floor(world))

@@ -7,7 +7,7 @@ from datetime import datetime, time, timedelta
 from ..core import tool
 from ..errors import ToolError
 from ._util import need, parse_date, parse_dt
-from .register import gate_missing
+from .register import _floor, gate_missing
 
 MAX_SLOTS = 24
 
@@ -62,7 +62,7 @@ def find_showing_slots(world, room_id: str, date_from: str, date_to: str):
 def propose_showing(world, renter_id: str, room_id: str, start: str):
     renter = need(world, "register", renter_id, "renter")
     room = need(world, "rooms", room_id, "room", "list_rooms")
-    missing = gate_missing(renter)
+    missing = gate_missing(renter, _floor(world))
     if missing:
         raise ToolError("POLICY_BLOCKED", f"gate incomplete for {renter_id}: missing {', '.join(missing)}",
                         hint=f"ask for {missing[0]} next (one item per message), read the reply with read_reply, record it with upsert_renter",

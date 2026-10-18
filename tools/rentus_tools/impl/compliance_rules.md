@@ -17,11 +17,15 @@
 | race_color_national_origin | "whites only", "no Hispanics", "must speak English", "Americans only", "US citizens only" | violation | 100.75(c)(1),(c)(3) |
 | race_color_national_origin | "exclusive neighborhood", "ethnic neighborhood" | caution | HUD 1995 lists "exclusive" among words that can convey a racial preference depending on context |
 | handicap | "no wheelchairs", "able-bodied", "must be able to climb stairs", "no mental illness", "no service animals", "no emotional support animals" | violation | 100.75(c)(1); HUD 1995 (describe accessibility of the property, not abilities of the renter); assistance animals are not pets |
-| sex | "female only", "men only", "solo mujeres" | caution | 100.75(c)(1); HUD 1995 allows a sex preference only for shared living quarters, which many room rentals are, so the owner decides |
+| sex | "females only", "males only", "men only", "female roommates only", "solo mujeres" | warning (`owner_decides: true`) | 100.75(c)(1); HUD 1995 allows a sex preference only for shared living quarters. Every room in this inventory is a room in a shared home, so the phrase is surfaced for the owner to approve or remove and never blocks publishing (owner decision D23) |
 | sex | "no gays", "straight only" | caution | Federal treatment of sexual orientation and gender identity as sex discrimination under the Act has changed over time; many state and local laws protect them, so the phrase is always flagged |
 | source_of_income | "no Section 8", "no vouchers", "no housing assistance" | caution, or violation when `policy.source_of_income_protected` is true | Not covered by 24 CFR 100.75; protected only by some state and local laws, so the world policy decides |
 
-Each finding returns `{phrase, rule, severity, citation, suggestion}`. `ok` is false when any finding is a violation; cautions are advisory and do not block publishing.
+Each finding returns `{phrase, rule, severity, citation, suggestion}`, plus `owner_decides: true` on a warning. `ok` is false when any finding is a violation; cautions and warnings are advisory and do not block publishing.
+
+## Gender wording in shared-room listings (owner decision D23, 2026-10-17)
+
+"Males only" / "females only" and similar phrases come back as a `warning`, not a `violation`. The reason is the shared-housing context: the Fair Housing Act's advertising rule (42 U.S.C. 3604(c), 24 CFR 100.75) bars sex preferences in ads, but HUD's 1995 advertising guidance says a sex preference may be stated for shared living quarters, and courts have read the Act as not reaching roommate selection in a shared dwelling (*Fair Housing Council v. Roommate.com*, 9th Cir. 2012). Every room here is a room in a shared home, so the owner decides whether to keep the phrase; the tool flags it and does not block. The check sees only text, so it cannot tell a shared room from a whole unit: for a self-contained unit the phrase should be removed. State and local laws can be stricter. Every other protected-class phrase (familial status, religion, race, color, national origin, handicap) still blocks publishing. This is a screening aid, not legal advice.
 
 ## What is deliberately allowed
 

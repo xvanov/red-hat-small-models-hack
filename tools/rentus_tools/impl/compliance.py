@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import re
 
-# (pattern, rule, severity, suggestion). severity "violation" makes ok=false; "caution" is advisory.
+# (pattern, rule, severity, suggestion). severity "violation" makes ok=false; "caution" is advisory;
+# "warning" is advisory and carries owner_decides=true (the owner approves or removes the phrase).
 _RULES: list[tuple[str, str, str, str]] = [
     # Familial status: 24 CFR 100.75(c)(1)-(2); HUD 1995 advertising guidance ("adults only", "no children").
     (r"\bno (kids|children|child|infants|babies|toddlers)\b", "familial_status", "violation",
@@ -42,9 +43,11 @@ _RULES: list[tuple[str, str, str, str]] = [
      "handicap", "violation", "describe the property instead, e.g. 'second-floor walk-up'"),
     (r"\bno (service|assistance|emotional support|support) animals?\b|\bno esas?\b",
      "handicap", "violation", "say 'no pets; assistance animals welcome' instead"),
-    # Sex: 24 CFR 100.75(c)(1). Shared-living sex preference is permitted by HUD guidance, so caution only.
-    (r"\b(female|male|women|men|girls?|guys?|ladies)( only| roommates? only| tenants? only)\b|\bsolo (mujeres|hombres|chicas|chicos)\b",
-     "sex", "caution", "allowed only for shared living space; otherwise remove"),
+    # Sex: 24 CFR 100.75(c)(1). A sex preference is permitted by HUD guidance for shared living quarters,
+    # which every room here is, so it is a WARNING the owner approves, never a block (owner decision D23).
+    (r"\b(females?|males?|women|men|girls?|guys?|ladies|gentlemen)( only| roommates? only| tenants? only| housemates? only)\b"
+     r"|\bsolo (mujeres|hombres|chicas|chicos|damas|caballeros)\b",
+     "sex", "warning", "shared room: the owner decides whether to keep a sex preference; outside shared living space, remove"),
     (r"\bno (gays?|lesbians?|lgbt\w*|trans\w*)\b|\bstraight only\b", "sex", "caution",
      "remove; federal treatment has varied and many state and local laws protect sexual orientation and gender identity"),
     # Source of income: not covered by 24 CFR 100.75; some localities protect it. Severity set by policy.
@@ -72,8 +75,11 @@ def check(text: str, policy: dict | None = None) -> dict:
             s = sev
             if rule == "source_of_income" and soi_protected:
                 s = "violation"
-            findings.append({"phrase": m.group(0), "rule": rule, "severity": s, "citation": CITATIONS[rule],
-                             "suggestion": sug, "start": m.start()})
+            f = {"phrase": m.group(0), "rule": rule, "severity": s, "citation": CITATIONS[rule],
+                 "suggestion": sug, "start": m.start()}
+            if s == "warning":
+                f["owner_decides"] = True
+            findings.append(f)
     findings.sort(key=lambda f: f["start"])
     for f in findings:
         del f["start"]

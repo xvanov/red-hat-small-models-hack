@@ -58,6 +58,12 @@ def _gate_item(item: str, v) -> dict:
                 out["value"] = False
             else:
                 raise ToolError("INVALID_ARGS", "gate.lease.value must be true, false or null")
+        if item == "lease" and out.get("months") is not None:
+            m = out["months"]
+            if isinstance(m, bool) or num(m) is None or int(num(m)) != num(m) or not 1 <= num(m) <= 36:
+                raise ToolError("INVALID_ARGS", "gate.lease.months must be a whole number of months (1 to 36)",
+                                hint="the lease length the renter accepted, e.g. {\"status\": \"answered\", \"value\": true, \"months\": 6}")
+            out["months"] = int(num(m))
         if item == "phone" and val is not None:
             p = normalize_phone(str(val))
             if p is None:
@@ -71,12 +77,23 @@ def _gate_item(item: str, v) -> dict:
     return out
 
 
-def gate_missing(renter: dict) -> list[str]:
-    """Items blocking a showing. Strict: lease needs an explicit yes (status answered, value true)."""
+def lease_ok(lease: dict, floor: int = 6) -> bool:
+    """The lease item passes on an explicit answer: a yes to the offered lease (value true), or a renter who
+    accepts a lease of at least `floor` months (`months`, policy.lease_floor_months; owner decision D23).
+    When `months` is given it decides, so a yes to a term below the floor never passes."""
+    if (lease or {}).get("status") != "answered":
+        return False
+    m = lease.get("months")
+    if isinstance(m, int) and not isinstance(m, bool):
+        return m >= floor
+    return lease.get("value") is True
+
+
+def gate_missing(renter: dict, floor: int = 6) -> list[str]:
+    """Items blocking a showing. Strict: lease needs an explicit answer (see lease_ok)."""
     g = renter.get("gate") or {}
     miss = []
-    lease = g.get("lease") or {}
-    if not (lease.get("status") == "answered" and lease.get("value") is True):
+    if not lease_ok(g.get("lease") or {}, floor):
         miss.append("lease")
     mi = g.get("move_in") or {}
     if not (mi.get("status") in ("answered", "exception") and mi.get("date")):
@@ -91,6 +108,10 @@ def gate_missing(renter: dict) -> list[str]:
     if not (oc.get("status") in ("answered", "exception") and oc.get("value")):
         miss.append("occupants")
     return miss
+
+
+def _floor(world) -> int:
+    return int((getattr(world, "policy", None) or {}).get("lease_floor_months", 6))
 
 
 # Letters NFKD does not decompose into an ASCII base letter plus accents.
@@ -171,14 +192,14 @@ def upsert_renter(world, thread_id: str, fields: dict):
         if k in fields:
             new[k] = fields[k]
     if new["status"] in ("new", "qualifying"):
-        new["status"] = "qualified" if not gate_missing(new) else ("qualifying" if gate else new["status"])
+        new["status"] = "qualified" if not gate_missing(new, _floor(world)) else ("qualifying" if gate else new["status"])
     new["updated_at"] = world.clock["now"]
     if created:
         world.register.append(new)
     else:
         renter.clear()
         renter.update(new)
-    return {"renter": copy.deepcopy(new), "created": created, "gate_missing": gate_missing(new)}
+    return {"renter": copy.deepcopy(new), "created": created, "gate_missing": gate_missing(new, _floor(world))}
 
 
 def _room_of(world, loi: str | None) -> str | None:
@@ -235,7 +256,7 @@ def match_renters(world, room_id: str):
                 score += 5; reasons.append(f"moves in {mi}, {gap} days after the room is free")
         if occ:
             score += 5; reasons.append(f"{occ} occupant(s) fits max {room.get('max_occupants')}")
-        if not gate_missing(r):
+        if not gate_missing(r, _floor(world)):
             score += 10; reasons.append("gate complete")
         if _room_of(world, r.get("listing_of_interest")) == room_id:
             score += 15; reasons.append("asked about this room")

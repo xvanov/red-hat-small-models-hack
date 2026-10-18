@@ -12,7 +12,7 @@ except ImportError:  # minimal built-in validator keeps the package importable w
 
 from .errors import ToolError, ok
 from .events import EventSink
-from .faults import corrupt, error_for, pick_fault
+from .faults import corrupt, corrupt_field, error_for, pick_fault
 from .schemas import PARAMS
 from .world import World
 
@@ -124,7 +124,8 @@ def call(world: World, name: str, args: Any = None, *, sink: EventSink | None = 
         data = REGISTRY[name](world, **args)
         result = ok(data)
         if fault:  # malformed: the action happened, the response is garbage
-            result = ok(corrupt(data))
+            result = ok(corrupt_field(data, fault["field"], fault.get("field_mode", "wrong_type"))
+                        if fault.get("field") else corrupt(data))
     except ToolError as e:
         result = e.envelope()
     except Exception as e:  # a bug in a tool must not crash the agent loop
