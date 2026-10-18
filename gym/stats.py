@@ -567,6 +567,9 @@ def check_plan(plan: dict, gate: bool = True, freeze: dict | None = None, same_f
             for k in ("a", "b"):
                 if not Path(h[k]).exists():
                     problems.append(f"{h['id']}: preds file {h[k]}: missing")
+                elif gate:
+                    import frozen
+                    problems += [f"{h['id']}: preds file {h[k]}: {w}" for w in frozen.reader_preds_problems(h[k], freeze)]
     return {"runs": runs, "problems": problems, "freeze_commit": (freeze or {}).get("commit")}
 
 
@@ -614,6 +617,9 @@ def run_plan(plan: dict, seed: int = 0, results_root: Path | None = None, gate: 
                 for k in ("a", "b"):
                     if not Path(h[k]).exists():
                         raise LookupError(f"no preds file {h[k]}")
+                bad = [p_ for p_ in chk["problems"] if p_.startswith(f"{hid}: ")]
+                if bad:
+                    raise LookupError(bad[0])
                 res.update(reader_compare(h["a"], h["b"], alpha=alpha, seed=seed))
             else:
                 raise ValueError(f"unknown test {kind}")

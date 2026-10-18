@@ -247,3 +247,15 @@ def test_run_plan_gate_rejects_one_dirty_run(tmp_path):
     bad = stats.run_plan(plan, freeze=FZ, same_frozen=lambda x, y: False)
     assert not bad["family"][0]["tested"] and bad["family"][0]["p"] == 1.0
     assert any("dirty" in p for p in bad["input_problems"])
+
+
+def test_reader_preds_must_score_the_frozen_owner_gold(tmp_path):
+    preds = tmp_path / "x.owner_gold.preds.jsonl"
+    preds.write_text("")
+    fz = {"artifact_sha256": {"data/published/twins/owner_gold.jsonl": "e" * 64}}
+    assert "not in the freeze manifest" in frozen.reader_preds_problems(str(preds), {"artifact_sha256": {}})[0]
+    assert "no metrics file" in frozen.reader_preds_problems(str(preds), fz)[0]
+    (tmp_path / "x.owner_gold.metrics.json").write_text(json.dumps({"provenance": {"data_sha256": "d" * 64}}))
+    assert "not the frozen owner gold" in frozen.reader_preds_problems(str(preds), fz)[0]
+    (tmp_path / "x.owner_gold.metrics.json").write_text(json.dumps({"provenance": {"data_sha256": "e" * 64}}))
+    assert frozen.reader_preds_problems(str(preds), fz) == []

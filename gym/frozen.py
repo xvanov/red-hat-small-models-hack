@@ -71,6 +71,18 @@ def freeze_state() -> dict:
     return {"commit": freeze_commit(), "artifact_sha256": tasks}
 
 
+def reader_preds_problems(preds_path: str, freeze: dict, gold_rel: str = "data/published/twins/owner_gold.jsonl") -> list[str]:
+    """H2 preds count only if their metrics file says they scored the frozen owner gold (Amendment 2, items 7/8)."""
+    want = (freeze.get("artifact_sha256") or {}).get(gold_rel)
+    if not want:
+        return [f"{gold_rel} is not in the freeze manifest (H2 not tested)"]
+    mp = Path(str(preds_path).replace(".preds.jsonl", ".metrics.json"))
+    if not mp.exists():
+        return [f"no metrics file {mp.name} next to the preds"]
+    got = (json.loads(mp.read_text()).get("provenance") or {}).get("data_sha256")
+    return [] if got == want else [f"scored rows sha256 {str(got)[:12]} is not the frozen owner gold {want[:12]}"]
+
+
 def run_problems(summary: dict | None, freeze: dict,
                  same_frozen: Callable[[str, str], bool] = frozen_paths_identical) -> list[str]:
     """Reasons a run may not enter the confirmatory analysis (empty list = the run counts). Pure given `same_frozen`."""
