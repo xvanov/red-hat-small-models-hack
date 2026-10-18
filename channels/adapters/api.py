@@ -100,7 +100,7 @@ def _publish(listing: dict, channel: str, target: str, base_url: str | None, sub
                                 "target": target, "filled": r.filled, "repairs": r.repairs}
         if res.get("stage"):
             data.update(stage=res["stage"], needs=res.get("needs"), hint=res.get("hint"))
-            data["note"] = (f"filled everything reachable without an account and stopped at {res['stage']}; "
+            data["note"] = (f"filled what it could and stopped at {res['stage']}; "
                             f"needs {res.get('needs')}. Nothing was posted.")
         elif res["status"] == "ready_to_submit":
             data["note"] = "form filled; stopped before the final button. Nothing was posted."

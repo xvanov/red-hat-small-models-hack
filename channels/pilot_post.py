@@ -33,7 +33,10 @@ ROOM = {
     "own_entrance": True,
     "rent": 750,
     "available_from": "2026-11-01",
-    "amenities": ["Private bathroom", "Separate entrance"],
+    "amenities": ["Private bathroom", "Separate entrance", "Washer and dryer in unit", "Off-street parking"],
+    # owner-confirmed 2026-10-18 ~09:00 ET
+    "laundry": "washer/dryer in unit",
+    "parking": "off-street parking on premises",
     # Not confirmed by the owner: null in the record and listed here, so the tools refuse any text that
     # states them (tools/rentus_tools/impl/fact_guards.py; spec R-DISC-3).
     "deposit": None,

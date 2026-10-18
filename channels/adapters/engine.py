@@ -199,7 +199,9 @@ class Runner:
         return self.spec[key].replace("{base}", base_url.rstrip("/"))
 
     def login_hint(self) -> str:
-        return f"owner runs: channels/.venv/bin/python -m channels.login {self.platform}"
+        return (f"owner runs: channels/.venv/bin/python -m channels.login import-cookies {self.platform} "
+                f"~/{self.platform}-cookies.json  (export the cookies on his laptop first: channels/LOGIN.md, "
+                f"'Headless login')")
 
     def check_login(self) -> None:
         """Raise LOGIN_REQUIRED on a login page, or (live) on a bot challenge page such as Cloudflare's
@@ -213,7 +215,7 @@ class Runner:
             if re.search(bot, title or "", re.I):
                 raise AdapterError(
                     "LOGIN_REQUIRED", f"{self.platform} shows a bot check ('{title}') instead of the page",
-                    hint=self.login_hint() + "  (pass the check once in that window, log in, close it)",
+                    hint=self.login_hint() + "  (export the cookies after passing the check in your own browser)",
                     details={"reason": "bot_challenge", "url": self.page.url,
                              "screenshot": screenshot(self.page, self.platform, self.target, "-login")})
         want = self.spec.get("expect_url_contains")
@@ -334,7 +336,7 @@ class Runner:
             if step.get("url_contains") and step["url_contains"] not in self.page.url:
                 continue
             if do == "stop_if_empty":
-                # e.g. craigslist without an account: no contact email to continue with. Everything up to
+                # e.g. craigslist without an account (no contact email), or a room fact the site requires. Everything up to
                 # here is filled; stop, screenshot, and tell the owner what unlocks the rest.
                 # unless_present: a selector whose presence means the value is already known (e.g. the
                 # logged-in account shown instead of an email field)
@@ -351,7 +353,7 @@ class Runner:
                     continue
                 result.update(status="ready_to_submit", stage=step.get("stage", key),
                               screenshot=screenshot(self.page, self.platform, self.target, "-partial"),
-                              needs=step.get("needs", f"'{vkey}'"), hint=self.login_hint())
+                              needs=step.get("needs", f"'{vkey}'"), hint=step.get("hint") or self.login_hint())
                 return result
             if vkey is not None and values.get(vkey) in (None, "", []) and do != "check":
                 if step.get("optional", True) and not step.get("required"):

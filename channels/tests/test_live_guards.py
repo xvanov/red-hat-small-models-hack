@@ -43,7 +43,7 @@ def test_bot_check_and_redirect_are_login_required(page):
     with pytest.raises(AdapterError) as e:
         runner(page, {"bot_wall_title": "just a moment", "elements": {}, "flow": []}).check_login()
     assert e.value.code == "LOGIN_REQUIRED" and e.value.details["reason"] == "bot_challenge"
-    assert "channels.login craigslist" in e.value.hint
+    assert "channels.login import-cookies craigslist" in e.value.hint
     page.set_content("<p>home</p>")
     with pytest.raises(AdapterError) as e:
         runner(page, {"expect_url_contains": "/host", "elements": {}, "flow": []}).check_login()

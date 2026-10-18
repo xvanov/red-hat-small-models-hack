@@ -83,6 +83,9 @@ For each site:
   stops before **publish**. craigslist requires laundry and parking: if the room record has no `laundry` /
   `parking`, the run stops at the details form and says so instead of inventing them. Each run that gets
   past the details form leaves an unpublished draft in your craigslist account.
+- PadSplit: `/host` is the dashboard. New properties start at Manage > properties > **New listing**
+  (`/host/property-onboarding-new/base-details`); the adapter fills and picks the address and stops before
+  **Continue**, which starts the property draft and the rest of onboarding (rooms, rent, photos).
 - "profile in use by process N": an adapter or check is still running on that profile. Stop it, retry.
   A lock left by a crashed browser is cleared automatically.
 - `--keep` keeps the file after import; `-` instead of a file name reads the export from stdin.

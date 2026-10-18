@@ -144,3 +144,14 @@ def test_values_use_explicit_facts():
     # a fact the record lists as unconfirmed is not used even if a value is present
     v = prepare("roomies", {"room": dict(room, unconfirmed=["lease_min_months", "furnished"])}, target="live")
     assert v["min_stay"] is None and not v["furnished"]
+
+
+def test_craigslist_laundry_parking_mapping():
+    from channels.adapters.values import craigslist_laundry, craigslist_parking
+    assert craigslist_laundry("washer/dryer in unit") == "w/d in unit"
+    assert craigslist_parking("off-street parking on premises") == "off-street parking"
+    assert craigslist_parking("street parking") == "street parking" and craigslist_parking("no parking") == "no parking"
+    assert craigslist_laundry("something odd") is None and craigslist_parking(None) is None
+    from channels.pilot_post import ROOM
+    v = prepare("craigslist", {"title": "t", "body": "b", "price": 750, "room": ROOM}, target="live")
+    assert (v["laundry_text"], v["parking_text"]) == ("w/d in unit", "off-street parking")
