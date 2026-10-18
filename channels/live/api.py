@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import time
 
-from . import config, outbound, registry
+from . import config, outbound, registry, roles
 from .store import Store, now_iso
 
 PUBLIC_THREAD_KEYS = ("thread_id", "channel", "contact_display", "renter_name", "last_text", "last_ts", "unread",
@@ -70,7 +70,8 @@ def _summary(t: dict) -> dict:
               "line": t.get("line"), "opted_out": bool(t.get("opted_out")),
               # busy: an operator turn is running now ("Operator is typing..."); queued: a reply is waiting for one
               "busy": bool(t.get("busy")), "busy_since": t.get("busy_since") if t.get("busy") else None,
-              "queued": bool(t.get("pending_turn")) and not t.get("busy")})
+              "queued": bool(t.get("pending_turn")) and not t.get("busy"),
+              "role": t.get("role", "prospect"), "context": roles.context(t)})
     return s
 
 

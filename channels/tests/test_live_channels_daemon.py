@@ -438,7 +438,7 @@ def test_c_one_readable_report_per_thread(env):
 # ---------------------------------------------------------------- round 3: one reply per turn, answer first
 
 BURST = ["It's a bedroom in a house on Appling Way in Durham, with a private bathroom and its own entrance.",
-         "Rent is $750 a month.", "It's available from November 1, and the lease is 1 year.",
+         "Rent is $750 a month.", "It's available from November 1.",
          "How long do you want to stay? Is a one year lease okay with you?",
          "Is a one year lease okay with you?"]
 
@@ -487,7 +487,7 @@ def test_live_note_is_added_to_the_system_prompt(env):
     from rentus_operator.config import RunConfig
     w = daemon._new_world({"thread_id": "sms:0001:abc", "channel": "sms", "renter_name": ""})
     h = daemon.with_live_note(None, RunConfig(**daemon.FINAL_CONFIG), w)
-    assert h[0]["role"] == "system" and h[0]["content"].endswith(compose.LIVE_NOTE)
+    assert h[0]["role"] == "system" and compose.LIVE_NOTE in h[0]["content"]
     old = [{"role": "system", "content": "old prompt"}, {"role": "user", "content": "x"}]
     h2 = daemon.with_live_note(old, None, w)
     assert compose.LIVE_NOTE in h2[0]["content"] and h2[1] == old[1]
@@ -499,3 +499,67 @@ def test_compose_drops_a_restated_fact_but_keeps_different_numbers():
     out = " ".join(compose.compose(["I have a room on Appling Way with a private bath for $750 a month.",
                                     "Rent is $750 a month.", "Rent is $850 for the other room.", "Okay?"], "sms"))
     assert out.count("$750") == 1 and "$850" in out
+
+
+# ---------------------------------------------------------------- round 4: roles (tenant, lease signing)
+
+def test_tenant_role_seeds_tenant_record_and_stage(env, monkeypatch):
+    import rentus_tools as rt
+    monkeypatch.setenv("LIVE_ROLE_SMS", "tenant")
+    daemon.register_adapters(env["store"])
+    env["tf"].push(OWNER_PHONE, "hey my kitchen sink is leaking", "SM-70")
+    daemon.poll_all(env["store"])
+    s = api.list_threads()[0]
+    assert s["role"] == "tenant" and s["stage"] == "tenant" and "Current tenant" in s["context"]
+
+    def runner(w, inbound, h):
+        assert w.tenants[0]["tenant_id"] == "TEN_KALIN" and w.tenants[0]["lease"]["rent"] == 750
+        env_ = rt.call(w, "get_ledger", {"thread_id": inbound["thread_id"]})
+        assert env_["ok"], env_
+        assert rt.call(w, "triage_maintenance", {"thread_id": inbound["thread_id"]})["ok"]
+        return _Res([])
+
+    assert daemon.run_turn(env["store"], s["thread_id"], runner=runner)["ok"]
+    assert api.get_thread(s["thread_id"])["stage"] == "tenant"
+
+
+def test_lease_signing_tool_adds_link_to_one_email(env, monkeypatch):
+    import rentus_tools as rt
+    monkeypatch.setenv("LIVE_ROLE_EMAIL", "lease_signing")
+    monkeypatch.setenv("LIVE_LEASE_LINK_URL", "https://app.rentus.homes/sign/TESTTOKEN")
+    daemon.register_adapters(env["store"])
+    env["email"].inbox.append({"channel": "email", "contact": OWNER_EMAIL, "text": "I'm ready to sign, can you send the lease?",
+                               "ext_id": "<x1@mail>", "ts": None, "line": "info@rentus.homes", "line_last4": None,
+                               "renter_name": "Kalin", "meta": {"subject": "Lease", "message_id": "<x1@mail>", "references": []}})
+    daemon.poll_all(env["store"])
+    s = api.list_threads()[0]
+    assert s["stage"] == "lease_signing" and "Approved applicant" in s["context"]
+
+    def runner(w, inbound, h):
+        assert next(r for r in w.register if inbound["thread_id"] in r["thread_ids"])["status"] == "applied"
+        e = rt.call(w, "send_lease_link", {"thread_id": inbound["thread_id"]})
+        assert e["ok"], e
+        assert rt.call(w, "send_message", {"thread_id": inbound["thread_id"], "text": "Great, the lease link is in this email."})["ok"]
+        return _Res([])
+
+    daemon.run_turn(env["store"], s["thread_id"], runner=runner)
+    assert len(env["email"].sent) == 1
+    body = env["email"].sent[0]["text"]
+    assert body.startswith("Here is your lease to review and sign: https://app.rentus.homes/sign/TESTTOKEN")
+    s = api.list_threads()[0]
+    assert s["stage"] == "lease_sent" and "lease link sent" in s["context"]
+
+
+def test_lease_tool_refuses_non_applicants(env):
+    import rentus_tools as rt
+    daemon.register_adapters(env["store"])
+    w = daemon._new_world({"thread_id": "sms:0001:abc", "channel": "sms", "renter_name": "", "role": "prospect"})
+    e = rt.call(w, "send_lease_link", {"thread_id": w.threads[0]["thread_id"]})
+    assert not e["ok"] and e["error"]["code"] == "POLICY_BLOCKED"
+
+
+def test_lease_link_falls_back_to_public_apply_page(env, monkeypatch):
+    from channels.live import lease_link
+    monkeypatch.delenv("LIVE_LEASE_LINK_URL", raising=False)
+    monkeypatch.setenv("LIVE_LEASE_LINK_URL", "")
+    assert lease_link.get_link().endswith("/apply") and lease_link.get_link().startswith("https://")

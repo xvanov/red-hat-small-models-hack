@@ -113,6 +113,9 @@ class Store:
                  "stage": "inquiry", "gate": {k: "missing" for k in ("lease", "move_in", "phone", "reason", "people")},
                  "world": None, "history": None, "owner_pending": [], "email": {}, "created": now_iso(),
                  "world_channel": registry.world_channel(channel)}
+            from . import roles
+            t["role"] = roles.role_for(channel)
+            t["stage"] = roles.initial_stage(t["role"])
             self.save_thread(t)
         elif renter_name and not t.get("renter_name"):
             t["renter_name"] = renter_name

@@ -19,7 +19,7 @@ import traceback
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from . import compose, config, outbound, providers, registry
+from . import compose, config, outbound, providers, registry, roles
 from .store import CHANNEL_WORLD, Store, now_iso
 
 REPO = config.REPO
@@ -52,6 +52,15 @@ class LiveSendAdapter:
     def __init__(self, store: Store):
         self.store = store
         self.buffer: dict[str, list[str]] | None = None
+        self.links: dict[str, str] = {}
+
+    def add_lease_link(self, world, thread, url) -> None:
+        from . import lease_link
+        live_id = thread.get("live_id") or thread["thread_id"]
+        if lease_link.link_kind() == "signing":
+            self.links[live_id] = f"Here is your lease to review and sign: {url}"
+        else:
+            self.links[live_id] = f"Here is the link to complete your application and lease: {url}"
 
     def begin_turn(self) -> None:
         self.buffer = {}
@@ -88,6 +97,7 @@ def register_adapters(store: Store) -> LiveSendAdapter:
     global ADAPTER
     a = LiveSendAdapter(store)
     ADAPTER = a
+    roles.install_lease_tool(a.add_lease_link)
     registry.load_from_env()
     for ch in set(CHANNEL_WORLD.values()) | {spec.world_channel for spec in registry.EXTRA.values()}:
         live.register(ch, a)
@@ -171,9 +181,9 @@ def world_tid(thread_id: str) -> str:
 
 def _new_world(t: dict):
     import rentus_tools as rt
-    from channels.pilot_post import ROOM
+    ROOM = roles.live_room()
     w = rt.load()
-    w.rooms[:] = [copy.deepcopy(ROOM)]
+    w.rooms[:] = [ROOM]
     w.listings[:] = []
     w.threads[:] = []
     wch = registry.world_channel(t["channel"])
@@ -184,6 +194,7 @@ def _new_world(t: dict):
     if isinstance(ch, dict) and wid not in ch.setdefault("threads", []):
         ch["threads"].append(wid)
     w._normalize()
+    roles.seed_world(w, t, wid)
     return w
 
 
@@ -264,33 +275,43 @@ def readable(text: str, n: int = 280) -> str:
     return s if len(s) <= n else s[:n - 1] + "…"
 
 
-def with_live_note(history, cfg, w):
+def with_live_note(history, cfg, w, role: str = "prospect"):
     """The live-channel note (compose.LIVE_NOTE) appended to the operator's system prompt. No operator hook
     exists for extra instructions, so the daemon builds the first system message itself (the same load_prompt
     the loop would call) and passes it as history; older threads get the note added to their system message."""
     from rentus_operator import toolbox
     from rentus_operator.config import load_prompt
+    note = compose.LIVE_NOTE + "\n" + roles.note(role)
     if history:
         h = list(history)
         if h and h[0].get("role") == "system" and compose.LIVE_NOTE not in (h[0].get("content") or ""):
-            h[0] = {**h[0], "content": (h[0].get("content") or "") + "\n\n" + compose.LIVE_NOTE}
+            h[0] = {**h[0], "content": (h[0].get("content") or "") + "\n\n" + note}
         return h
     pol = toolbox.state(w).get("policy") or {}
     facts = {"today": toolbox.today(w), "spend_limit_usd": pol.get("spend_limit_usd"),
              "showing_hours": pol.get("showing_hours")}
-    return [{"role": "system", "content": load_prompt(cfg, facts) + "\n\n" + compose.LIVE_NOTE}]
+    return [{"role": "system", "content": load_prompt(cfg, facts) + "\n\n" + note}]
 
 
 def flush(store: Store, thread_id: str, channel: str, renter_text: str) -> dict | None:
     """Deliver this turn's buffered operator messages as one composed reply. Returns a trace entry."""
     if ADAPTER is None:
         return None
-    texts = ADAPTER.take_buffer().get(thread_id, [])
+    buf = ADAPTER.take_buffer()
+    texts = buf.get(thread_id, [])
+    link = (ADAPTER.links or {}).pop(thread_id, None)
+    if link:
+        texts = texts + [link]
     if not texts:
         return None
     parts = compose.compose(texts, channel, renter_text)
     results = [outbound.deliver(store, thread_id, p, origin="operator") for p in parts]
     ok = all(r.get("status") in ("sent", "awaiting_approval") for r in results)
+    if link and any(r.get("status") == "sent" for r in results):
+        with store.locked():
+            t = store.get_thread(thread_id)
+            t["lease_sent"] = now_iso()
+            store.save_thread(t)
     return {"ts": now_iso(), "actor": "tool", "name": "deliver_reply", "ok": ok,
             "summary": f"{len(texts)} operator message(s) sent as {len(parts)} {channel} message(s): "
                        + ", ".join(r.get("status", "?") for r in results)}
@@ -332,6 +353,11 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
             return {"skipped": True}
         if t.get("busy") and t.get("turn_owner") != os.getpid() and _pid_alive(t.get("turn_owner")):
             return {"skipped": True, "busy": True}
+        want = roles.role_for(t["channel"])
+        if t.get("role", "prospect") != want:  # role changed in .env: start this contact's World fresh in the new role
+            t.update(role=want, world=None, history=None, stage=roles.initial_stage(want), lease_sent=None,
+                     world_synced=[m["id"] for m in t["messages"] if m["direction"] == "in"
+                                   and m["id"] != (t["messages"][-1]["id"] if t["messages"] else None)])
         t["busy"], t["busy_since"], t["turn_owner"] = True, now_iso(), os.getpid()
         store.save_thread(t)
         world_d, history = t.get("world"), t.get("history")
@@ -363,7 +389,7 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
             from rentus_operator import toolbox
             from rentus_operator.loop import run
             cfg = _config()
-            history = with_live_note(history, cfg, w)
+            history = with_live_note(history, cfg, w, t.get("role", "prospect"))
             be = toolbox.backend("real")
             run_id = f"live_{thread_id.replace(':', '_')}_{int(time.time())}"
             sink = toolbox.make_sink(be, run_id, path=store.root / "events" / f"{run_id}.jsonl")
@@ -394,6 +420,11 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
         t["trace"].extend(trace_from_events(res.events))
         t["trace"] = t["trace"][-400:]
         gate, stage = gate_and_stage(w, wid)
+        role = t.get("role", "prospect")
+        if role == "tenant":
+            stage = "tenant"
+        elif role == "lease_signing":
+            stage = "lease_sent" if t.get("lease_sent") else "lease_signing"
         t["gate"] = gate
         if stage:
             t["stage"] = stage

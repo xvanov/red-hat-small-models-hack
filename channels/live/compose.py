@@ -18,6 +18,7 @@ MSGR_MAX = 600
 
 # renter question keyword -> words that mark the answering sentence
 TOPICS = [
+    (r"\b(sign|lease link|send the lease|send me the lease|paperwork|contract)\b", r"https?://"),
     (r"\b(rent|price|cost|how much|\$|per month|monthly)\b", r"\$\s?\d|\brent\b"),
     (r"\b(deposit)\b", r"\bdeposit\b"),
     (r"\b(available|availability|move in|move-in|earlier|when can|start date|still open)\b",
