@@ -70,11 +70,11 @@ def render_page() -> str:
     email = _demo_email()
     subs = {
         "{{MESSENGER_URL}}": MESSENGER_URL,
-        "{{SMS_HREF}}": f"sms:{sms}?&body=DEMO%20hi%2C%20is%20the%20room%20on%20Appling%20Way%20still%20available%3F" if sms else "#",
+        "{{SMS_HREF}}": f"sms:{sms}?&body=Hi%2C%20is%20the%20room%20on%20Appling%20Way%20still%20available%3F" if sms else "#",
         "{{SMS_PRETTY}}": _pretty(sms) if sms else "coming soon",
         "{{SMS_HIDDEN}}": "" if sms else "hidden",
         "{{DEMO_EMAIL}}": email or "coming soon",
-        "{{EMAIL_HREF}}": f"mailto:{email}?subject=DEMO&body=DEMO%20hi%2C%20is%20the%20room%20on%20Appling%20Way%20still%20available%3F" if email else "#",
+        "{{EMAIL_HREF}}": f"mailto:{email}?subject=Room%20on%20Appling%20Way&body=Hi%2C%20is%20the%20room%20on%20Appling%20Way%20still%20available%3F" if email else "#",
         "{{EMAIL_HIDDEN}}": "" if email else "hidden",
     }
     for k, v in subs.items():

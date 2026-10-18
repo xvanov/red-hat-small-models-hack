@@ -1,6 +1,6 @@
 # Public demo page (deploy/public_site)
 
-One public page at **https://demo.rentus.homes**: how to try the leasing assistant (Messenger, SMS, email with the `DEMO` keyword), how it works, and live results. It is a separate FastAPI app; the private console (127.0.0.1:8080: inbox, send buttons, approvals) is never exposed.
+One public page at **https://demo.rentus.homes**: how to try the leasing assistant (Messenger, SMS, email; any message gets an AI reply, no keyword), how it works, and live results. It is a separate FastAPI app; the private console (127.0.0.1:8080: inbox, send buttons, approvals) is never exposed.
 
 ## What the app serves
 
@@ -14,7 +14,7 @@ One public page at **https://demo.rentus.homes**: how to try the leasing assista
 
 Everything else is 404, including every non-GET method, `/api/live/*`, `/api/runs*`, `/api/status`, `/approve`, `/docs`. Strict CSP (`script-src 'self'`, `form-action 'none'`, `frame-ancestors 'none'`); the page has no forms and all data is rendered with `textContent`. If the console is down the Results section stays hidden.
 
-Displayed values: the Messenger link, the toll-free SMS number (only `TWILIO_PHONE_NUMBER` is read from `~/rental-management/.env.production`, validated as a phone number, or set `PUBLIC_SMS_NUMBER`), and the email address from `PUBLIC_DEMO_EMAIL` ("coming soon" until set). No other env value is read.
+Displayed values: the Messenger link, the toll-free SMS number (only `TWILIO_PHONE_NUMBER` is read from `~/rental-management/.env.production`, validated as a phone number, or set `PUBLIC_SMS_NUMBER`), and the email address from `PUBLIC_DEMO_EMAIL` (the Email card is hidden until it is set). No other env value is read.
 
 ## Run
 
