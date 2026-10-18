@@ -25,9 +25,31 @@ THREAD = {"thread_id": "T001", "channel": "marketplace", "renter_name": "Maria L
           "messages": [{"from": "renter", "text": "Hi, is the room still available?"}]}
 
 
+def _ev(summary, start, end, transparency=None, all_day=False):
+    if all_day:
+        ev = {"summary": summary, "start": {"date": start.isoformat()}, "end": {"date": end.isoformat()}}
+    else:
+        ev = {"summary": summary, "start": {"dateTime": start.isoformat()}, "end": {"dateTime": end.isoformat()}}
+    if transparency:
+        ev["transparency"] = transparency
+    return ev
+
+
 class FakeGoogle:
-    def __init__(self, busy=(), fail_insert=False):
+    """busy=[(start, end)] become plain opaque events; events=[...] are raw Google event dicts."""
+
+    def __init__(self, busy=(), fail_insert=False, events=()):
         self.busy, self.fail_insert, self.inserted, self.reads = list(busy), fail_insert, [], 0
+        self.events = [_ev("Dentist appointment", b0, b1) for b0, b1 in busy] + list(events)
+
+    def list_events(self, cal, t0, t1):
+        self.reads += 1
+        out = []
+        for e in self.events + [_ev(i["summary"], i["start"], i["end"]) for i in self.inserted]:
+            b = ca._event_bounds(e, TZ)
+            if b[0] < t1 and b[1] > t0:
+                out.append(e)
+        return out
 
     def freebusy(self, cals, t0, t1):
         self.reads += 1
@@ -122,3 +144,48 @@ def test_sandbox_mode_untouched(make_world):
     w.mode = "sandbox"
     rt.call(w, "find_showing_slots", {"room_id": "R023", "date_from": TOMORROW.isoformat(), "date_to": TOMORROW.isoformat()})
     assert fake.reads == 0 and fake.inserted == []
+
+
+def _slots(w, room="R023"):
+    res = rt.call(w, "find_showing_slots", {"room_id": room, "date_from": TOMORROW.isoformat(), "date_to": TOMORROW.isoformat()})
+    assert res["ok"], res
+    return [s["start"][11:16] for s in res["data"]["slots"]]
+
+
+def test_availability_block_is_the_window_not_a_busy_block(make_world):
+    # the owner's real shape: an opaque 08:00-20:00 "Available for showings" block plus one existing showing
+    fake = FakeGoogle(events=[_ev("Available for showings", _at(8), _at(20)),
+                              _ev("Showing with Lamarr", _at(13), _at(13, 30))])
+    w, _ = make_world(fake)
+    starts = _slots(w)
+    assert starts[0] == "08:00" and starts[-1] == "19:30" and len(starts) == 23 and "13:00" not in starts
+
+
+def test_slots_only_inside_availability_blocks_clipped_to_hours(make_world, monkeypatch):
+    monkeypatch.setenv("CHANNELS_SHOWINGS_AVAILABILITY_TITLE", "open house")
+    fake = FakeGoogle(events=[_ev("OPEN HOUSE window", _at(6), _at(9)), _ev("Open house", _at(15), _at(17)),
+                              _ev("PROPOSED: Showing with Ann", _at(16), _at(16, 30)),
+                              _ev("Available for showings", _at(10), _at(12))])  # not the configured title: busy
+    w, rid = make_world(fake)
+    assert _slots(w) == ["08:00", "08:30", "15:00", "15:30", "16:30"]
+    assert rt.call(w, "propose_showing", {"renter_id": rid, "room_id": "R023", "start": f"{TOMORROW}T12:30"})["error"]["code"] == "CONFLICT"
+    assert rt.call(w, "propose_showing", {"renter_id": rid, "room_id": "R023", "start": f"{TOMORROW}T15:00"})["ok"]
+    assert [i["summary"] for i in fake.inserted] == ["PROPOSED: Showing with Maria"]
+
+
+def test_transparent_all_day_events_do_not_block_but_opaque_ones_do(make_world):
+    nxt = TOMORROW + timedelta(days=1)
+    fake = FakeGoogle(events=[_ev("Holiday", TOMORROW, nxt, transparency="transparent", all_day=True),
+                              _ev("Free lunch", _at(12), _at(13), transparency="transparent")])
+    w, _ = make_world(fake)
+    assert len(_slots(w)) == 24  # no availability block: D29 default 08:00-20:00, nothing busy
+    fake.events.append(_ev("Out of town", TOMORROW, nxt, all_day=True))
+    assert _slots(w) == []
+
+
+def test_blocking_intervals_fall_back_to_hours_per_day():
+    cfg = ca.settings({"CHANNELS_SHOWINGS_TZ": "America/New_York"})
+    d2 = TOMORROW + timedelta(days=1)
+    win = [(_at(10), _at(12))]
+    blocks = ca.blocking_intervals(win, [], TOMORROW, d2, cfg)
+    assert blocks == [(_at(8), _at(10)), (_at(12), _at(20))]  # day 2 has no block: nothing added
