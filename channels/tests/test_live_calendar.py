@@ -36,11 +36,11 @@ def _ev(summary, start, end, transparency=None, all_day=False):
 
 
 class FakeGoogle:
-    """busy=[(start, end)] become plain opaque events; events=[...] are raw Google event dicts."""
+    """busy=[(start, end)] become existing showing events; events=[...] are raw Google event dicts."""
 
     def __init__(self, busy=(), fail_insert=False, events=()):
         self.busy, self.fail_insert, self.inserted, self.reads = list(busy), fail_insert, [], 0
-        self.events = [_ev("Dentist appointment", b0, b1) for b0, b1 in busy] + list(events)
+        self.events = [_ev("Showing with Bob", b0, b1) for b0, b1 in busy] + list(events)
 
     def list_events(self, cal, t0, t1):
         self.reads += 1
@@ -50,10 +50,6 @@ class FakeGoogle:
             if b[0] < t1 and b[1] > t0:
                 out.append(e)
         return out
-
-    def freebusy(self, cals, t0, t1):
-        self.reads += 1
-        return [(b0, b1) for b0, b1 in self.busy if b0 < t1 and b1 > t0]
 
     def insert_event(self, calendar_id, summary, start, end, description, tz):
         if self.fail_insert:
@@ -165,7 +161,7 @@ def test_slots_only_inside_availability_blocks_clipped_to_hours(make_world, monk
     monkeypatch.setenv("CHANNELS_SHOWINGS_AVAILABILITY_TITLE", "open house")
     fake = FakeGoogle(events=[_ev("OPEN HOUSE window", _at(6), _at(9)), _ev("Open house", _at(15), _at(17)),
                               _ev("PROPOSED: Showing with Ann", _at(16), _at(16, 30)),
-                              _ev("Available for showings", _at(10), _at(12))])  # not the configured title: busy
+                              _ev("Available for showings", _at(10), _at(12))])  # not the configured title, not a showing: ignored
     w, rid = make_world(fake)
     assert _slots(w) == ["08:00", "08:30", "15:00", "15:30", "16:30"]
     assert rt.call(w, "propose_showing", {"renter_id": rid, "room_id": "R023", "start": f"{TOMORROW}T12:30"})["error"]["code"] == "CONFLICT"
@@ -173,14 +169,18 @@ def test_slots_only_inside_availability_blocks_clipped_to_hours(make_world, monk
     assert [i["summary"] for i in fake.inserted] == ["PROPOSED: Showing with Maria"]
 
 
-def test_transparent_all_day_events_do_not_block_but_opaque_ones_do(make_world):
+def test_owner_other_events_are_ignored_only_showings_block(make_world, monkeypatch):
+    # R-SHOW-3: the owner's other meetings never block; extra calendars are not read at all
+    monkeypatch.setenv("CHANNELS_SHOWINGS_BUSY_CALENDAR_IDS", "other@group.calendar.google.com")
     nxt = TOMORROW + timedelta(days=1)
-    fake = FakeGoogle(events=[_ev("Holiday", TOMORROW, nxt, transparency="transparent", all_day=True),
-                              _ev("Free lunch", _at(12), _at(13), transparency="transparent")])
+    fake = FakeGoogle(events=[_ev("Out of town", TOMORROW, nxt, all_day=True), _ev("Dentist", _at(9), _at(11)),
+                              _ev("Holiday", TOMORROW, nxt, transparency="transparent", all_day=True)])
     w, _ = make_world(fake)
-    assert len(_slots(w)) == 24  # no availability block: D29 default 08:00-20:00, nothing busy
-    fake.events.append(_ev("Out of town", TOMORROW, nxt, all_day=True))
-    assert _slots(w) == []
+    assert len(_slots(w)) == 24 and fake.reads == 1  # no availability block: D29 default 08:00-20:00
+    fake.events += [_ev("PROPOSED: Showing with Ann", _at(12), _at(12, 30)), _ev("Showing with Lamarr", _at(18), _at(19))]
+    starts = _slots(w)
+    assert len(starts) == 21 and "12:00" not in starts and "18:30" not in starts and "09:00" in starts
+    assert ca.settings()["read"] == ["owner-showings@group.calendar.google.com"]
 
 
 def test_blocking_intervals_fall_back_to_hours_per_day():

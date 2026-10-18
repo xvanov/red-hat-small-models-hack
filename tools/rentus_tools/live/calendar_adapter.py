@@ -8,11 +8,11 @@ With world.mode == "live":
                        "Available for showings" (CHANNELS_SHOWINGS_AVAILABILITY_TITLE, case-insensitive) are
                        the allowed windows, clipped to showing hours 08:00-20:00 (CHANNELS_SHOWINGS_HOURS); a
                        day with no availability block falls back to the full showing hours (D29 default).
-                       Transparent ("free") events never block; every other event (other showings, incl.
-                       "PROPOSED: Showing ...", and anything else) is busy, as is every free/busy block on the
-                       extra CHANNELS_SHOWINGS_BUSY_CALENDAR_IDS. Busy counts for every room: the owner can't
-                       be at two showings. The clock is the real America/New_York time.
-  propose_showing      runs every sandbox check (gate, occupants, hours, overlaps incl. Google busy), re-checks
+                       Only showing events block (title has the word "showing": "PROPOSED: Showing ...",
+                       "Showing with ...", confirmed showings); the owner's other events and other calendars
+                       are ignored (spec R-SHOW-3). A showing blocks every room: the owner can't be at two
+                       showings. The clock is the real America/New_York time.
+  propose_showing      runs every sandbox check (gate, occupants, hours, overlaps incl. Google showings), re-checks
                        the slot on Google, then creates ONE event "PROPOSED: Showing with <first name>" on
                        CHANNELS_SHOWINGS_CALENDAR_ID. No attendees, sendUpdates=none, so nobody is invited or
                        emailed. If that var is unset nothing is written anywhere (calendar.status "not_written").
@@ -21,8 +21,7 @@ With world.mode == "live":
 In sandbox mode the wrappers do nothing.
 
 Env (values are never printed):
-  CHANNELS_SHOWINGS_CALENDAR_ID       the only calendar events are ever created on; also read for free/busy
-  CHANNELS_SHOWINGS_BUSY_CALENDAR_IDS optional comma list of extra calendars read for free/busy only
+  CHANNELS_SHOWINGS_CALENDAR_ID       the only calendar read (events.list) and the only one events are ever created on
   CHANNELS_SHOWINGS_AVAILABILITY_TITLE  default "Available for showings" (substring, case-insensitive)
   CHANNELS_SHOWINGS_HOURS             default "08:00-20:00"; CHANNELS_SHOWINGS_SLOT_MINUTES default 30
   CHANNELS_SHOWINGS_TZ                default "America/New_York"
@@ -37,6 +36,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import os
 import sys
 import time
@@ -74,9 +74,8 @@ def settings(env: dict | None = None) -> dict:
     env = dict(os.environ if env is None else env)
     hours = env.get("CHANNELS_SHOWINGS_HOURS", "08:00-20:00")
     start, end = hours.split("-")
-    busy_extra = [c.strip() for c in env.get("CHANNELS_SHOWINGS_BUSY_CALENDAR_IDS", "").split(",") if c.strip()]
     target = env.get("CHANNELS_SHOWINGS_CALENDAR_ID", "").strip()
-    return {"target": target, "read": ([target] if target else []) + [c for c in busy_extra if c != target],
+    return {"target": target, "read": [target] if target else [],
             "start": start.strip(), "end": end.strip(), "slot_minutes": int(env.get("CHANNELS_SHOWINGS_SLOT_MINUTES", 30)),
             "tz": env.get("CHANNELS_SHOWINGS_TZ", "America/New_York"),
             "availability_title": (env.get("CHANNELS_SHOWINGS_AVAILABILITY_TITLE") or "Available for showings").strip()}
@@ -150,23 +149,6 @@ class GoogleCalendar:
         return self._request(method, API + path, body, {"Authorization": f"Bearer {self._token(scope)}",
                                                         "Content-Type": "application/json"})
 
-    def freebusy(self, calendar_ids: list[str], t0: datetime, t1: datetime) -> list[tuple[datetime, datetime]]:
-        """Busy intervals (aware, UTC) across the calendars. Raises ToolError if any calendar can't be read."""
-        data = self._api("POST", "/freeBusy", SCOPE_READ, {
-            "timeMin": t0.astimezone(timezone.utc).isoformat(), "timeMax": t1.astimezone(timezone.utc).isoformat(),
-            "items": [{"id": c} for c in calendar_ids]})
-        busy, bad = [], []
-        for cid, cal in (data.get("calendars") or {}).items():
-            if cal.get("errors"):
-                bad.append(cal["errors"][0].get("reason", "error"))
-            for b in cal.get("busy", []):
-                busy.append((_parse_rfc3339(b["start"]), _parse_rfc3339(b["end"])))
-        if bad:
-            raise ToolError("UPSTREAM_ERROR", f"Google Calendar free/busy refused {len(bad)} calendar(s): {', '.join(sorted(set(bad)))}",
-                            hint="share the calendar with the service account (at least 'See all event details')",
-                            details={"service_account_domain": self.client_email.split("@")[-1]})
-        return busy
-
     def list_events(self, calendar_id: str, t0: datetime, t1: datetime) -> list[dict]:
         """Raw single (expanded) events overlapping [t0, t1) on one calendar (read-only)."""
         cid = urllib.parse.quote(calendar_id, safe="")
@@ -206,8 +188,13 @@ def _event_bounds(ev: dict, tz: ZoneInfo) -> tuple[datetime, datetime, bool] | N
     return None
 
 
+SHOWING_RE = re.compile(r"\bshowing\b", re.IGNORECASE)  # "Showing with X", "PROPOSED: Showing ..."; not "showings"
+
+
 def classify_events(events: list[dict], cfg: dict) -> tuple[list, list]:
-    """(availability windows, busy intervals), aware. Cancelled and transparent events are ignored."""
+    """(availability windows, showing intervals), aware. Availability-titled events are windows; events whose
+    title has the word "showing" are busy; everything else (the owner's other events) is ignored (R-SHOW-3).
+    Cancelled events are ignored."""
     tz, title = ZoneInfo(cfg["tz"]), cfg.get("availability_title", "Available for showings").lower()
     windows, busy = [], []
     for ev in events:
@@ -216,9 +203,10 @@ def classify_events(events: list[dict], cfg: dict) -> tuple[list, list]:
         b = _event_bounds(ev, tz)
         if b is None:
             continue
-        if title and title in (ev.get("summary") or "").lower():
+        summary = ev.get("summary") or ""
+        if title and title in summary.lower():
             windows.append(b[:2])
-        elif ev.get("transparency") != "transparent":
+        elif SHOWING_RE.search(summary):
             busy.append(b[:2])
     return windows, busy
 
@@ -250,17 +238,12 @@ def blocking_intervals(windows, busy, d0: date, d1: date, cfg: dict) -> list[tup
     return out
 
 
-def owner_blocks(client, cfg: dict, t0: datetime, t1: datetime, calendars: list[str] | None = None) -> dict:
-    """Read the owner's calendars for [t0, t1) and return {'blocks', 'busy', 'windows'} (aware intervals).
-    The first calendar (the showings calendar) is read as events so availability blocks can be told apart;
-    any extra calendars are free/busy only (all busy)."""
-    cals = list(cfg["read"] if calendars is None else calendars)
+def owner_blocks(client, cfg: dict, t0: datetime, t1: datetime, calendar: str | None = None) -> dict:
+    """Read the showings calendar for [t0, t1) and return {'blocks', 'busy', 'windows'} (aware intervals)."""
+    cal = calendar or cfg["target"]
     windows, busy = [], []
-    if cals:
-        w, b = classify_events(client.list_events(cals[0], t0, t1), cfg)
-        windows, busy = w, b
-        if cals[1:]:
-            busy += client.freebusy(cals[1:], t0, t1)
+    if cal:
+        windows, busy = classify_events(client.list_events(cal, t0, t1), cfg)
     tz = ZoneInfo(cfg["tz"])
     last = (t1 - timedelta(microseconds=1)).astimezone(tz).date()
     blocks = blocking_intervals(windows, busy, t0.astimezone(tz).date(), last, cfg)
@@ -294,7 +277,7 @@ def _client():
 
 
 def _live_context(world, cfg, d0: datetime, d1: datetime):
-    """Swap in live hours + real clock and inject Google busy blocks as temporary events for every room.
+    """Swap in live hours + real clock and inject Google blocks (showings + time outside availability windows) as temporary events for every room.
     Returns a restore() callable."""
     tz = ZoneInfo(cfg["tz"])
     saved = {"hours": world.policy.get("showing_hours"), "now": world.clock["now"], "n": len(world.calendar)}
@@ -432,20 +415,20 @@ def main(argv: list[str]) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("slots", help="list free showing slots (read-only)")
     s.add_argument("--date", help="YYYY-MM-DD, default tomorrow")
-    s.add_argument("--calendar", action="append", help="calendar id to read (read-only); default from env")
+    s.add_argument("--calendar", help="calendar id to read (read-only); default CHANNELS_SHOWINGS_CALENDAR_ID")
     a = p.parse_args(argv)
     cfg = settings()
     tz = ZoneInfo(cfg["tz"])
     day = date.fromisoformat(a.date) if a.date else datetime.now(tz).date() + timedelta(days=1)
-    cals = a.calendar or cfg["read"]
+    cal = a.calendar or cfg["target"]
     out = {"date": day.isoformat(), "hours": f"{cfg['start']}-{cfg['end']}", "timezone": cfg["tz"],
-           "calendars_read": len(cals), "writes_enabled": bool(cfg["target"])}
+           "calendars_read": 1 if cal else 0, "writes_enabled": bool(cfg["target"])}
     busy, ob = [], {"busy": [], "windows": []}
-    if cals:
+    if cal:
         try:
             gc = GoogleCalendar.from_env()
             t0 = datetime(day.year, day.month, day.day, tzinfo=tz)
-            ob = owner_blocks(gc, cfg, t0, t0 + timedelta(days=1), cals)
+            ob = owner_blocks(gc, cfg, t0, t0 + timedelta(days=1), cal)
             busy = ob["blocks"]
         except (ToolError, CalendarNotConfigured) as e:
             out["error"] = e.envelope()["error"] if isinstance(e, ToolError) else str(e)
@@ -454,8 +437,8 @@ def main(argv: list[str]) -> int:
     else:
         out["warning"] = "no calendar to read: set CHANNELS_SHOWINGS_CALENDAR_ID (or pass --calendar)"
     slots = free_slots(busy, day, cfg, datetime.now(tz))
-    out.update({"availability_blocks": len(ob["windows"]), "busy_events": len(ob["busy"]),
-                "default_hours_used": bool(cals) and not ob["windows"], "free_slots": len(slots), "slots": [x["start"][11:16] for x in slots]})
+    out.update({"availability_blocks": len(ob["windows"]), "showing_events": len(ob["busy"]),
+                "default_hours_used": bool(cal) and not ob["windows"], "free_slots": len(slots), "slots": [x["start"][11:16] for x in slots]})
     print(json.dumps(out, indent=2))
     return 0
 
