@@ -31,7 +31,8 @@ def _free_port() -> int:
 def base(tmp_path_factory):
     port = _free_port()
     runs = tmp_path_factory.mktemp("runs")
-    env = {**os.environ, "CONSOLE_FORCE_STUB": "1", "OPERATOR_BASE_URL": "", "CONSOLE_RUNS_DIR": str(runs)}
+    env = {**os.environ, "CONSOLE_FORCE_STUB": "1", "OPERATOR_BASE_URL": "", "CONSOLE_RUNS_DIR": str(runs),
+           "CONSOLE_LIVE_MODULE": "console.tests.fake_live"}
     proc = subprocess.Popen([sys.executable, "-m", "uvicorn", "console.app:app", "--port", str(port),
                              "--log-level", "warning"], cwd=REPO, env=env)
     url = f"http://127.0.0.1:{port}"
@@ -180,3 +181,58 @@ def test_evidence_panels_and_phone_view(base):
     assert httpx.post(base + "/api/demo", json={}).status_code == 409
     assert httpx.post(base + "/api/reset").json()["ok"] is True
     assert httpx.get(base + "/api/status").json()["active_run"] is None
+
+
+def test_live_channels_api(base):
+    """The /api/live/* wrappers over channels.live.api (here the in-memory fake)."""
+    base, _ = base
+    st = httpx.get(base + "/api/live/status").json()
+    assert st["available"] and {c["channel"] for c in st["channels"]} >= {"messenger", "sms"}
+    th = httpx.get(base + "/api/live/threads").json()
+    assert th["available"] and len(th["items"]) >= 2
+    assert all(set(t["gate"]) == {"lease", "move_in", "phone", "reason", "people"} for t in th["items"])
+    t = httpx.get(base + "/api/live/threads/t_test_sam").json()
+    assert t["messages"] and t["trace"]
+    assert httpx.get(base + "/api/live/threads/nope").status_code == 404
+    assert httpx.post(base + "/api/live/threads/t_test_lee/reply", json={"text": "See you Saturday."}).json()["ok"]
+    assert httpx.get(base + "/api/live/threads/t_test_lee").json()["messages"][-1]["text"] == "See you Saturday."
+    ap = httpx.get(base + "/api/live/approvals").json()["items"]
+    live = [a for a in ap if a["source"] == "live"]
+    assert {a["id"] for a in live} >= {"ap_1", "ap_2"}
+    assert httpx.post(base + "/api/live/approvals/ap_1", json={"decision": "edit"}).status_code == 400
+    assert httpx.post(base + "/api/live/approvals/ap_1", json={"decision": "edit", "text": "Rent is $750, firm."}).json()["ok"]
+    assert httpx.get(base + "/api/live/threads/t_test_sam").json()["messages"][-1]["text"] == "Rent is $750, firm."
+    assert httpx.post(base + "/api/live/approvals/ap_2", json={"decision": "deny"}).json()["ok"]
+    assert not [a for a in httpx.get(base + "/api/live/approvals").json()["items"] if a["source"] == "live"]
+    c = httpx.post(base + "/api/live/conversations", json={"channel": "sms", "to": "+15550000", "text": "Hi"}).json()
+    assert c["ok"] and c["result"]["thread_id"]
+    assert httpx.post(base + "/api/live/conversations", json={"channel": "sms"}).status_code == 400
+
+
+def test_live_unavailable_degrades(tmp_path):
+    """No live module: every /api/live endpoint answers cleanly instead of failing."""
+    port = _free_port()
+    env = {**os.environ, "CONSOLE_FORCE_STUB": "1", "OPERATOR_BASE_URL": "", "CONSOLE_RUNS_DIR": str(tmp_path),
+           "CONSOLE_LIVE_MODULE": "no_such_live_module"}
+    proc = subprocess.Popen([sys.executable, "-m", "uvicorn", "console.app:app", "--port", str(port), "--log-level", "warning"],
+                            cwd=REPO, env=env)
+    url = f"http://127.0.0.1:{port}"
+    try:
+        assert _wait(lambda: _ok(url + "/api/status"), 20)
+        st = httpx.get(url + "/api/live/status").json()
+        assert st["available"] is False and st["error"]
+        th = httpx.get(url + "/api/live/threads").json()
+        assert th["available"] is False and th["items"] == []
+        assert httpx.get(url + "/api/live/approvals").json()["items"] == []
+        assert httpx.get(url + "/api/live/threads/x").status_code == 503
+        assert "Needs you" in httpx.get(url + "/approve").text
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+def _ok(u):
+    try:
+        return httpx.get(u, timeout=0.5).status_code == 200
+    except httpx.HTTPError:
+        return False

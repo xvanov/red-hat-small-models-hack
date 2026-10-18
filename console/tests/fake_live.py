@@ -44,8 +44,18 @@ THREADS: dict[str, dict] = {
         ],
         "trace": [{"ts": _ts(118), "actor": "tool", "name": "send_message", "summary": "sent via sms", "ok": True}],
     },
+    "t_test_mp": {
+        "thread_id": "t_test_mp", "channel": "messenger_personal", "contact_display": "Alex Test", "renter_name": "Alex",
+        "stage": "inquiry", "unread": True, "needs_owner": True, "gate": {"people": "exact"},
+        "messages": [
+            {"id": "m6", "direction": "in", "text": "Is this still available?", "ts": _ts(2), "status": "received", "channel": "messenger_personal"},
+            {"id": "m7", "direction": "out", "text": "Hi Alex, yes it is! When are you hoping to move in?", "ts": _ts(1), "status": "awaiting_approval", "channel": "messenger_personal"},
+        ],
+        "trace": [{"ts": _ts(1), "actor": "operator", "name": "send_message", "summary": "drafted a reply (Marketplace replies need approval)", "ok": True}],
+    },
 }
 APPROVALS: dict[str, dict] = {
+    "ap_2": {"id": "ap_2", "thread_id": "t_test_mp", "reason": "Marketplace reply", "draft_text": "Hi Alex, yes it is! When are you hoping to move in?", "created": _ts(1)},
     "ap_1": {"id": "ap_1", "thread_id": "t_test_sam", "reason": "Asked for $700 instead of $750",
              "draft_text": "Thanks Sam. The rent is $750 a month; I can check with the owner about anything else.", "created": _ts(5)},
 }
@@ -89,8 +99,12 @@ def decide(approval_id, decision, text=None):
         if not a:
             raise KeyError(approval_id)
         DECISIONS.append((approval_id, decision, text))
+        if decision == "deny":
+            t = THREADS[a["thread_id"]]
+            t["messages"] = [m for m in t["messages"] if m["status"] != "awaiting_approval"]
         if decision != "deny":
             t = THREADS[a["thread_id"]]
+            t["messages"] = [m for m in t["messages"] if m["status"] != "awaiting_approval"]
             t["messages"].append({"id": f"m{next(_IDS)}", "direction": "out", "text": text or a["draft_text"], "ts": _ts(0),
                                   "status": "sent", "channel": t["channel"]})
             t["needs_owner"] = False

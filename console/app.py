@@ -500,8 +500,11 @@ def live_approvals():
         if not isinstance(a, dict):
             continue
         t = names.get(a.get("thread_id")) or {}
-        items.append({**a, "source": "live", "who": a.get("who") or t.get("contact_display") or t.get("renter_name"),
-                      "channel": a.get("channel") or t.get("channel"), "last_message": a.get("last_message") or t.get("last_text")})
+        last = a.get("last_message") or t.get("last_text")
+        if last and (last.strip() == (a.get("draft_text") or "").strip()):
+            last = None  # the thread's last line is the draft itself
+        items.append({**a, "source": "live", "who": a.get("who") or t.get("renter_name") or t.get("contact_display"),
+                      "channel": a.get("channel") or t.get("channel"), "last_message": last})
     items += _run_approvals()
     return {"available": err is None, "error": err, "items": items}
 

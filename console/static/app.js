@@ -555,7 +555,7 @@ function onRunEvent(e) {
     return;
   }
   if (e.type === "owner_message" && e.actor === "operator") { t.reply = t.reply || d.summary || d.text; return; }
-  if (d.thread_id && e.type !== "escalation") return; // renter conversations are not part of the owner's chat
+  if (t.done || (d.thread_id && e.type !== "escalation")) return; // renter conversations are not part of the owner's chat
   if (e.type === "tool_call") {
     const s = { kind: "tool", actor: e.actor === "verifier" ? "verifier" : "operator", name: d.tool, args: d.args, ok: null, ts: e.ts };
     t.steps.push(s);
