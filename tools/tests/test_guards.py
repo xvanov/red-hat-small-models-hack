@@ -64,7 +64,7 @@ def test_send_message_blocks_claim_without_confirmed_event(world):
     e = call_err(world, "send_message", {"thread_id": "T001", "text": "Your showing is confirmed for Saturday at 11 AM."},
                  "POLICY_BLOCKED")
     assert e["details"]["rules"] == ["showing_not_confirmed"]
-    assert "pending" in e["hint"]
+    assert "confirm it shortly" in e["hint"] and "owner" not in e["hint"]
     _with_showing(world, "proposed")  # proposed is still not confirmed
     call_err(world, "send_message", {"thread_id": "T001", "text": "See you Saturday at 11."}, "POLICY_BLOCKED")
     call_ok(world, "send_message", {"thread_id": "T001",
