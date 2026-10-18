@@ -168,13 +168,19 @@ class ResendGmailEmail:
         return True, f"sends as {self.cfg.from_addr} (Resend); replies read over IMAP"
 
     def send(self, to: str, text: str, *, subject: str, in_reply_to: str | None = None,
-             references: list[str] | None = None) -> dict:
+             references: list[str] | None = None, html: str | None = None,
+             extra_headers: dict | None = None) -> dict:
         payload = {"from": f"{self.cfg.from_name} <{self.cfg.from_addr}>", "to": [to], "subject": subject,
                    "text": text, "reply_to": self.cfg.reply_to}
-        headers = {}
+        if html:
+            payload["html"] = html
+        headers = dict(extra_headers or {})
         if in_reply_to:
+            refs = [r for r in (references or []) if r]
+            if in_reply_to not in refs:
+                refs.append(in_reply_to)
             headers["In-Reply-To"] = in_reply_to
-            headers["References"] = " ".join((references or [])[-10:] or [in_reply_to])
+            headers["References"] = " ".join(refs[-20:])
         if headers:
             payload["headers"] = headers
         try:
@@ -241,6 +247,26 @@ class ResendGmailEmail:
                 "line_last4": None, "renter_name": (getaddresses(msg.get_all("From", []))[0][0] or None),
                 "meta": {"subject": subj, "message_id": mid, "references": refs,
                          "in_reply_to": str(msg.get("In-Reply-To", "")).strip()}}
+
+    def gmail_thread_ids(self, header: str, value: str) -> list[str]:
+        """X-GM-THRID of the messages whose <header> contains <value> (Gmail conversation ids)."""
+        c = self.imap_factory()
+        try:
+            c.login(self.cfg.imap_user, self.cfg.imap_pass)
+            c.select(self.FOLDER, readonly=True)
+            typ, data = c.uid("SEARCH", None, "HEADER", header, f'"{value}"')
+            out = []
+            for uid in ((data[0] or b"").split() if typ == "OK" else []):
+                typ, parts = c.uid("FETCH", uid, "(X-GM-THRID)")
+                m = re.search(rb"X-GM-THRID (\d+)", b" ".join(p if isinstance(p, bytes) else p[0] for p in parts or []))
+                if m:
+                    out.append(m.group(1).decode())
+            return out
+        finally:
+            try:
+                c.logout()
+            except Exception:
+                pass
 
     def find_delivered(self, ref_tag: str, since: datetime) -> bool:
         """Delivery check for the test inbox: our message with this [ref] tag arrived in GMAIL_USER's mail."""

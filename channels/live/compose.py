@@ -123,8 +123,12 @@ def compose(texts: list[str], channel: str, renter_text: str = "") -> list[str]:
     sents = merge(texts, renter_text)
     if not sents:
         return []
-    if channel == "email":
-        return ["\n\n".join([" ".join(sents[:-1]), sents[-1]]).strip() if len(sents) > 1 else sents[0]]
+    if channel == "email":  # one email, no length limit: statements, each link line, the question
+        q = [x for x in sents if x.rstrip().endswith("?")]
+        links = [x for x in sents if "http" in x and x not in q]
+        rest = [x for x in sents if x not in q and x not in links]
+        paras = [" ".join(rest)] + links + q
+        return ["\n\n".join(p_ for p_ in paras if p_).strip()]
     if channel == "sms":
         return _pack(sents, SMS_MAX, 2)
     return _pack(sents, MSGR_MAX, 2)
@@ -134,3 +138,46 @@ LIVE_NOTE = """## Live channel (real renter, real phone)
 - Answer the renter's actual question first, in the first sentence (for example the rent amount if they asked about rent). Then ask exactly one qualifying question that has not been answered yet. Never repeat a question in the same reply.
 - Your send_message calls in this turn are combined into ONE reply to the renter, so do not repeat facts or questions across them.
 - Before replying to anything the renter states, record it: `read_reply` on their message, then `upsert_renter` with every answered gate item (lease, move_in, phone, reason, occupants) and `capture_demand` with new criteria."""
+
+
+# ---------------------------------------------------------------- email: a human-looking message
+
+def _first_name(t: dict) -> str:
+    n = (t.get("renter_name") or "").strip().split(" ")[0]
+    return n if n and "@" not in n and n.lower() not in ("a", "renter") else ""
+
+
+def email_body(t: dict, text: str, signoff: str = "Kalin\nRentus Homes") -> tuple[str, str]:
+    """(plain, html): greeting with the first name, the reply, a sign-off, and the renter's last message quoted
+    ("On <date>, <name> wrote:" with > lines)."""
+    import html as _h
+    from datetime import datetime
+    name = _first_name(t)
+    greeting = f"Hi {name}," if name else "Hi,"
+    plain = f"{greeting}\n\n{text.strip()}\n\nBest,\n{signoff}\n"
+    last = next((m for m in reversed(t.get("messages", [])) if m.get("direction") == "in"), None)
+    quote_plain = quote_html = ""
+    if last and (last.get("text") or "").strip():
+        try:
+            d = datetime.fromisoformat(str(last.get("ts")).replace("Z", "+00:00"))
+            when = d.strftime("%a, %b %-d, %Y at %-I:%M %p")
+        except (TypeError, ValueError):
+            when = "an earlier date"
+        who = (t.get("renter_name") or "").strip() or t.get("contact", "")
+        if t.get("contact") and "@" in t["contact"] and t["contact"] not in who:
+            who = f"{who} <{t['contact']}>".strip()
+        header = f"On {when}, {who} wrote:"
+        quote_plain = "\n" + header + "\n" + "\n".join("> " + ln for ln in last["text"].strip().splitlines()) + "\n"
+        quote_html = (f'<div class="gmail_quote"><div>{_h.escape(header)}</div><blockquote style="margin:0 0 0 .8ex;'
+                      f'border-left:1px solid #ccc;padding-left:1ex">{_h.escape(last["text"].strip()).replace(chr(10), "<br>")}'
+                      "</blockquote></div>")
+    paras = [greeting] + [p for p in text.strip().split("\n\n") if p.strip()]
+
+    def _p(x: str) -> str:
+        e = _h.escape(x)
+        return __import__("re").sub(r"(https?://[^\s<]+)", r'<a href="\1">\1</a>', e)
+
+    html = ("<div style=\"font-family:Arial,sans-serif;font-size:14px\">"
+            + "".join(f"<p>{_p(x)}</p>" for x in paras)
+            + "<p>Best,<br>" + "<br>".join(_h.escape(x) for x in signoff.split("\n")) + "</p></div>" + quote_html)
+    return plain + quote_plain, html

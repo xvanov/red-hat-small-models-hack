@@ -6,6 +6,7 @@ honors the kill switch, the rate cap, opt-outs and the allowlist.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 from . import config, providers
@@ -34,14 +35,21 @@ def email_ref(t: dict) -> str:
     return short_hash(t["thread_id"])[:6]
 
 
+FIRST_SUBJECT = "Your room at Appling Way \u2013 next steps"
+_REF_TAG = re.compile(r"\s*\[ref [0-9a-f]{6,10}\]")
+
+
 def email_subject(t: dict) -> str:
-    ref = f"[ref {email_ref(t)}]"
-    subj = (t.get("email") or {}).get("subject")
+    """Gmail threads by subject + References: replies use "Re: " + the conversation's subject (no tags)."""
+    subj = _REF_TAG.sub("", (t.get("email") or {}).get("subject") or "").strip()
+    while subj.lower().startswith(("re:", "fwd:", "fw:")):
+        subj = subj.split(":", 1)[1].strip()
+    has_history = any(m["direction"] == "in" or m.get("status") == "sent" for m in t.get("messages", []))
     if not subj:
-        return f"Rentus Homes: your room inquiry {ref}"
-    if not subj.lower().startswith("re:"):
-        subj = "Re: " + subj
-    return subj if ref in subj else f"{subj} {ref}"
+        subj = FIRST_SUBJECT
+        if not has_history:
+            return subj
+    return "Re: " + subj if has_history else subj
 
 
 def _gate(store: Store, t: dict, allow: config.Allowlist, *, skip_allowlist: bool = False) -> str | None:
@@ -73,10 +81,13 @@ def _provider_send(t: dict, text: str) -> dict:
         prov = p.get("email")
         if prov is None:
             return {"ok": False, "status": "failed", "error": "email not configured"}
+        from . import compose
         last_in = next((m for m in reversed(t["messages"]) if m["direction"] == "in" and m.get("ext_id")), None)
         em = t.get("email") or {}
-        return prov.send(t["contact"], text, subject=email_subject(t),
-                         in_reply_to=last_in["ext_id"] if last_in else None, references=em.get("references"))
+        plain, html = compose.email_body(t, text, signoff=config.env("LIVE_EMAIL_SIGNOFF") or "Kalin\nRentus Homes")
+        return prov.send(t["contact"], plain, subject=email_subject(t), html=html,
+                         in_reply_to=last_in["ext_id"] if last_in else None, references=em.get("references"),
+                         extra_headers={"X-Rentus-Ref": f"{email_ref(t)}-{t.get('_send_id', '')}".rstrip("-")})
     from . import registry
     if ch in registry.EXTRA:
         try:
@@ -129,7 +140,9 @@ def deliver(store: Store, thread_id: str, text: str, *, origin: str, approved: b
                         "line": t.get("line"), "origin": origin})
         store.save_thread(t)
         snapshot = {k: t.get(k) for k in ("channel", "line", "contact", "email", "thread_id")}
-        snapshot["messages"] = list(t["messages"])
+        snapshot["messages"] = [m for m in t["messages"] if m["id"] != msg["id"]]
+        snapshot["renter_name"] = t.get("renter_name")
+        snapshot["_send_id"] = msg["id"]
     try:
         res = _provider_send(snapshot, text)
     except Exception as e:  # providers should not raise; never leave a message stuck in "sending"
@@ -148,6 +161,7 @@ def deliver(store: Store, thread_id: str, text: str, *, origin: str, approved: b
             msg["error"] = f"{res.get('error_code') or ''} {res.get('error') or ''}".strip()[:200]
         if t["channel"] == "email" and res.get("ok"):
             t.setdefault("email", {})["subject"] = email_subject(t).removeprefix("Re: ")
+            t["email"]["last_ref"] = f"{email_ref(t)}-{msg['id']}"
         if origin == "owner" and res.get("ok"):
             t.setdefault("owner_pending", []).append({"id": msg["id"], "text": text, "ts": msg["ts"]})
         store.save_thread(t)

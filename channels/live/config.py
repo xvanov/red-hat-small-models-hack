@@ -168,7 +168,7 @@ def email_cfg() -> EmailCfg | None:
     frm = env("LIVE_EMAIL_FROM") or e.get("RESEND_FROM_EMAIL") or "info@rentus.homes"
     user = e["GMAIL_USER"]
     reply_to = env("LIVE_EMAIL_REPLY_TO") or (user.split("@")[0] + "+rentus@" + user.split("@")[1])
-    return EmailCfg(e["RESEND_KEY"], frm, e.get("RESEND_FROM_NAME") or "Rentus Homes", reply_to, user, e["GMAIL_PASS"])
+    return EmailCfg(e["RESEND_KEY"], frm, env("LIVE_EMAIL_FROM_NAME") or "Rentus Homes", reply_to, user, e["GMAIL_PASS"])
 
 
 def send_enabled() -> bool:

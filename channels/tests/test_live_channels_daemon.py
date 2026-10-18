@@ -65,8 +65,9 @@ class FakeEmail:
     def poll(self, allow, since, seen):
         return [m for m in self.inbox if m["ext_id"] not in seen]
 
-    def send(self, to, text, *, subject, in_reply_to=None, references=None):
-        self.sent.append({"to": to, "text": text, "subject": subject, "in_reply_to": in_reply_to})
+    def send(self, to, text, *, subject, in_reply_to=None, references=None, html=None, extra_headers=None):
+        self.sent.append({"to": to, "text": text, "subject": subject, "in_reply_to": in_reply_to,
+                          "references": references, "html": html, "headers": extra_headers})
         return {"ok": True, "provider_id": f"em{len(self.sent)}", "status": "accepted"}
 
 
@@ -121,18 +122,34 @@ def test_threading_per_line_and_contact_and_restart(env):
 def test_email_reply_threads_and_keeps_subject(env):
     r = api.start_conversation("email", OWNER_EMAIL, "Hi, this is Rentus Homes testing our assistant.")
     assert r["status"] == "sent"
-    first_subject = env["email"].sent[0]["subject"]
-    assert "[ref " in first_subject
+    first = env["email"].sent[0]
+    assert first["subject"] == "Your room at Appling Way \u2013 next steps" and "[ref" not in first["subject"]
+    assert first["in_reply_to"] is None and first["headers"]["X-Rentus-Ref"]
     env["email"].inbox.append({"channel": "email", "contact": OWNER_EMAIL, "text": "Is the room available?",
-                               "ext_id": "<abc@mail.gmail.com>", "ts": None, "line": "info@rentus.homes",
-                               "line_last4": None, "renter_name": "Owner",
-                               "meta": {"subject": "Re: " + first_subject, "message_id": "<abc@mail.gmail.com>",
-                                        "references": []}})
+                               "ext_id": "<abc@mail.gmail.com>", "ts": "2026-10-18T08:10:00-04:00",
+                               "line": "info@rentus.homes", "line_last4": None, "renter_name": "Kalin Ivanov",
+                               "meta": {"subject": "Re: " + first["subject"], "message_id": "<abc@mail.gmail.com>",
+                                        "references": ["<first@resend>"]}})
     daemon.poll_all(env["store"])
     assert len(api.list_threads()) == 1
-    api.send_owner_message(r["thread_id"], "Yes it is.")
+    api.send_owner_message(r["thread_id"], "Yes it is.\n\nHere's the link to complete your application: https://x.test/apply")
     last = env["email"].sent[-1]
-    assert last["subject"] == "Re: " + first_subject and last["in_reply_to"] == "<abc@mail.gmail.com>"
+    assert last["subject"] == "Re: " + first["subject"] and last["in_reply_to"] == "<abc@mail.gmail.com>"
+    assert last["references"] == ["<first@resend>", "<abc@mail.gmail.com>"]
+    body = last["text"]
+    assert body.startswith("Hi Kalin,\n\nYes it is.") and "Best,\nKalin\nRentus Homes" in body
+    assert "wrote:\n> Is the room available?" in body and "On Sun, Oct 18, 2026 at 8:10 AM, Kalin Ivanov" in body
+    assert '<a href="https://x.test/apply">' in last["html"] and "<blockquote" in last["html"]
+
+
+def test_new_email_from_renter_keeps_their_subject(env):
+    env["email"].inbox.append({"channel": "email", "contact": OWNER_EMAIL, "text": "Ready to sign",
+                               "ext_id": "<m1@mail>", "ts": None, "line": "info@rentus.homes", "line_last4": None,
+                               "renter_name": "Kalin", "meta": {"subject": "Lease", "message_id": "<m1@mail>",
+                                                                "references": []}})
+    daemon.poll_all(env["store"])
+    api.send_owner_message(api.list_threads()[0]["thread_id"], "Sure.")
+    assert env["email"].sent[-1]["subject"] == "Re: Lease"
 
 
 def test_start_conversation_refuses_non_allowlisted(env):
@@ -545,7 +562,8 @@ def test_lease_signing_tool_adds_link_to_one_email(env, monkeypatch):
     daemon.run_turn(env["store"], s["thread_id"], runner=runner)
     assert len(env["email"].sent) == 1
     body = env["email"].sent[0]["text"]
-    assert body == "Here's the link to review and sign your lease: https://app.rentus.homes/sign/TESTTOKEN"
+    assert "Here's the link to review and sign your lease: https://app.rentus.homes/sign/TESTTOKEN" in body
+    assert "included" not in body and env["email"].sent[0]["subject"] == "Re: Lease"
     s = api.list_threads()[0]
     assert s["stage"] == "lease_sent" and "lease link sent" in s["context"]
 
