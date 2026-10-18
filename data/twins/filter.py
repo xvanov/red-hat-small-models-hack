@@ -80,6 +80,7 @@ class RealIndex:
 
     _lock = threading.Lock()
     cache_dir = None
+    min_real = 12
 
     def _cached_embed(self, texts):
         if self.cache_dir is None:
@@ -109,7 +110,8 @@ class RealIndex:
                 if not self.common[k]:
                     counts[k] += 1
         contain = max((c / len(g) for c in counts.values()), default=0.0) if g else 0.0
-        contain_real = max((c / len(self.grams[k]) for k, c in counts.items() if len(self.grams[k]) >= 12), default=0.0)
+        contain_real = max((c / len(self.grams[k]) for k, c in counts.items() if len(self.grams[k]) >= self.min_real),
+                           default=0.0)
         cos = 0.0
         if len(self.texts):
             sims = self.emb @ self._embed([text])[0]
@@ -130,9 +132,9 @@ def flags(text: str, idx: RealIndex, a, phone: str) -> tuple[list[str], dict]:
         sc = idx.score(text)
         if sc["exact"]:
             out.append("exact")
+    if n >= a.min_chars_ngram and (sc["contain"] >= a.ngram or sc["contain_real"] >= a.ngram_real):
+        out.append("ngram")
     if n >= a.min_chars:
-        if sc["contain"] >= a.ngram or sc["contain_real"] >= a.ngram_real:
-            out.append("ngram")
         if sc["cos"] >= a.cos:
             out.append("embedding")
     return out, sc
@@ -187,9 +189,14 @@ def main():
     ap.add_argument("--ngram-real", type=float, default=0.6)
     ap.add_argument("--cos", type=float, default=0.90)
     ap.add_argument("--min-chars", type=int, default=15)
+    ap.add_argument("--min-chars-ngram", type=int, default=15,
+                    help="character n-gram test only for twin lines at least this long (owner export run: 30)")
+    ap.add_argument("--min-real-grams", type=int, default=12,
+                    help="reverse containment only for real lines with at least this many 8-grams (owner export run: 30)")
     ap.add_argument("--common-k", type=int, default=3)
     ap.add_argument("--cos-common", type=float, default=0.92)
     ap.add_argument("--rewrites", type=int, default=3)
+    ap.add_argument("--calibration-note", default="", help="free text recorded in the report (how thresholds were set)")
     a = ap.parse_args()
     setup(a)
     P = Paths.make(a.fixture, a.split)
@@ -204,6 +211,7 @@ def main():
     from sentence_transformers import SentenceTransformer
     embedder = SentenceTransformer(EMBED_MODEL, device="cpu")
     RealIndex.cache_dir = P.root
+    RealIndex.min_real = a.min_real_grams
     idx = RealIndex(real, embedder, a.common_k, a.cos_common)
     llm = LocalLLM("operator", P.cache)
     t0 = time.time()
@@ -241,9 +249,11 @@ def main():
             "embedding_cosine": {"p50": q([s["cos"] for s in best], .5), "p95": q([s["cos"] for s in best], .95),
                                  "max": q([s["cos"] for s in best], 1.0)}},
         "thresholds": {"char_ngram": N, "ngram_containment": a.ngram, "ngram_real_containment": a.ngram_real,
-                       "embedding_cosine": a.cos, "min_chars_for_similarity": a.min_chars, "common_k_threads": a.common_k,
+                       "embedding_cosine": a.cos, "min_chars_for_similarity": a.min_chars,
+                       "min_chars_for_ngram": a.min_chars_ngram, "min_real_grams_reverse": a.min_real_grams, "common_k_threads": a.common_k,
                        "common_cosine": a.cos_common, "rewrites_per_line": a.rewrites},
         "embedding_model": EMBED_MODEL,
+        "calibration": a.calibration_note or None,
     }
     write_json(P.published / "filter_report.json", report)
     log_timing(P.work, "filter", len(twins), time.time() - t0, [llm])

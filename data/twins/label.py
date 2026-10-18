@@ -209,8 +209,13 @@ def label_thread(llm_op: LocalLLM, th: dict) -> dict:
             t["difficulty_score"], t["difficulty"] = difficulty(lab, switched)
             prev_lang = lab["language"]
     lines = [f"[{t['i']}] {'landlord' if t['role'] == 'owner' else 'renter'}: {t['text'][:400]}" for t in turns]
-    out = llm_op.chat_json([{"role": "system", "content": THREAD_SYSTEM}, {"role": "user", "content": "\n".join(lines)}],
-                           temperature=0.0, max_tokens=10000, cache_key="thread")
+    out = None
+    for k in range(3):  # a second/third attempt when the reply does not parse
+        out = llm_op.chat_json([{"role": "system", "content": THREAD_SYSTEM}, {"role": "user", "content": "\n".join(lines)}],
+                               temperature=0.0 if k == 0 else 0.3, max_tokens=10000 if k == 0 else 16000,
+                               cache_key="thread" if k == 0 else f"thread{k}")
+        if out is not None:
+            break
     acts = (out or {}).get("owner_acts") or {}
     for t in turns:
         if t["role"] == "owner":
@@ -247,9 +252,14 @@ def label_ops_thread(llm_op: LocalLLM, th: dict) -> dict:
     cp_name = "tenant" if th["category"] == "ops" else "contractor"
     cp_vocab = TENANT_ACTS if th["category"] == "ops" else VENDOR_ACTS
     lines = [f"[{t['i']}] {'landlord' if t['role'] == 'owner' else cp_name}: {t['text'][:400]}" for t in turns]
-    out = llm_op.chat_json([{"role": "system", "content": ops_system(th["category"])},
-                            {"role": "user", "content": "\n".join(lines)}],
-                           temperature=0.0, max_tokens=10000, cache_key="ops-thread")
+    out = None
+    for k in range(3):
+        out = llm_op.chat_json([{"role": "system", "content": ops_system(th["category"])},
+                                {"role": "user", "content": "\n".join(lines)}],
+                               temperature=0.0 if k == 0 else 0.3, max_tokens=10000 if k == 0 else 16000,
+                               cache_key="ops-thread" if k == 0 else f"ops-thread{k}")
+        if out is not None:
+            break
     oa, ca = (out or {}).get("owner_acts") or {}, (out or {}).get("cp_acts") or {}
     for t in turns:
         got = (oa if t["role"] == "owner" else ca).get(str(t["i"])) or []
