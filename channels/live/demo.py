@@ -39,8 +39,19 @@ def enabled() -> bool:
     return open_mode() or keyword_mode()
 
 
-def disclosure() -> str:
-    return OPEN_DISCLOSURE if open_mode() else DISCLOSURE
+OPEN_DISCLOSURE_ES = "Hola, estás hablando con el asistente de IA de Rentus Homes."
+_ES = re.compile(r"[¿¡ñáéíóú]|\b(hola|gracias|cuarto|habitaci[oó]n|disponible|renta|alquiler|busco|quiero|"
+                 r"mudo|mudarme|n[uú]mero|solo|est[aá])\b", re.I)
+
+
+def is_spanish(text: str) -> bool:
+    return len(_ES.findall(text or "")) >= 2
+
+
+def disclosure(lang: str = "en") -> str:
+    if open_mode():
+        return OPEN_DISCLOSURE_ES if lang == "es" else OPEN_DISCLOSURE
+    return DISCLOSURE
 
 
 def is_automated(channel: str, contact: str, meta: dict | None = None) -> bool:

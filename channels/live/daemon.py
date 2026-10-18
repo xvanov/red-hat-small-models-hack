@@ -180,7 +180,12 @@ def poll_source(store: Store, key: str, prov, allow: config.Allowlist | None = N
                 em["references"] = (meta.get("references") or []) + [meta.get("message_id")]
                 if meta.get("inbox") == "zoho" and not listed:  # strangers to info@: keep the conversation on info@
                     em["reply_to"] = "info@rentus.homes"
-            if providers.is_opt_out(it["text"]) and (it["channel"] == "sms" or t.get("demo")):
+            if t.get("opted_out") and re.fullmatch(r"\s*(start|unstop|yes)\s*", it["text"] or "", re.I):
+                t["opted_out"] = False  # carrier-style re-subscribe; no reply to the keyword itself
+                t["pending_turn"] = False
+                t["trace"].append({"ts": now_iso(), "actor": "tool", "name": "opt_in",
+                                   "summary": "contact sent START: messages allowed again", "ok": True})
+            elif providers.is_opt_out(it["text"]) and (it["channel"] == "sms" or t.get("demo")):
                 t["opted_out"] = True
                 t["pending_turn"] = False
                 t["trace"].append({"ts": now_iso(), "actor": "tool", "name": "opt_out",
@@ -356,6 +361,15 @@ def with_live_note(history, cfg, w, role: str = "prospect"):
     return [{"role": "system", "content": load_prompt(cfg, facts) + "\n\n" + note}]
 
 
+def needs_answer(text: str) -> bool:
+    """A renter batch that must not go unanswered: a question or a substantive message (not ok/thanks/emoji)."""
+    t = (text or "").strip()
+    if not t or re.fullmatch(r"(?i)[\W_]*(ok(ay)?|k|thanks?|thank you|thx|ty|cool|great|perfect|got it|gracias|vale|"
+                             r"listo|si|sí|yes|no|stop|start)?[\W_]*", t):
+        return False
+    return "?" in t or len(t) > 15
+
+
 def flush(store: Store, thread_id: str, channel: str, renter_text: str) -> dict | None:
     """Deliver this turn's buffered operator messages as one composed reply. Returns a trace entry."""
     if ADAPTER is None:
@@ -370,9 +384,9 @@ def flush(store: Store, thread_id: str, channel: str, renter_text: str) -> dict 
     with store.locked():
         tt = store.get_thread(thread_id) or {}
     if tt.get("demo") and not tt.get("disclosed") and parts:
-        d = demo.disclosure()
+        d = demo.disclosure("es" if demo.is_spanish(renter_text) else "en")
         if channel == "email":  # the email already opens with "Hi <name>,"
-            d = d.removeprefix("Hi, ")
+            d = d.removeprefix("Hi, ").removeprefix("Hola, ")
             d = d[:1].upper() + d[1:]
         parts[0] = d + ("\n\n" if channel == "email" else " ") + parts[0]
     results = [outbound.deliver(store, thread_id, p, origin="operator") for p in parts]
@@ -481,6 +495,15 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
         return _fail_turn(store, thread_id, "model_error: " + str(getattr(res, "final_text", "") or "")[:160])
     try:
         delivered = flush(store, thread_id, t["channel"], inbound["text"])
+        if delivered is None and needs_answer(inbound["text"]) and getattr(res, "status", "") in ("max_steps", "done",
+                                                                                                  "done_unverified"):
+            es = demo.is_spanish(inbound["text"])
+            hold = ("Gracias por tu mensaje, te respondo en breve." if es else
+                    "Thanks for your message, I'll get back to you shortly.")
+            r_ = outbound.deliver(store, thread_id, hold, origin="operator")
+            delivered = {"ts": now_iso(), "actor": "tool", "name": "holding_reply", "ok": r_.get("ok", False),
+                         "summary": "the turn produced no reply to a question: sent a holding line (" +
+                                    str(r_.get("status")) + ")"}
     except Exception as e:  # never leave the thread marked busy
         delivered = {"ts": now_iso(), "actor": "tool", "name": "deliver_reply", "ok": False,
                      "summary": f"delivery error {type(e).__name__}: {str(e)[:150]}"}
