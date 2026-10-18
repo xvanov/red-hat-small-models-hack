@@ -75,6 +75,17 @@ OPTED_OUT = "this contact opted out (STOP): nothing can be sent"
 DEMO_CAP = "demo daily reply limit reached for this contact"
 
 
+def _norm_text(x: str) -> str:
+    return re.sub(r"[^a-z0-9$]+", " ", (x or "").lower()).strip()
+
+
+def is_repeat(t: dict, text: str, exclude: str | None = None, last: int = 3) -> bool:
+    outs = [m for m in t.get("messages", []) if m.get("direction") == "out" and m.get("id") != exclude
+            and m.get("status") in ("sent", "sending")][-last:]
+    n = _norm_text(text)
+    return bool(n) and any(_norm_text(m.get("text")) == n for m in outs)
+
+
 def _provider_send(t: dict, text: str) -> dict:
     p = get_providers()
     ch = t["channel"]
@@ -127,6 +138,14 @@ def deliver(store: Store, thread_id: str, text: str, *, origin: str, approved: b
             msg = store.add_message(t, "out", text, "draft", origin=origin)
         else:
             msg["text"] = text
+        if origin == "operator" and is_repeat(t, text, exclude=msg["id"]):
+            # hard guard: never send the same text as one of our last 3 outbound messages on this thread
+            t["messages"] = [m for m in t["messages"] if m["id"] != msg["id"]]
+            t["trace"].append({"ts": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+                               "actor": "verifier", "name": "duplicate_guard", "ok": False,
+                               "summary": "not sent: identical to one of the last 3 replies on this thread"})
+            store.save_thread(t)
+            return {"ok": True, "status": "duplicate_skipped", "message_id": None, "error": None}
         reason = _gate(store, t, allow, skip_allowlist=approved)
         if reason:
             if reason in (OPTED_OUT, DEMO_CAP) or (t.get("demo") and not approved):  # demo: no approval spam

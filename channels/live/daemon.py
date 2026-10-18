@@ -425,7 +425,7 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
         t = store.get_thread(thread_id)
         if t is None or not t.get("pending_turn"):
             return {"skipped": True}
-        if t.get("busy") and t.get("turn_owner") != os.getpid() and _pid_alive(t.get("turn_owner")):
+        if t.get("busy") and _pid_alive(t.get("turn_owner")):  # any live turn, also another worker thread here
             return {"skipped": True, "busy": True}
         want = "prospect" if t.get("demo") else roles.role_for(t["channel"])
         if t.get("role", "prospect") != want:  # role changed in .env: start this contact's World fresh in the new role
@@ -478,7 +478,11 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
         if ADAPTER is not None:
             ADAPTER.take_buffer(thread_id)
         return _fail_turn(store, thread_id, "model_error: " + str(getattr(res, "final_text", "") or "")[:160])
-    delivered = flush(store, thread_id, t["channel"], inbound["text"])
+    try:
+        delivered = flush(store, thread_id, t["channel"], inbound["text"])
+    except Exception as e:  # never leave the thread marked busy
+        delivered = {"ts": now_iso(), "actor": "tool", "name": "deliver_reply", "ok": False,
+                     "summary": f"delivery error {type(e).__name__}: {str(e)[:150]}"}
     with store.locked():
         t = store.get_thread(thread_id)
         t["busy"], t["busy_since"], t["turn_owner"] = False, None, None
@@ -667,7 +671,7 @@ def main(once: bool = False) -> int:
     with store.locked():  # a crash mid-turn left busy markers from our pid's predecessor: clear them
         for t in store.all_threads():
             changed = False
-            if t.get("busy") and not _pid_alive(t.get("turn_owner")):
+            if t.get("busy") and (not _pid_alive(t.get("turn_owner")) or t.get("turn_owner") == os.getpid()):
                 t["busy"], t["busy_since"], t["turn_owner"] = False, None, None
                 changed = True
             want = "prospect" if t.get("demo") else roles.role_for(t["channel"])

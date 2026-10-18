@@ -55,7 +55,12 @@ def note(role: str) -> str:
                 f"rent $750 due on the 1st (tenant_id {TENANT_ID}). Use the tenant tools: maintenance goes "
                 "`triage_maintenance` first, then `create_job`, `find_vendors`, `request_quote`, `compare_quotes`; rent "
                 "questions `get_ledger`; payment plans `propose_payment_plan`. Every money decision (vendor quotes, "
-                "plans) goes to `escalate_to_owner`. Never ask qualifying questions.")
+                "plans) goes to `escalate_to_owner`. Never ask qualifying questions.\n"
+                "- Read the whole thread first. Never ask a question the tenant already answered, and never repeat your own "
+                "earlier question. If the tenant already said where the leak is (for example \"toilet\"), don't ask "
+                "again: open a repair job (`create_job`), `find_vendors`, tell them the next steps (turn the shut-off "
+                "valve under or behind the toilet clockwise, put towels down), and ask the owner before spending "
+                "(`escalate_to_owner`).")
     if role == "lease_signing":
         return (f"- This contact is an APPROVED APPLICANT for room {ROOM_ID} on Appling Way: qualification and the "
                 "showing are done, the next step is signing the lease. When they ask for the lease or say they are "

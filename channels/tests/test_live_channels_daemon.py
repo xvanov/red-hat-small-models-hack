@@ -879,3 +879,46 @@ def test_sms_not_blocked_by_hanging_imap(env, monkeypatch):
     finally:
         r.close()
         hang.set()
+
+
+# ---------------------------------------------------------------- live bug: duplicate sends / concurrent turns
+
+def test_two_workers_cannot_run_the_same_thread(env):
+    import threading
+    import time as _t
+    import rentus_tools as rt
+    daemon.register_adapters(env["store"])
+    env["tf"].push(OWNER_PHONE, "my toilet is leaking", "SM-x1")
+    daemon.poll_all(env["store"])
+    tid = api.list_threads()[0]["thread_id"]
+    started = []
+
+    def slow(w, inbound, h):
+        started.append(1)
+        _t.sleep(0.5)
+        rt.call(w, "send_message", {"thread_id": inbound["thread_id"], "text": "Where is the water coming from?"})
+        return _Res([])
+
+    ths = [threading.Thread(target=daemon.run_turn, args=(env["store"], tid), kwargs={"runner": slow}) for _ in range(3)]
+    for th in ths:
+        th.start()
+    for th in ths:
+        th.join()
+    assert len(started) == 1 and len(env["tf"].sent) == 1
+    assert env["store"].get_thread(tid)["busy"] is False
+
+
+def test_never_resend_one_of_the_last_three_replies(env):
+    import rentus_tools as rt
+    daemon.register_adapters(env["store"])
+    q = "I'm sorry to hear about the leak. Where exactly is the water coming from?"
+    for i, msg in enumerate(["Hi, my toilet is leaking", "Toilet"]):
+        env["tf"].push(OWNER_PHONE, msg, f"SM-y{i}")
+        daemon.poll_all(env["store"])
+        tid = api.list_threads()[0]["thread_id"]
+        daemon.run_turn(env["store"], tid, runner=lambda w, i_, h: (
+            rt.call(w, "send_message", {"thread_id": i_["thread_id"], "text": q}), _Res([]))[1])
+    assert len(env["tf"].sent) == 1
+    # also outside a turn (unbuffered operator send)
+    assert outbound.deliver(env["store"], tid, q.upper(), origin="operator")["status"] == "duplicate_skipped"
+    assert len(env["tf"].sent) == 1

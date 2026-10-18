@@ -136,7 +136,8 @@ def compose(texts: list[str], channel: str, renter_text: str = "") -> list[str]:
 
 LIVE_NOTE = """## Live channel (real renter, real phone)
 - Answer the renter's actual question first, in the first sentence (for example the rent amount if they asked about rent). Then ask exactly one qualifying question that has not been answered yet. Never repeat a question in the same reply.
-- Your send_message calls in this turn are combined into ONE reply to the renter, so do not repeat facts or questions across them.
+- Your send_message calls in this turn are combined into ONE reply to the renter, so do not repeat facts or questions across them. Each send_message is still at most 2 short sentences: put a third sentence in another send_message.
+- Never send a message you already sent on this thread; read the thread and move the conversation forward.
 - Before replying to anything the renter states, record it: `read_reply` on their message, then `upsert_renter` with every answered gate item (lease, move_in, phone, reason, occupants) and `capture_demand` with new criteria."""
 
 
