@@ -21,8 +21,10 @@ import sys
 from collections import Counter
 from datetime import datetime
 
-from common import (FIELDS, REPO, LocalLLM, Paths, common_args, label_message, pmap, read_jsonl, to_context,
-                    write_json, write_jsonl)
+import time
+
+from common import (FIELDS, REPO, LocalLLM, Paths, common_args, label_message, log_timing, pmap, read_jsonl, setup,
+                    stratified_sample, to_context, write_json, write_jsonl)
 
 OWNER_ACTS = ("greet", "confirm_available", "ask_lease", "ask_move_in", "ask_phone", "ask_occupants", "ask_reason",
               "give_price", "answer_question", "decline_discount", "offer_shorter_lease", "propose_showing",
@@ -174,14 +176,26 @@ def stats_card(threads: list[dict], k: int, labeler: str) -> dict:
 def main():
     ap = common_args(argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter))
     ap.add_argument("--labeler", choices=["lightning", "reader"], default="lightning")
+    ap.add_argument("--label-reasoning", choices=["on", "off"], default="on",
+                    help="Lightning reasoning for message labels. off is ~30x faster but on the fixture agreed with "
+                         "reasoning-on labels on all five fields for 8/42 messages (on vs on: 36/42)")
     ap.add_argument("--min-cell", type=int, default=None, help="suppress stats cells below this (default 5; 1 on --fixture)")
     a = ap.parse_args()
+    setup(a)
     P = Paths.make(a.fixture)
     threads = read_jsonl(P.work / "threads.jsonl")[: a.limit]
+    # strata before labels exist: channel x language x a cheap outcome proxy (ended on an unanswered owner
+    # question = likely ghosted; short / long thread)
+    threads = stratified_sample(threads, a.sample, lambda t: (
+        t["channel"], "mixed" if t["language_switch"] else t["language"],
+        "owner_last" if t["turns"][-1]["role"] == "owner" and "?" in t["turns"][-1]["text"] else "renter_last",
+        "short" if len(t["turns"]) <= 6 else "long"))
     if not threads:
         sys.exit("no threads: run ingest.py first")
-    op = LocalLLM("operator", P.work / "cache")
-    lab = op if a.labeler == "lightning" else LocalLLM("reader", P.work / "cache")
+    t0 = time.time()
+    op = LocalLLM("operator", P.work / "cache")  # thread outcomes and owner acts: one call per thread
+    lab = (LocalLLM("operator", P.work / "cache", reasoning=a.label_reasoning == "on") if a.labeler == "lightning"
+           else LocalLLM("reader", P.work / "cache"))
     print(f"labeling {len(threads)} threads, {sum(len(t['turns']) for t in threads)} messages")
     jobs = [(th, k) for th in threads for k, t in enumerate(th["turns"]) if t["role"] == "renter"]
     pmap(lambda j: label_renter_turn(lab, *j), jobs, a.workers)  # every message in parallel, then each thread
@@ -191,7 +205,8 @@ def main():
     write_jsonl(P.work / "labeled.jsonl", out)
     k = a.min_cell if a.min_cell is not None else (1 if a.fixture else 5)
     card = stats_card(out, k, a.labeler)
-    card["models"] = {"labeler": lab.model, "operator": op.model}
+    card["models"] = {"labeler": lab.model, "operator": op.model, "label_reasoning": lab.reasoning}
+    log_timing(P.work, "label", len(out), time.time() - t0, [lab, op])
     print("model calls:", op.stats(), lab.stats() if lab is not op else "", file=sys.stderr)
     write_json(P.published / "stats_card.json", card)
     print(json.dumps({x: card[x] for x in ("threads", "renter_messages", "outcomes", "unlabeled_threads")}, indent=1))

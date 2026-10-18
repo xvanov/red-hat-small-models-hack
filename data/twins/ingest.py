@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from common import LocalLLM, Paths, common_args, detect_lang, hid, pmap, scrub, write_json, write_jsonl
+from common import LocalLLM, Paths, common_args, setup, detect_lang, hid, pmap, scrub, write_json, write_jsonl
 
 TZ = ZoneInfo(os.environ.get("TWINS_TZ", "America/New_York"))
 MAX_TURNS = 80
@@ -244,6 +244,7 @@ def main():
                          "for every thread; none: keywords only")
     ap.add_argument("--keep-tenant", action="store_true", help="also keep existing-tenant threads")
     a = ap.parse_args()
+    setup(a)
     P = Paths.make(a.fixture)
     names = a.owner_names or os.environ.get("TWINS_OWNER_NAMES") or ("Fixture Owner" if a.fixture else "")
     owners = {n.strip().casefold() for n in names.split(",") if n.strip()}

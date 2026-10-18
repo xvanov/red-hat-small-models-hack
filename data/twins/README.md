@@ -65,6 +65,28 @@ data/twins/run.sh --fixture
 data/twins/.venv/bin/python data/twins/test_twins.py   # offline tests: loaders, mojibake, scrub, local-only guard
 ```
 
-Fixture result (2026-10-17): 10 threads in, 1 non-rental dropped, 9 labeled, 9 twins written, 7 verified (2 still failed label verification after 4 attempts), 6 lines flagged by the privacy filter and 2 rewritten, 0 twins dropped for privacy, 7 v3 tasks and 31 reader rows. The v3 tasks load and score in the Gym (`run_eval.py --tasks-file ... --stub`, 0 errors). Runtime is about 20 minutes for 9 twins because Lightning reasons on every call. For a large real set use `--workers 32` and try `--limit` first. `TWINS_REASONING=off` is faster but labels worse.
+Fixture result (2026-10-18, fresh cache, `--concurrency 32`): 10 threads in, 1 non-rental dropped, 9 labeled, 9 twins, 7 verified, 8 lines rewritten by the privacy filter, 0 twins dropped for privacy, 7 v3 tasks (7 different behaviours) and 29 reader rows. The v3 tasks load and score in the Gym (`run_eval.py --tasks-file ... --stub`, 0 errors).
+
+## Speed and how to cap work
+
+Every model request goes through one in-flight cap (`--concurrency`, default 32; vLLM serves 32 to 64 well, see `serving/bench-results.md`). Every prompt starts with the step's fixed system prompt, so vLLM's prefix cache (`--enable-prefix-caching`, on in `serving/start_vllm.sh`) reuses it. `--sample N` (label and twin steps) picks a seeded sample spread across channel x language x outcome.
+
+Measured on the fixture (generated tokens per thread; the fixture averages 4.7 renter messages per thread):
+
+| step | tokens / thread | what costs |
+|---|---|---|
+| label | ~25k | Lightning reasons ~4.3k tokens per renter message |
+| twin | ~40k | draft without reasoning (cheap); verification re-labels with reasoning; only failing turns are rewritten |
+| filter | ~2.5k | blind rewrites of flagged lines |
+
+At the bench's ~1,700 generated tokens/s (concurrency 32) that is about **1.5 threads/min**: roughly 5.5 h for 500 threads and 22 h for 2,000. `--sample` is the lever, for example `label.py --sample 400` followed by twins for all of them (about 4.5 h).
+
+What was tried and rejected (fixture, 42 renter messages, compared with reasoning-on labels; reasoning-on against itself agrees 36/42):
+- Lightning with reasoning **off** as labeler: 30x faster but all five fields agree only 8/42. Kept as `label.py --label-reasoning off`, not the default.
+- The fine-tuned reader as labeler: 19/42 (it copies answers from earlier in the thread on real-style threads).
+- Reasoning-off verification of twins: matches gold on 3/35 turns. Verification always reasons.
+- Reasoning **on** for twin drafts: ~30k tokens per draft and repairs ran out of tokens before answering; drafts are reasoning-off by default (`--gen-reasoning on` to change).
+
+Per-step timing and token use are appended to `work/timing.jsonl`.
 
 If an endpoint call fails, a step stops before writing anything. Finished calls are cached, so rerunning resumes where it stopped.

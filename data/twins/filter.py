@@ -29,7 +29,9 @@ from collections import defaultdict
 
 import numpy as np
 
-from common import (LocalLLM, Paths, common_args, label_message, norm_text, pii_hits, pmap, read_jsonl, write_json,
+import time
+
+from common import (LocalLLM, Paths, common_args, log_timing, setup, label_message, norm_text, pii_hits, pmap, read_jsonl, write_json,
                     write_jsonl)
 from twin import compare
 
@@ -179,6 +181,7 @@ def main():
     ap.add_argument("--cos-common", type=float, default=0.92)
     ap.add_argument("--rewrites", type=int, default=3)
     a = ap.parse_args()
+    setup(a)
     P = Paths.make(a.fixture)
     twins = read_jsonl(P.work / "twins.jsonl")[: a.limit]
     real = [(th["thread_id"], t["text"]) for th in read_jsonl(P.work / "labeled.jsonl") for t in th["turns"]]
@@ -188,10 +191,11 @@ def main():
     embedder = SentenceTransformer(EMBED_MODEL, device="cpu")
     idx = RealIndex(real, embedder, a.common_k, a.cos_common)
     llm = LocalLLM("operator", P.work / "cache")
+    t0 = time.time()
 
     unverified = [t for t in twins if not t.get("verified")]
     todo = [t for t in twins if t.get("verified")]
-    results = pmap(lambda tw: filter_twin(tw, idx, llm, a), todo, min(a.workers, 4))
+    results = pmap(lambda tw: filter_twin(tw, idx, llm, a), todo, a.workers)
     llm.require_healthy("filter")
     kept = [tw for tw, r in zip(todo, results) if not r["dropped"]]
     # final pass: nothing published may still be over a threshold
@@ -226,6 +230,7 @@ def main():
         "embedding_model": EMBED_MODEL,
     }
     write_json(P.published / "filter_report.json", report)
+    log_timing(P.work, "filter", len(twins), time.time() - t0, [llm])
     print(json.dumps({k: report[k] for k in ("twins_in", "dropped_unverified_labels", "flag_events",
                                              "lines_rewritten_and_passed", "twins_dropped_privacy", "twins_out")}, indent=1))
 

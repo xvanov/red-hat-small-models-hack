@@ -290,7 +290,7 @@ def main():
         task = to_task(tw, n, rooms)
         tasks.append(task)
         rrows += reader_rows(tw, task["id"])
-        pub.append({k: v for k, v in tw.items() if k not in ("source_thread", "problems", "attempts")})
+        pub.append({k: v for k, v in tw.items() if k not in ("source_thread", "problems", "repair_rounds")})
     write_jsonl(P.published / "twins.jsonl", pub)
     write_jsonl(P.published / "reader_test.jsonl", rrows)
     write_jsonl(P.tasks_out, tasks)

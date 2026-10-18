@@ -86,11 +86,58 @@ class Paths:
         return f.read_text().strip()
 
 
+# One cap on in-flight model requests for the whole process (vLLM serves 32-64 concurrent well, see
+# serving/bench-results.md). Worker threads only wait on I/O, so threads + this semaphore behave like an
+# async client with a fixed number of requests in flight.
+_INFLIGHT = threading.BoundedSemaphore(int(os.environ.get("TWINS_CONCURRENCY", "32")))
+
+
+def set_concurrency(n: int) -> None:
+    global _INFLIGHT
+    _INFLIGHT = threading.BoundedSemaphore(max(1, n))
+
+
 def common_args(ap):
     ap.add_argument("--fixture", action="store_true", help="run on data/twins/fixtures (fake data, outputs committed)")
     ap.add_argument("--limit", type=int, default=None, help="process only the first N threads (dry runs)")
-    ap.add_argument("--workers", type=int, default=8, help="parallel model calls")
+    ap.add_argument("--sample", type=int, default=None,
+                    help="stratified sample of N threads (channel x language x outcome), seeded; caps total work")
+    ap.add_argument("--concurrency", type=int, default=int(os.environ.get("TWINS_CONCURRENCY", "32")),
+                    help="model requests in flight (default 32, env TWINS_CONCURRENCY)")
+    ap.add_argument("--workers", type=int, default=None, help=argparse_suppress())
     return ap
+
+
+def argparse_suppress():
+    import argparse
+    return argparse.SUPPRESS
+
+
+def setup(a) -> None:
+    """Apply --concurrency; worker threads = 2x in-flight so queued work is always ready."""
+    set_concurrency(a.concurrency)
+    a.workers = a.workers or a.concurrency * 2
+
+
+def stratified_sample(items: list[dict], n: int | None, key, seed: str = "twins") -> list[dict]:
+    """Up to n items, spread across strata (key(item) -> hashable) as evenly as the strata allow:
+    round-robin over strata, each stratum in a seeded order. Deterministic for the same input."""
+    if not n or n >= len(items):
+        return items
+    import random
+    groups: dict = {}
+    for it in items:
+        groups.setdefault(key(it), []).append(it)
+    rng = random.Random(seed)
+    order = sorted(groups, key=str)
+    for g in order:
+        rng.shuffle(groups[g])
+    out = []
+    while len(out) < n:
+        for g in order:
+            if groups[g] and len(out) < n:
+                out.append(groups[g].pop())
+    return out
 
 
 def hid(*parts: str, n: int = 10) -> str:
@@ -242,7 +289,8 @@ class LocalLLM:
     """OpenAI-compatible chat client restricted to local endpoints, with an on-disk response cache
     (work/cache/<role>/) so every step is idempotent and re-runs cost nothing."""
 
-    def __init__(self, role: str, cache_dir: Path, temperature: float = 0.2, max_tokens: int = 8000):
+    def __init__(self, role: str, cache_dir: Path, temperature: float = 0.2, max_tokens: int = 8000,
+                 reasoning: bool | None = None):
         import requests  # noqa: F401  (fail early if missing)
         self.role = role
         pre = {"operator": "OPERATOR", "reader": "READER"}[role]
@@ -258,8 +306,9 @@ class LocalLLM:
         self.cache = cache_dir / role
         self.cache.mkdir(parents=True, exist_ok=True)
         r = os.environ.get("TWINS_REASONING", "on").lower()
-        self.reasoning = None if role == "reader" else (r == "on")
+        self.reasoning = None if role == "reader" else (reasoning if reasoning is not None else r == "on")
         self.calls = self.cache_hits = self.failures = 0
+        self.completion_tokens = self.prompt_tokens = 0
         self._lock = threading.Lock()
 
     def _headers(self):
@@ -275,7 +324,9 @@ class LocalLLM:
         return r.json()["data"][0]["id"]
 
     def chat(self, messages: list[dict], *, temperature: float | None = None, json_mode: bool = False,
-             max_tokens: int | None = None, cache_key: str = "") -> str | None:
+             max_tokens: int | None = None, cache_key: str = "", escalate: bool = True) -> str | None:
+        """escalate: when reasoning uses up max_tokens before answering, retry with 1.5x the budget. Callers
+        that can simply try again another way (twin drafts) pass False and get "" instead."""
         import requests
         temp = self.temperature if temperature is None else temperature
         body = {"model": self.model, "messages": messages, "temperature": temp,
@@ -292,13 +343,23 @@ class LocalLLM:
             return json.loads(f.read_text())["text"]
         for attempt in range(3):
             try:
-                resp = requests.post(self.base + "/chat/completions", headers=self._headers(), json=body, timeout=900)
+                with _INFLIGHT:
+                    resp = requests.post(self.base + "/chat/completions", headers=self._headers(), json=body,
+                                         timeout=900)
                 resp.raise_for_status()
-                msg = resp.json()["choices"][0]["message"]
+                js = resp.json()
+                msg = js["choices"][0]["message"]
+                u = js.get("usage") or {}
+                with self._lock:
+                    self.completion_tokens += u.get("completion_tokens") or 0
+                    self.prompt_tokens += u.get("prompt_tokens") or 0
                 text = msg.get("content") or ""
                 if "</think>" in text:
                     text = text.split("</think>")[-1]
-                if not text.strip():  # reasoning ran out of tokens: retry, never cache an empty answer
+                if not text.strip():  # reasoning ran out of tokens before answering
+                    if not escalate:
+                        f.write_text(json.dumps({"text": ""}))
+                        return ""
                     body["max_tokens"] = int(body["max_tokens"] * 1.5)
                     continue
                 with self._lock:
@@ -323,7 +384,21 @@ class LocalLLM:
                      f"rerun when the endpoint is back (finished calls are cached).")
 
     def stats(self) -> dict:
-        return {"model": self.model, "calls": self.calls, "cache_hits": self.cache_hits, "failures": self.failures}
+        return {"model": self.model, "reasoning": self.reasoning, "calls": self.calls, "cache_hits": self.cache_hits,
+                "failures": self.failures, "completion_tokens": self.completion_tokens,
+                "prompt_tokens": self.prompt_tokens}
+
+
+def log_timing(work: Path, step: str, n_threads: int, seconds: float, llms: list) -> dict:
+    """Append this step's throughput and token use to work/timing.jsonl (counts only)."""
+    rec = {"step": step, "threads": n_threads, "seconds": round(seconds, 1),
+           "threads_per_min": round(n_threads / seconds * 60, 2) if seconds else None,
+           "models": [l.stats() for l in llms]}
+    with open(work / "timing.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec) + "\n")
+    print(f"[{step}] {n_threads} threads in {rec['seconds']} s = {rec['threads_per_min']} threads/min; "
+          f"{sum(l.completion_tokens for l in llms)} completion tokens", file=sys.stderr)
+    return rec
 
 
 # --------------------------------------------------------------------------------------------- labeler
@@ -340,7 +415,8 @@ def label_message(llm: LocalLLM, today: str, context: list[dict], message: str, 
     msgs = reader_prompt.build_messages(inp)
     msgs[0] = {"role": "system", "content": msgs[0]["content"] + PLACEHOLDER_NOTE}
     for k in range(2):
-        out = llm.chat_json(msgs, temperature=0.0, max_tokens=8000, cache_key=f"label{k}{tag}")
+        out = llm.chat_json(msgs, temperature=0.0, max_tokens=600 if llm.role == "reader" or llm.reasoning is False else 8000,
+                            cache_key=f"label{k}{tag}")
         if reader_prompt.schema_valid(out):
             return reader_prompt.canonical(out)
     return None
