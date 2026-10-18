@@ -86,8 +86,7 @@ def git_head() -> str:
 
 
 def sums_text(files: list[tuple[str, str]]) -> str:
-    lines = [f"# sha256 of each file; the local source path in https://github.com/{NS}/red-hat-small-models-hack "
-             f"(at commit {git_head()}) follows '<-'"]
+    lines = [f"# sha256 of each file; the source path in https://github.com/{NS}/red-hat-small-models-hack follows '<-'"]
     for dst, src in files:
         lines.append(f"{sha256(REPO / src)}  {dst}  <- {src}")
     return "\n".join(lines) + "\n"
@@ -112,6 +111,7 @@ def main() -> None:
     ap.add_argument("--verify-only", action="store_true")
     ap.add_argument("--only", choices=list(DATASETS), help="one dataset only")
     ap.add_argument("--private", action="store_true")
+    ap.add_argument("--cards-only", action="store_true", help="with --push: re-upload only README.md and SHA256SUMS")
     a = ap.parse_args()
 
     names = [a.only] if a.only else list(DATASETS)
@@ -141,7 +141,8 @@ def main() -> None:
         files = DATASETS[name]
         if a.push:
             api.create_repo(repo_id, repo_type="dataset", private=a.private, exist_ok=True)
-            ops = [CommitOperationAdd(path_in_repo=dst, path_or_fileobj=str(REPO / src)) for dst, src in files]
+            ops = [] if a.cards_only else [CommitOperationAdd(path_in_repo=dst, path_or_fileobj=str(REPO / src))
+                                           for dst, src in files]
             ops.append(CommitOperationAdd(path_in_repo="README.md", path_or_fileobj=str(HERE / name / "README.md")))
             ops.append(CommitOperationAdd(path_in_repo="SHA256SUMS", path_or_fileobj=sums_text(files).encode()))
             info = api.create_commit(repo_id, ops, repo_type="dataset",

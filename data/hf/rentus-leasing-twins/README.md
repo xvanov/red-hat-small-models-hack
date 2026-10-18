@@ -33,8 +33,9 @@ Hack, Oct 17-18 2026).
 
 A twin keeps the *shape* of a real conversation (who spoke when, what each renter message
 answered, how vague it was, language, length, emoji, the gaps, how the thread ended) and
-replaces every word and every person. **No real message text, name, phone number, address or
-identifier is in this dataset.**
+replaces every word and every person. **No real name, phone number, address or identifier is
+in this dataset, and no real message text beyond common phrases that appear in 3+ different real
+threads** (allowed by the privacy filter; see `twins/filter_report.json`).
 
 Code and full method: <https://github.com/xvanov/red-hat-small-models-hack> (`data/twins/`,
 `docs/data-provenance.md`, `docs/eval-protocol.md`). Companion data:
