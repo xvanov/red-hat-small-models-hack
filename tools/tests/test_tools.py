@@ -187,7 +187,7 @@ def test_send_message_style_refusals(world, text, rule):
 
 
 def test_send_message_sentence_counting_is_not_fooled(world):
-    for text in ["The room is at 3021 Cobbleford St. in Durham, showings 10 a.m. to 6 p.m. daily.",
+    for text in ["The room is on Cobbleford St. in Durham, showings 10 a.m. to 6 p.m. daily.",
                  "Rent is $750.00 a month. See https://sandbox.rentus.local/marketplace/L001 for photos.",
                  "Hola María, sí está disponible. ¿Está de acuerdo con un contrato de 12 meses?"]:
         if text.startswith("Hola"):  # replies follow the renter's language (send_message language guard)

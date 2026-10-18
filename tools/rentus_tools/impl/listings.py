@@ -9,6 +9,7 @@ from ..errors import ToolError
 from ..world import POST_CHANNELS
 from . import compliance
 from ._util import dollar_figures, need, num
+from .demand_guards import house_numbers, public_street
 
 MEDIA_BASE = "https://sandbox.rentus.local/media"
 
@@ -31,6 +32,15 @@ def check_figures(text: str, allowed: set[float], room_id: str) -> None:
                         hint="quote only the room's rent/deposit; if the owner changed the price, update_room first")
 
 
+def check_address(world, text: str, room: dict) -> None:
+    """Public text gives the street name only, never the house number (R-STYLE-7, C7)."""
+    hits = house_numbers(text, world.rooms)
+    if hits:
+        raise ToolError("POLICY_BLOCKED", "public listing text gives a house number: " + ", ".join(map(repr, hits)),
+                        hint=f"use the street name only, e.g. '{public_street(room.get('address', ''))}'",
+                        details={"rules": ["address_public"], "phrases": hits})
+
+
 def _check_price(room: dict, price) -> None:
     if num(price) != num(room.get("rent")):
         raise ToolError("POLICY_BLOCKED", f"price {price} does not match {room['room_id']} rent {room.get('rent')}",
@@ -48,6 +58,7 @@ def create_listing(world, room_id: str, title: str, body: str, price):
                             hint=f"use update_listing on {l['listing_id']} instead")
     _check_price(room, price)
     check_figures(f"{title}\n{body}", allowed_figures(room), room_id)
+    check_address(world, f"{title}\n{body}", room)
     listing = {"listing_id": world.next_id("L"), "room_id": room_id, "status": "draft", "title": title, "body": body,
                "price": int(price) if float(price).is_integer() else price, "channels": {},
                "created_at": world.clock["now"]}
@@ -66,6 +77,7 @@ def publish_listing(world, listing_id: str, channel: str):
     if cur and cur.get("status") in ("live", "ready_to_submit"):
         raise ToolError("CONFLICT", f"listing {listing_id} is already {cur['status']} on {channel}",
                         hint="use update_listing to change it")
+    check_address(world, f"{listing['title']}\n{listing['body']}", world.get("rooms", listing["room_id"]) or {})
     report = compliance.check(f"{listing['title']}\n{listing['body']}", world.policy)
     if not report["ok"]:
         phrases = "; ".join(f"'{f['phrase']}' ({f['rule']})" for f in report["findings"] if f["severity"] == "violation")
@@ -104,6 +116,7 @@ def update_listing(world, listing_id: str, fields: dict):
     if not str(title).strip() or not str(body).strip():
         raise ToolError("INVALID_ARGS", "update_listing: title and body must not be empty")
     check_figures(f"{title}\n{body}", allowed_figures(room), room["room_id"])
+    check_address(world, f"{title}\n{body}", room)
     listing.update(fields)
     for entry in listing["channels"].values():
         if entry.get("status") == "live":

@@ -11,7 +11,7 @@ from ._util import dollar_figures, need
 from .listings import allowed_figures
 from .reader import read_reply_fallback
 from .guards import booking_claims, has_confirmed_showing, language_mismatch
-from .demand_guards import first_person_hint, owner_names, third_person_refs
+from .demand_guards import first_person_hint, house_numbers, owner_names, public_street, third_person_refs
 from .style import lease_terms, style_violations
 
 # A renter asking for less than a year, in words the regex reader's shorter_lease intent can miss
@@ -111,6 +111,14 @@ def send_message(world, thread_id: str, text: str, attachments: list[str] | None
     if third:
         raise ToolError("POLICY_BLOCKED", "message refers to the owner in the third person: " + ", ".join(map(repr, third)),
                         hint=first_person_hint(text), details={"rules": ["first_person"], "rewrite": True, "phrases": third})
+    # Address privacy (R-STYLE-7, C8): no house number until this renter's showing is confirmed.
+    addr = house_numbers(text, world.rooms)
+    if addr and not has_confirmed_showing(world, t):
+        room_ = thread_room(world, t)[0]
+        street = public_street(room_.get("address", "")) if room_ else "the street name"
+        raise ToolError("POLICY_BLOCKED", "message gives a house number before the showing is confirmed: " + ", ".join(map(repr, addr)),
+                        hint=f"give the street name only ('{street}'); the full address goes to them once their showing is confirmed",
+                        details={"rules": ["address_private"], "rewrite": True, "phrases": addr})
     room, listing = thread_room(world, t)
     figs = dollar_figures(text)
     if figs:
