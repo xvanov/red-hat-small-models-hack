@@ -47,7 +47,10 @@ and outbound replies set `In-Reply-To`/`References` to the renter's last Message
 .venv/bin/python -m pytest -q channels/tests/test_live_channels_daemon.py
 ```
 
-The daemon log is wherever you redirect it (we use `runs/live/daemon.log`). A thread's operator World and model
+Only one daemon runs per store (`runs/live/daemon.pid`, fcntl lock; a second daemon or `--once` exits with
+code 3). Live turns run with reasoning off (`enable_thinking=False` per request) for chat speed;
+`LIVE_REASONING=1` restores the server default. Provider sends happen outside the store lock (reserve, send,
+record), so console calls never wait on the network. The daemon log is wherever you redirect it (we use `runs/live/daemon.log`). A thread's operator World and model
 history persist in its thread file, so a restart continues the conversation; the first run only answers
 messages from the last 30 minutes. A failed turn (endpoint down) is retried on the next polls, then after 3
 failures becomes an approval item asking the owner to reply by hand.
@@ -64,18 +67,22 @@ separate processes. Sends from the API go out immediately with the same gates.
   `<extra channel>:<hash>`), `"channel", "contact_display"` (masked phone / masked email / first name),
   `"renter_name", "last_text", "last_ts"` (ISO), `"unread": int, "stage"` (`inquiry|qualifying|qualified|showing|
   application|lost`), `"gate": {"lease","move_in","phone","reason","people"}` each `exact|vague|missing`,
-  `"needs_owner": bool}` plus extras `"line", "opted_out", "busy"` (an operator turn is pending). Newest first.
+  `"needs_owner": bool}` plus extras `"line", "opted_out", "busy"` (an operator turn is running now: show
+  "Operator is typing…"), `"busy_since"` (ISO, or null), `"queued"` (a reply waits for a turn). Newest first.
 - `get_thread(thread_id, mark_read=True) -> dict`: the summary plus `"messages": [{"id","direction":"in"|"out",
   "text","ts","status":"received"|"sent"|"draft"|"failed"|"awaiting_approval","channel"(,"error")}]` and
   `"trace": [{"ts","actor":"operator"|"reader"|"verifier"|"tool","name","summary","ok"}]`. Returns `unread` as it
   was, then marks the thread read.
 - `list_approvals() -> list[dict]`: pending items `{"id","thread_id","reason","draft_text","created","kind"}`;
   `kind` is `draft` (a send a gate stopped), `escalation` (operator's `escalate_to_owner`, draft = its draft),
-  `report` (`report_to_owner`, no draft) or `error` (operator could not answer).
-- `decide(approval_id, "approve"|"edit"|"deny", text=None) -> dict`: approve sends `draft_text`, edit sends `text`
-  (on the approval's thread/channel), deny marks it denied (no send). Approve/edit of an item with no text just
-  closes it. Returns `{"ok","decision","sent","status","error"}`; if a gate still blocks (kill switch, rate cap),
-  `ok: false` and the item stays pending.
+  `report` (`report_to_owner`, no draft; at most one pending per thread, internal ids removed) or `error` (the
+  operator failed 3 times, including model errors: reply by hand).
+- `decide(approval_id, "approve"|"edit"|"deny", text=None) -> dict`: approve/edit send `text` when given, else
+  `draft_text` (on the approval's thread/channel); deny marks it denied (no send). The item is claimed
+  (`sending`) under the lock before anything is sent, so it can never go out twice; deciding a non-pending item
+  returns `ok: false`. Approve/edit of an item with no text just closes it. Returns
+  `{"ok","decision","sent","status","error"}`; if a gate still blocks (kill switch, rate cap) the item goes back
+  to pending with `ok: false`. Owner approval lifts only the allowlist check, never the kill switch, opt-out or cap.
 - `send_owner_message(thread_id, text) -> dict`: manual reply on the thread's channel; the operator sees it in its
   next turn. Returns `{"ok","status","message_id","provider_id","error"}`.
 - `start_conversation(channel, to, text, line=None) -> dict`: first outbound message to an allowlisted contact
