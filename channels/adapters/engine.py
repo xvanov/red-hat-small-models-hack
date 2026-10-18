@@ -21,6 +21,8 @@ CHANNELS_DIR = Path(__file__).resolve().parent.parent
 SELECTORS_DIR = Path(__file__).resolve().parent / "selectors"
 PROFILES_DIR = CHANNELS_DIR / ".profiles"
 SCREENSHOTS_DIR = CHANNELS_DIR / "screenshots"
+DESKTOP_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/141.0.0.0 Safari/537.36")
 
 
 class AdapterError(Exception):
@@ -72,8 +74,14 @@ def browser_page(platform: str, target: str, headless: bool | None = None) -> It
                 headless = os.environ.get("CHANNELS_HEADLESS", "0") == "1"
             prof = PROFILES_DIR / platform
             prof.mkdir(parents=True, exist_ok=True)
-            ctx = pw.chromium.launch_persistent_context(str(prof), headless=headless,
-                                                        viewport={"width": 1280, "height": 900})
+            # headless Chromium announces itself ("HeadlessChrome") and bot checks such as Cloudflare refuse it,
+            # even with a valid imported session; present as the desktop Chrome the owner's cookies came from
+            opts: dict[str, Any] = {"viewport": {"width": 1280, "height": 900}}
+            if headless:
+                opts.update(user_agent=os.environ.get("CHANNELS_USER_AGENT") or DESKTOP_UA, locale="en-US",
+                            timezone_id="America/New_York",
+                            args=["--disable-blink-features=AutomationControlled"])
+            ctx = pw.chromium.launch_persistent_context(str(prof), headless=headless, **opts)
             try:
                 page = ctx.pages[0] if ctx.pages else ctx.new_page()
                 _guard(page)
@@ -328,6 +336,14 @@ class Runner:
             if do == "stop_if_empty":
                 # e.g. craigslist without an account: no contact email to continue with. Everything up to
                 # here is filled; stop, screenshot, and tell the owner what unlocks the rest.
+                # unless_present: a selector whose presence means the value is already known (e.g. the
+                # logged-in account shown instead of an email field)
+                if step.get("unless_present"):
+                    try:
+                        if self.page.locator(step["unless_present"]).count() > 0:
+                            continue
+                    except Exception:
+                        pass
                 el = self.spec["elements"][key]
                 loc = try_selector(self.page, el["selector"], el, 800)
                 have = values.get(vkey) not in (None, "") or (loc is not None and (loc.input_value() or "").strip())

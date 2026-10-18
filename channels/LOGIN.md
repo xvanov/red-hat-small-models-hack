@@ -74,8 +74,15 @@ For each site:
   do not need `python -m channels.messenger_web import-cookies` separately (`--no-messenger` skips it; if
   the Messenger worker is running it keeps its own session and the output says so).
 - Check any site later: `channels/.venv/bin/python -m channels.login check <site>` (yes/no only).
-- Roomies is behind Cloudflare. Its clearance cookie is tied to the browser and network that earned it, so
-  an imported session can still meet the bot check here; `check roomies` then says `bot_challenge`.
+- Roomies is behind Cloudflare. Headless live sessions present a desktop Chrome user agent (override with
+  `CHANNELS_USER_AGENT`), which passed with an imported session on 2026-10-18; if it ever meets the check
+  again, `check roomies` says `bot_challenge`.
+- Roomies' listing page is `roomies.com/rooms/create`: the adapter fills address, Room, House, rent and
+  available date and stops before **Create room**; description and photos come after that click.
+- craigslist (logged in) goes through the details form, map and photos to the unpublished-draft preview and
+  stops before **publish**. craigslist requires laundry and parking: if the room record has no `laundry` /
+  `parking`, the run stops at the details form and says so instead of inventing them. Each run that gets
+  past the details form leaves an unpublished draft in your craigslist account.
 - "profile in use by process N": an adapter or check is still running on that profile. Stop it, retry.
   A lock left by a crashed browser is cleared automatically.
 - `--keep` keeps the file after import; `-` instead of a file name reads the export from stdin.

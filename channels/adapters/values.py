@@ -115,6 +115,7 @@ def prepare(platform: str, listing: dict, *, target: str) -> dict:
         "private_room_text": "private room" if room.get("type", "private_room") != "shared_room" else "room not private",
         "rent_period_text": "month",
         "housing_type_text": _housing_type(room),
+        "is_house": True if _housing_type(room) == "house" else None,
         "laundry_text": known(room, "laundry"),
         "parking_text": known(room, "parking"),
         "room_name": room.get("room_id") or listing.get("title"),
