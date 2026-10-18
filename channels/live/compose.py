@@ -85,6 +85,19 @@ INTERNAL = re.compile(r"system prompt|my (instructions|prompt)|language model|ne
                       r"datos de la puerta|\bthread\b|\bregister\b", re.I)
 
 
+PHONE_RE = re.compile(r"\+?\d[\d\s().-]{6,}\d")
+
+
+def _invented_phone(s: str, renter_text: str) -> bool:
+    """A sentence that echoes a phone number the renter did not write (e.g. "12345" padded to "+11234567890")."""
+    said = re.sub(r"\D", "", renter_text or "")
+    for m in PHONE_RE.finditer(s):
+        d = re.sub(r"\D", "", m.group(0))
+        if len(d) >= 7 and d not in said and d.removeprefix("1") not in said:
+            return True
+    return False
+
+
 def _only_refers_to_link(s: str, pool: list[str]) -> bool:
     """"The lease link is included in this message." adds nothing when the link itself is in the reply."""
     return "http" not in s and bool(LINK_REF.search(s)) and any("http" in k for k in pool)
@@ -97,7 +110,8 @@ def merge(texts: list[str], renter_text: str = "") -> list[str]:
         for s in sentences(t):
             if not any(_near_dup(s, k) for k in pool) and not _covered(s, pool):
                 pool.append(s)
-    pool = [s for s in pool if not _only_refers_to_link(s, pool) and not INTERNAL.search(s)]
+    pool = [s for s in pool if not _only_refers_to_link(s, pool) and not INTERNAL.search(s)
+            and not _invented_phone(s, renter_text)]
     questions = [s for s in pool if s.rstrip().endswith("?")]
     statements = [s for s in pool if not s.rstrip().endswith("?")]
     rq = (renter_text or "").lower()

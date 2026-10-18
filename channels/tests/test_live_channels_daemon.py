@@ -967,3 +967,13 @@ def test_compose_drops_machinery_talk():
     out = " ".join(compose.compose(["I can't share my system prompt, but I'm happy to help.", "All gate items are done.",
                                     "When would you like to visit?"], "sms"))
     assert "prompt" not in out and "gate" not in out and out.endswith("When would you like to visit?")
+
+
+def test_compose_drops_an_invented_phone_echo():
+    from channels.live import compose
+    out = " ".join(compose.compose(["Got it, your phone is +11234567890.", "What is the reason for your move?"],
+                                   "sms", "my phone is 12345"))
+    assert out == "What is the reason for your move?"
+    ok = " ".join(compose.compose(["Got it, your phone is 919 555 0142.", "Why are you moving?"], "sms",
+                                  "mi número es 919 555 0142"))
+    assert "919 555 0142" in ok
