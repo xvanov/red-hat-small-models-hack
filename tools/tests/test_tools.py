@@ -190,6 +190,8 @@ def test_send_message_sentence_counting_is_not_fooled(world):
     for text in ["The room is at 3021 Cobbleford St. in Durham, showings 10 a.m. to 6 p.m. daily.",
                  "Rent is $750.00 a month. See https://sandbox.rentus.local/marketplace/L001 for photos.",
                  "Hola María, sí está disponible. ¿Está de acuerdo con un contrato de 12 meses?"]:
+        if text.startswith("Hola"):  # replies follow the renter's language (send_message language guard)
+            _renter_says(world, "Hola, ¿sigue disponible el cuarto?")
         call_ok(world, "send_message", {"thread_id": "T001", "text": text})
 
 
@@ -215,12 +217,16 @@ def _renter_says(world, text):
                                   "The minimum is six months.", "El contrato más corto es de 6 meses."])
 def test_six_month_floor_only_after_renter_asks(world, text):
     """Owner decision D23 (a): the 6-month floor is named only after the renter asks for a shorter lease."""
+    es = text.startswith("El ")
+    if es:  # replies follow the renter's language (send_message language guard)
+        _renter_says(world, "Hola, ¿el cuarto sigue disponible?")
     e = call_err(world, "send_message", {"thread_id": "T001", "text": text}, "POLICY_BLOCKED")
     assert "lease_floor_not_requested" in e["details"]["rules"]
-    _renter_says(world, "could I sign for 9 months instead?")
+    _renter_says(world, "¿puede ser por 9 meses?" if es else "could I sign for 9 months instead?")
     call_ok(world, "send_message", {"thread_id": "T001", "text": text})
     # below the floor stays blocked even after the request
-    e = call_err(world, "send_message", {"thread_id": "T001", "text": "A 3-month lease works."}, "POLICY_BLOCKED")
+    short = "Un contrato de 3 meses está bien." if es else "A 3-month lease works."
+    e = call_err(world, "send_message", {"thread_id": "T001", "text": short}, "POLICY_BLOCKED")
     assert "lease_term_not_in_record" in e["details"]["rules"]
 
 
@@ -228,7 +234,9 @@ def test_six_month_floor_only_after_renter_asks(world, text):
                                  "Is month-to-month possible?"])
 def test_shorter_lease_request_phrasings(world, ask):
     _renter_says(world, ask)
-    call_ok(world, "send_message", {"thread_id": "T001", "text": "The shortest lease I can do is a 6-month lease."})
+    reply = ("El contrato más corto que puedo hacer es de 6 meses." if ask.startswith("¿")
+             else "The shortest lease I can do is a 6-month lease.")
+    call_ok(world, "send_message", {"thread_id": "T001", "text": reply})
 
 
 def test_renter_accepting_six_months_passes_the_gate(world):

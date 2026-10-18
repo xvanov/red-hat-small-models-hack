@@ -10,6 +10,7 @@ from ..errors import ToolError
 from ._util import dollar_figures, need
 from .listings import allowed_figures
 from .reader import read_reply_fallback
+from .guards import booking_claims, has_confirmed_showing, language_mismatch
 from .style import lease_terms, style_violations
 
 # A renter asking for less than a year, in words the regex reader's shorter_lease intent can miss
@@ -87,6 +88,22 @@ def send_message(world, thread_id: str, text: str, attachments: list[str] | None
         raise ToolError("POLICY_BLOCKED", "message breaks style rules: " + "; ".join(m for _, m in problems),
                         hint="rewrite: at most 2 short sentences, one question, commas instead of dashes",
                         details={"rules": [r for r, _ in problems]})
+    mismatch = language_mismatch(t, text)
+    if mismatch:
+        want, got = mismatch
+        names = {"en": "English", "es": "Spanish"}
+        raise ToolError("POLICY_BLOCKED", f"the renter writes in {names[want]} but this draft is in {names[got]}",
+                        hint=f"rewrite the same message in {names[want]} ({want}) and send it again",
+                        details={"rules": ["language_mismatch"], "rewrite": True, "language": want, "draft_language": got})
+    claims = booking_claims(text)
+    if claims and not has_confirmed_showing(world, t):
+        raise ToolError("POLICY_BLOCKED",
+                        "message tells the renter a showing time is confirmed, but the owner has not confirmed it: "
+                        + " / ".join(claims),
+                        hint="say the time is proposed and pending the owner's confirmation, for example "
+                             "'I proposed Saturday at 11 AM, pending the owner's confirmation' "
+                             "('propuse el sábado a las 11, pendiente de confirmación del dueño')",
+                        details={"rules": ["showing_not_confirmed"], "claims": claims})
     room, listing = thread_room(world, t)
     figs = dollar_figures(text)
     if figs:

@@ -7,7 +7,7 @@ Sandbox tools for the Rentus Operator, implementing `contracts/tools.md`. Python
 ```bash
 uv venv tools/.venv --python 3.12
 uv pip install --python tools/.venv/bin/python -e 'tools[test]'
-tools/.venv/bin/python -m pytest tools -q          # 125 tests
+tools/.venv/bin/python -m pytest tools -q          # 176 tests
 ```
 
 Or skip the install and put `tools/` on `sys.path` (gym and operator already do this).
@@ -46,7 +46,7 @@ The sandbox clock is `world.clock["now"]`. Tools never read the wall clock; scen
 | Inventory | `list_rooms`, `get_room`, `update_room` | editable fields only, typed values |
 | Listings | `create_listing`, `publish_listing`, `update_listing`, `mark_filled`, `get_listing_media`, `check_listing_compliance` | price must equal the room's rent and any `$` figure must be in the room record (`POLICY_BLOCKED`, hint: `update_room` first); publishing is refused while the fair-housing check finds a violation (gender wording in a shared room is a `warning` the owner decides, D23); one active listing per room (`CONFLICT`) |
 | Market | `get_market_rent` | Zillow ZORI for NC ZIPs, from `data/raw/zori/zori_nc.csv` when present, else the committed `rentus_tools/data/zori_nc_latest.csv` (rebuild it with `scripts/build_zori_table.py`) |
-| Inbox | `list_threads`, `read_thread`, `send_message` | `POLICY_BLOCKED` for more than 2 sentences, more than one `?`, em or en dashes, a dollar figure not in the thread's room/listing record, or a lease term shorter than `policy.lease_min_months_public`; a term at or above `policy.lease_floor_months` (6) only once the renter has asked for a shorter lease (D23) |
+| Inbox | `list_threads`, `read_thread`, `send_message` | `POLICY_BLOCKED` for more than 2 sentences, more than one `?`, em or en dashes, a dollar figure not in the thread's room/listing record, or a lease term shorter than `policy.lease_min_months_public`; a term at or above `policy.lease_floor_months` (6) only once the renter has asked for a shorter lease (D23); a sentence telling the renter a showing/time is confirmed, booked, scheduled, set or agreed (EN/ES: "confirmado", "agendado", "quedamos", "see you Saturday") unless that renter has a calendar event with status `confirmed` (rule `showing_not_confirmed`, hint: say "proposed, pending the owner's confirmation"; questions and pending wording pass); a draft clearly in the other language from the renter's (stopword ratio, renter's latest clear message else `thread.language`; rule `language_mismatch`, `details.rewrite: true`) (`impl/guards.py`) |
 | Reader | `read_reply` | reader JSON per `data/reader_schema.md`, plus `backend` (`model` or `fallback`) |
 | Register | `upsert_renter`, `match_renters` | gate items use the reader's shapes (`{"status","value"}`, move_in `{"status","date","raw"}`); scalar shorthand accepted (`"lease": true`, `"move_in": "2026-11-01"`); phones normalized to E.164 |
 | Calendar | `find_showing_slots`, `propose_showing` | `POLICY_BLOCKED` unless lease is an explicit answer (status `answered` and value true, or `months` >= `policy.lease_floor_months`; when `months` is given it decides), move_in has an exact date (`answered` or `exception`), and phone, reason and occupants are filled; occupants must fit `max_occupants`; slots stay inside `policy.showing_hours` |
