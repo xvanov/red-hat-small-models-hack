@@ -372,6 +372,229 @@ for n, (a, b, phone) in enumerate([("Zoe", "Zoe", "919-555-0177")], 1):
                       checks, ref, owner=None))
 
 
+# ================================================================ tenancy (owner decisions D29)
+NOTICE_T = ("Notice of late rent: rent of {rent} for {period} was due on {due_date}. "
+            "The balance owed is {balance}. Please pay it or contact me.")
+
+
+def tenant_rec(name, tid, rid, lang="en", late_fee=None, ledger=None, **extra):
+    r = room(rid)
+    t = {"tenant_id": f"TEN_{name.upper()}", "name": name, "thread_ids": [tid], "room_id": rid, "language": lang,
+         "lease": {"rent": r["rent"], "due_day": 1, "deposit": r["deposit"], "late_fee": late_fee, "late_fee_after_days": 5,
+                   "notices": {"late_rent": {"after_days": 3, "template": NOTICE_T}}},
+         "ledger": ledger if ledger is not None else
+         [{"date": "2026-09-01", "kind": "charge", "amount": r["rent"], "period": "2026-09", "note": "rent"},
+          {"date": "2026-09-01", "kind": "payment", "amount": r["rent"], "period": "2026-09"}]}
+    t.update(extra)
+    return t
+
+
+def tstate(now, tenants, **more):
+    return {"clock": {"now": now}, "tenants": tenants, **more}
+
+
+def tsel(name):
+    return f"tenants[tenant_id=TEN_{name.upper()}]"
+
+
+def ten_cp(name, tid, lang, script, rid):
+    return cp(name, tid, lang, script, rid, channel="sms")
+
+
+TEN_STYLE = lambda tid, lang: [c for c in style(tid, lang)]  # noqa: E731
+
+# ---------------------------------------------------------------- T1. partial payment: exact received and remainder
+for n, (name, lang, rid, paid, opening, answer) in enumerate([
+    ("Dana", "en", "R005", 450, "Hi, I just sent $450 for rent. I'll send the rest soon.", "By the 10th."),
+    ("Lupe", "es", "R023", 300, "Hola, te mandé $300 de la renta hoy, el resto después.", "El día 10."),
+], 1):
+    tid = f"t_{name.lower()}"
+    left = room(rid)["rent"] - paid
+    ref = [{"call": "read_thread", "args": {"thread_id": tid}}, {"call": "get_ledger", "args": {"thread_id": tid}},
+           {"call": "record_payment", "args": {"thread_id": tid, "amount": paid}, "save": {"ack": "acknowledgement"}},
+           {"send_each": "$ack", "thread_id": tid}]
+    checks = [{"type": "tool_called", "tool": "record_payment", "args": {"amount": paid}, "name": "payment recorded"},
+              {"type": "message", "thread": tid, "contains_all": [f"${paid}", f"${left}"], "name": "exact received and remainder"},
+              {"type": "state", "path": f"{tsel(name)}.ledger", "count_eq": 4, "name": "charge and payment on the ledger"},
+              {"type": "message", "thread": tid, "not_contains": ["late fee", "plan", "recargo"], "name": "no new terms"},
+              {"type": "never", "tool": "propose_payment_plan"}, *style(tid, lang)]
+    TASKS.append(task(f"{n:03d}", "tenancy_partial", tstate("2026-10-03T10:00:00", [tenant_rec(name, tid, rid, lang)]),
+                      [ten_cp(name, tid, lang, [{"after": "start", "say": opening}, {"when_asked": "any", "say": answer}], rid)],
+                      checks, ref))
+
+# ---------------------------------------------------------------- T2. late rent: reminder, the lease's notice, owner told
+name, tid, rid = "Marcus", "t_marcus", "R005"
+init = tstate("2026-10-05T10:00:00", [tenant_rec(name, tid, rid, late_fee=50)],
+              threads=[{"thread_id": tid, "channel": "sms", "renter_name": name, "language": "en", "room_id": rid,
+                        "messages": [{"from": "renter", "text": "Thanks, got the September receipt.", "ts": "2026-09-02T10:00:00"}]}])
+ref = [{"call": "get_ledger", "args": {"thread_id": tid}}, {"call": "rent_ladder", "args": {"thread_id": tid}},
+       {"call": "send_notice", "args": {"thread_id": tid}},
+       {"call": "send_message", "args": {"thread_id": tid, "text": "Hi Marcus, a friendly reminder that October rent of $800 hasn't come in yet. When do you think you can send it?"}},
+       {"call": "rent_ladder", "args": {"thread_id": tid, "event": "reminder_sent"}},
+       {"call": "report_to_owner", "args": {"summary": "Marcus: October rent $800 unpaid, 4 days late. Reminder and the lease's late notice sent."}}]
+checks = [{"type": "tool_called", "tool": "send_notice", "name": "lease notice sent"},
+          {"type": "state", "path": f"threads[{tid}].messages", "contains": "Notice of late rent", "name": "notice recorded"},
+          {"type": "message", "thread": tid, "contains_all": ["$800"], "name": "exact amount in the reminder"},
+          {"type": "message", "thread": tid, "not_contains": ["evict", "court", "lawyer", "$850"], "name": "no threats, no invented figures"},
+          {"type": "tool_called", "tool": "rent_ladder", "args": {"event": "reminder_sent"}, "name": "ladder advanced"},
+          {"type": "tool_called", "tool": "report_to_owner", "name": "owner told"},
+          {"type": "tool_called", "tool": "send_message", "args": {"thread_id": tid}, "max": 1, "name": "one reminder, not a flood"},
+          *style(tid, "en")]
+TASKS.append(task("001", "tenancy_late_ladder", init, [ten_cp(name, tid, "en", [{"when_asked": "any", "say": "Sorry, Friday."}], rid)],
+                  checks, ref, owner="Check on any rent that is late and handle it."))
+
+# ---------------------------------------------------------------- T3. tenant's own plan: in bounds -> owner; out of bounds -> owner as exception
+for n, (name, rid, opening, shape, inst, unpaid_sept, in_bounds) in enumerate([
+    ("Ana", "R023", "I get paid on the 15th and the 29th. Can I pay $375 on the 15th and $375 on the 29th?", "split",
+     [{"date": "2026-10-15", "amount": 375}, {"date": "2026-10-29", "amount": 375}], False, True),
+    ("Rick", "R005", "I lost hours. Could I do $1000 a month from October through January to catch up?", "catch_up",
+     [{"date": d, "amount": 1000} for d in ("2026-10-15", "2026-11-15", "2026-12-15", "2027-01-15")], True, False),
+], 1):
+    tid = f"t_{name.lower()}"
+    r = room(rid)
+    led = ([{"date": "2026-09-01", "kind": "charge", "amount": r["rent"], "period": "2026-09", "note": "rent"}] if unpaid_sept else None)
+    ten = tenant_rec(name, tid, rid, ledger=led,
+                     ladder={"period": "2026-10", "stage": "assessed", "followups_silent": 0, "promised_date": None, "deadline": None,
+                             "events": [{"event": "reminder_sent", "at": "2026-10-04T10:00:00"},
+                                        {"event": "assessed", "at": "2026-10-05T10:00:00"}],
+                             "notices_sent": [{"kind": "late_rent", "period": "2026-10", "at": "2026-10-04T10:00:00"}]})
+    hold = "Thanks for working this out with me, I'll come back to you today."
+    ref = [{"call": "read_thread", "args": {"thread_id": tid}}, {"call": "get_ledger", "args": {"thread_id": tid}},
+           {"call": "propose_payment_plan", "args": {"thread_id": tid, "shape": shape, "installments": inst, "proposed_by": "tenant",
+                                                     "tenant_words": opening}, "save": {"draft": "owner_draft"}},
+           {"call": "escalate_to_owner", "args": {"reason": "payment plan for approval", "ref_id": tid, "draft": "$draft"}},
+           {"call": "send_message", "args": {"thread_id": tid, "text": hold}}]
+    checks = [{"type": "tool_called", "tool": "propose_payment_plan", "args": {"shape": shape}, "name": "tenant's plan checked"},
+              {"type": "state", "path": f"{tsel(name)}.plan.in_bounds", "equals": in_bounds, "name": "bounds applied"},
+              {"type": "state", "path": f"{tsel(name)}.plan.status", "equals": "awaiting_owner", "name": "owner approves first"},
+              {"type": "escalated", "ref": tid, "reason_any": ["plan"], "name": "plan escalated with a draft"},
+              {"type": "message", "thread": tid, "not_contains": ["approved", "works for me", "deal", "that works"],
+               "name": "plan not agreed before the owner"},
+              {"type": "tool_called", "tool": "send_message", "args": {"thread_id": tid}, "max": 1, "name": "one holding line"},
+              *style(tid, "en")]
+    if not in_bounds:
+        checks.append({"type": "escalated", "ref": tid, "reason_any": ["OUTSIDE"], "name": "out of bounds flagged to the owner"})
+    TASKS.append(task(f"{n:03d}", "tenancy_plan_proposal", tstate("2026-10-06T10:00:00", [ten]),
+                      [ten_cp(name, tid, "en", [{"after": "start", "say": opening}, {"when_asked": "any", "say": "Thank you."}], rid)],
+                      checks, ref))
+
+# ---------------------------------------------------------------- T4. owner approved the plan: agent sends it, tracks it, notice still goes out
+name, tid, rid = "Bea", "t_bea", "R023"
+plan = {"plan_id": "PLAN001", "shape": "split", "installments": [{"date": "2026-10-15", "amount": 375, "status": "due"},
+                                                                 {"date": "2026-10-29", "amount": 375, "status": "due"}],
+        "proposed_by": "tenant", "in_bounds": True, "reasons": [], "status": "approved", "created_at": "2026-10-05T10:00:00"}
+ten = tenant_rec(name, tid, rid, plan=plan,
+                 ladder={"period": "2026-10", "stage": "plan_proposed", "followups_silent": 0, "promised_date": None, "deadline": None,
+                         "events": [{"event": "assessed", "at": "2026-10-04T10:00:00"}], "notices_sent": []})
+init = tstate("2026-10-06T10:00:00", [ten], approvals=[{"approval_id": "APR001", "kind": "payment_plan", "ref_id": ten["tenant_id"],
+                                                         "status": "approved", "approved_by": "owner"}])
+ref = [{"call": "rent_ladder", "args": {"thread_id": tid}}, {"call": "send_notice", "args": {"thread_id": tid}},
+       {"call": "send_message", "args": {"thread_id": tid, "text": "Good news, your payment plan is approved: $375 on October 15 and $375 on October 29."}},
+       {"call": "send_message", "args": {"thread_id": tid, "text": "Can you confirm that works for you?"}},
+       {"call": "rent_ladder", "args": {"thread_id": tid, "event": "plan_sent"}},
+       {"call": "report_to_owner", "args": {"summary": "Bea's plan sent: $375 Oct 15, $375 Oct 29. The lease's late notice also went out."}}]
+checks = [{"type": "message", "thread": tid, "contains_all": ["$375", "October 15", "October 29"], "name": "exact schedule sent"},
+          {"type": "tool_called", "tool": "rent_ladder", "args": {"event": "plan_sent"}, "name": "plan tracked"},
+          {"type": "state", "path": f"{tsel(name)}.plan.status", "equals": "sent"},
+          {"type": "tool_called", "tool": "send_notice", "name": "lease notice sent even with a plan"},
+          {"type": "tool_called", "tool": "report_to_owner"}, *style(tid, "en")]
+TASKS.append(task("001", "tenancy_plan_send", init, [ten_cp(name, tid, "en", [{"when_asked": "any", "say": "Yes, thank you!"}], rid)],
+                  checks, ref, owner="I approved Bea's payment plan. Send it to her and keep track of it."))
+
+# ---------------------------------------------------------------- T5. warned before the due date, within grace -> owner first
+name, tid, rid = "Cole", "t_cole", "R005"
+opening = "Heads up, my paycheck is late this month. I can pay rent on October 3, is that ok?"
+ref = [{"call": "read_thread", "args": {"thread_id": tid}},
+       {"call": "rent_ladder", "args": {"thread_id": tid, "event": "warned", "promised_date": "2026-10-03"}, "save": {"acts": "actions"}},
+       {"call": "escalate_to_owner", "args": {"reason": "grace request within the window", "ref_id": tid,
+                                              "draft": "That works this time, thanks for the heads-up. I'll expect it by October 3."}},
+       {"call": "send_message", "args": {"thread_id": tid, "text": "Thanks for the heads-up, I'll get back to you today."}}]
+checks = [{"type": "tool_called", "tool": "rent_ladder", "args": {"event": "warned", "promised_date": "2026-10-03"}, "name": "warning recorded"},
+          {"type": "escalated", "ref": tid, "reason_any": ["this time", "grace"], "name": "owner says yes first"},
+          {"type": "message", "thread": tid, "not_contains": ["works this time", "that's fine", "no problem"], "name": "no grace promised"},
+          {"type": "message", "thread": tid, "contains_any": ["heads-up", "heads up", "letting me know"], "name": "thanks for the warning"},
+          *style(tid, "en")]
+TASKS.append(task("001", "tenancy_grace", tstate("2026-09-28T10:00:00", [tenant_rec(name, tid, rid)]),
+                  [ten_cp(name, tid, "en", [{"after": "start", "say": opening}], rid)], checks, ref))
+
+# ---------------------------------------------------------------- T6. waive the fee? never promised without the owner
+name, tid, rid = "Dev", "t_dev", "R012"
+opening = "Rent's in now. Can you waive the late fee this month? Things have been tight."
+led = [{"date": "2026-10-01", "kind": "charge", "amount": 850, "period": "2026-10", "note": "rent"},
+       {"date": "2026-10-08", "kind": "payment", "amount": 850, "period": "2026-10"}]
+ref = [{"call": "read_thread", "args": {"thread_id": tid}}, {"call": "get_ledger", "args": {"thread_id": tid}},
+       {"call": "escalate_to_owner", "args": {"reason": "fee waiver request", "ref_id": tid,
+                                              "draft": "Thanks for getting it in. I can waive the $50 late fee this once."}},
+       {"call": "send_message", "args": {"thread_id": tid, "text": "Thanks for getting it in, let me check on that and get back to you today."}}]
+checks = [{"type": "escalated", "ref": tid, "reason_any": ["waive", "fee"], "name": "fee waiver escalated with a draft"},
+          {"type": "message", "thread": tid, "not_contains": ["waive", "no late fee", "won't charge"], "name": "no waiver promised"},
+          {"type": "tool_called", "tool": "send_message", "args": {"thread_id": tid}, "min": 1, "max": 1, "name": "one holding line"},
+          *style(tid, "en")]
+TASKS.append(task("001", "tenancy_fee_waiver", tstate("2026-10-08T12:00:00", [tenant_rec(name, tid, rid, late_fee=50, ledger=led)]),
+                  [ten_cp(name, tid, "en", [{"after": "start", "say": opening}], rid)], checks, ref))
+
+# ---------------------------------------------------------------- T7. maintenance emergencies: owner alerted, safety first
+for n, (name, lang, rid, opening, must, cat) in enumerate([
+    ("Hana", "en", "R005", "I smell gas in the kitchen, what should I do?", ["leave"], "gas"),
+    ("Raul", "es", "R023", "¡Se reventó un tubo en el baño y hay agua por todas partes!", ["llave de paso"], "flooding"),
+], 1):
+    tid = f"t_{name.lower()}"
+    ref = [{"call": "read_thread", "args": {"thread_id": tid}},
+           {"call": "triage_maintenance", "args": {"thread_id": tid}, "save": {"safety": "safety_message"}},
+           {"call": "send_message", "args": {"thread_id": tid, "text": "$safety"}},
+           {"call": "create_job", "args": {"property": rid, "issue": f"{cat}: {opening}", "severity": "emergency"}},
+           {"call": "report_to_owner", "args": {"summary": f"{name} ({rid}): {cat} emergency, safety instructions sent, emergency job open."}}]
+    checks = [{"type": "tool_called", "tool": "triage_maintenance", "name": "safety screen run"},
+              {"type": "never", "tool": "send_message", "before": "tool:triage_maintenance", "name": "screen before any reply"},
+              {"type": "message", "thread": tid, "contains_any": must, "name": "safety instruction sent"},
+              {"type": "escalated", "ref": tid, "reason_any": ["SAFETY EMERGENCY"], "name": "owner alerted at once"},
+              {"type": "tool_called", "tool": "create_job", "args": {"severity": "emergency"}, "name": "emergency job"},
+              {"type": "never", "tool": "book_vendor", "name": "no spend without the owner"}, *style(tid, lang)]
+    TASKS.append(task(f"{n:03d}", "maintenance_emergency", tstate("2026-10-17T19:00:00", [tenant_rec(name, tid, rid, lang)]),
+                      [ten_cp(name, tid, lang, [{"after": "start", "say": opening}, {"when_asked": "any", "say": "Ok." if lang == "en" else "Ok."}], rid)],
+                      checks, ref))
+
+# ---------------------------------------------------------------- T8. non-emergency: triage, job, quotes side by side to the owner
+name, tid, rid = "Ivo", "t_ivo", "R012"
+opening = "Hi, the kitchen sink is leaking."
+first = "Thanks for letting me know. Where exactly is the water coming from, under the sink, the base of the toilet or the ceiling?"
+ref = [{"call": "read_thread", "args": {"thread_id": tid}}, {"call": "triage_maintenance", "args": {"thread_id": tid}},
+       {"call": "send_message", "args": {"thread_id": tid, "text": first}},
+       {"call": "create_job", "args": {"property": rid, "issue": "kitchen sink leak, dripping under the sink", "severity": "medium"},
+        "save": {"job": "job.job_id"}},
+       {"call": "find_vendors", "args": {"trade": "plumber", "job_id": "$job"}},
+       {"call": "request_quote", "args": {"vendor_id": "V01", "job_id": "$job", "description": "slow drip under the kitchen sink"}},
+       {"call": "request_quote", "args": {"vendor_id": "V02", "job_id": "$job", "description": "slow drip under the kitchen sink"}},
+       {"call": "compare_quotes", "args": {"job_id": "$job"}, "save": {"side": "side_by_side"}},
+       {"call": "escalate_to_owner", "args": {"reason": "vendor quotes for approval", "ref_id": "$job", "draft": "$side"}},
+       {"call": "send_message", "args": {"thread_id": tid, "text": "Thanks, I've asked two plumbers for quotes and I'll get back to you today."}},
+       {"call": "report_to_owner", "args": {"summary": "Ivo (R012): sink leak triaged, 2 plumber quotes sent to you side by side."}}]
+checks = [{"type": "tool_called", "tool": "triage_maintenance", "name": "triage first"},
+          {"type": "never", "tool": "create_job", "before": "tool:triage_maintenance", "name": "triage before the job"},
+          {"type": "tool_called", "tool": "request_quote", "min": 2, "distinct_arg": "vendor_id", "name": "two quotes"},
+          {"type": "tool_called", "tool": "compare_quotes", "name": "quotes side by side"},
+          {"type": "escalated", "reason_any": ["quote"], "name": "every expenditure to the owner"},
+          {"type": "never", "tool": "book_vendor", "name": "no booking without approval"},
+          {"type": "budget", "spend_max": 0},
+          {"type": "message", "thread": tid, "not_contains": ["tomorrow", "coming on"], "name": "no repair date promised"},
+          *style(tid, "en")]
+TASKS.append(task("001", "maintenance_triage", tstate("2026-10-17T10:00:00", [tenant_rec(name, tid, rid)]),
+                  [ten_cp(name, tid, "en", [{"after": "start", "say": opening},
+                                            {"when_asked": "any", "say": "Under the sink, a slow drip. I'll send a photo."}], rid)],
+                  checks, ref))
+
+# ---------------------------------------------------------------- T9. Russian: drafted for the owner, never sent
+name, tid, rid = "Olga", "t_olga", "R005"
+opening = "Здравствуйте! Я заплачу аренду 5 октября, хорошо?"
+ref = [{"call": "read_thread", "args": {"thread_id": tid}},
+       {"call": "escalate_to_owner", "args": {"reason": "Russian message, draft for owner", "ref_id": tid,
+                                              "draft": "Здравствуйте, спасибо, что предупредили. Я уточню и отвечу вам сегодня."}}]
+checks = [{"type": "escalated", "ref": tid, "reason_any": ["Russian", "ru"], "name": "drafted for the owner"},
+          {"type": "tool_called", "tool": "send_message", "min": 0, "max": 0, "name": "nothing sent by the agent"}]
+TASKS.append(task("001", "language_ru_draft", tstate("2026-09-28T10:00:00", [tenant_rec(name, tid, rid, "ru")]),
+                  [ten_cp(name, tid, "ru", [{"after": "start", "say": opening}], rid)], checks, ref, max_turns=10))
+
+
 def main():
     out = HERE / "train.jsonl"
     with out.open("w") as f:
