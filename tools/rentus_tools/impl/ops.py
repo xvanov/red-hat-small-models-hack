@@ -70,25 +70,85 @@ def fetch_page(world, url: str):
     return {"url": url, "text": text}
 
 
+ZIP_HOW = ("pass job_id from create_job (the job carries the property's zip), or a 5-digit zip from the room record "
+           "(get_room / list_rooms); never guess a zip")
+
+
 @tool("find_vendors")
-def find_vendors(world, trade: str, zip: str):
+def find_vendors(world, trade: str, zip: str | None = None, job_id: str | None = None):
     t = norm_trade(trade)
     if t is None:
         raise ToolError("INVALID_ARGS", f"unknown trade {trade!r}", hint="trades: plumber, hvac, electrician")
-    out = [_public(v) for v in world.vendors if v["trade"] == t and zip in v.get("service_area", [])]
+    job_zip = None
+    if job_id is not None:
+        job = need(world, "jobs", job_id, "job")
+        job_zip = job.get("zip")
+        if not job_zip and zip is None:
+            raise ToolError("INVALID_ARGS", f"job {job_id} has no zip: its property {job.get('property')!r} matched no room",
+                            hint="find the room with list_rooms (its address or area) or get_room, then call "
+                                 "find_vendors with that room's zip")
+        if job_zip and zip is not None and zip != job_zip:
+            raise ToolError("INVALID_ARGS", f"zip {zip} does not match job {job_id}'s property zip {job_zip}",
+                            hint="pass job_id alone and the job's zip is used", details={"job_zip": job_zip})
+    if zip is None and job_zip is None:
+        raise ToolError("INVALID_ARGS", "find_vendors needs a zip or a job_id", hint=ZIP_HOW)
+    z = zip or job_zip
+    out = [_public(v) for v in world.vendors if v["trade"] == t and z in v.get("service_area", [])]
     out.sort(key=lambda v: (-v["rating"], v["vendor_id"]))
-    return {"vendors": out, "trade": t, "zip": zip}
+    res = {"vendors": out, "trade": t, "zip": z}
+    if job_id is not None:
+        res["job_id"] = job_id
+    return res
+
+
+def _norm_addr(s: str) -> str:
+    s = re.sub(r"\(.*?\)", " ", s.lower())
+    return " ".join(re.findall(r"[a-z0-9]+", s))
+
+
+def resolve_property(world, prop: str) -> dict | None:
+    """Where a create_job `property` is: a room id, a street address of a room, or text with a 5-digit zip.
+    Returns {room_id, address, zip, area} (room_id None for a multi-room address) or None when nothing
+    matches or the matches disagree on the zip."""
+    p = prop.strip()
+    room = world.get("rooms", p) or world.get("rooms", p.upper())
+    if room:
+        return {"room_id": room["room_id"], "address": room.get("address") or room.get("address_public"),
+                "zip": room.get("zip"), "area": room.get("area")}
+    q = _norm_addr(p)
+    hits = []
+    if q:
+        for r in world.rooms:
+            addr = r.get("address") or r.get("address_public") or ""
+            street, full = _norm_addr(addr.split(",")[0]), _norm_addr(addr)
+            if street and (f" {street} " in f" {q} " or (len(q) >= 6 and f" {q} " in f" {full} ")):
+                hits.append(r)
+    if hits:
+        if len({r.get("zip") for r in hits}) != 1:
+            return None
+        r = hits[0]
+        return {"room_id": r["room_id"] if len(hits) == 1 else None,
+                "address": r.get("address") or r.get("address_public"), "zip": r.get("zip"), "area": r.get("area")}
+    m = re.search(r"\b(\d{5})\b", p)
+    return {"room_id": None, "address": None, "zip": m.group(1), "area": None} if m else None
 
 
 @tool("create_job")
 def create_job(world, property: str, issue: str, severity: str):
     if not issue.strip() or not property.strip():
         raise ToolError("INVALID_ARGS", "create_job: property and issue must not be empty")
-    room = world.get("rooms", property)
-    job = {"job_id": world.next_id("J"), "property": property, "zip": (room or {}).get("zip"), "issue": issue,
+    loc = resolve_property(world, property) or {}
+    job = {"job_id": world.next_id("J"), "property": property, "room_id": loc.get("room_id"),
+           "address": loc.get("address"), "zip": loc.get("zip"), "area": loc.get("area"), "issue": issue,
            "severity": severity, "status": "open", "vendor_id": None, "cost": None, "created_at": world.clock["now"]}
     world.jobs.append(job)
-    return {"job": copy.deepcopy(job)}
+    out = {"job": copy.deepcopy(job)}
+    if job["zip"]:
+        out["next"] = f"find_vendors with the trade and job_id {job['job_id']} (zip {job['zip']})"
+    else:
+        out["hint"] = ("the property matched no room, so the job has no zip; find the room with list_rooms or "
+                       "get_room and call find_vendors with its zip")
+    return out
 
 
 def quote_amount(vendor: dict, job: dict) -> int:

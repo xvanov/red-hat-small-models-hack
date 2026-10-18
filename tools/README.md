@@ -7,7 +7,7 @@ Sandbox tools for the Rentus Operator, implementing `contracts/tools.md`. Python
 ```bash
 uv venv tools/.venv --python 3.12
 uv pip install --python tools/.venv/bin/python -e 'tools[test]'
-tools/.venv/bin/python -m pytest tools -q          # 176 tests
+tools/.venv/bin/python -m pytest tools -q          # 180 tests
 ```
 
 Or skip the install and put `tools/` on `sys.path` (gym and operator already do this).
@@ -50,7 +50,7 @@ The sandbox clock is `world.clock["now"]`. Tools never read the wall clock; scen
 | Reader | `read_reply` | reader JSON per `data/reader_schema.md`, plus `backend` (`model` or `fallback`) |
 | Register | `upsert_renter`, `match_renters` | gate items use the reader's shapes (`{"status","value"}`, move_in `{"status","date","raw"}`); scalar shorthand accepted (`"lease": true`, `"move_in": "2026-11-01"`); phones normalized to E.164 |
 | Calendar | `find_showing_slots`, `propose_showing` | `POLICY_BLOCKED` unless lease is an explicit answer (status `answered` and value true, or `months` >= `policy.lease_floor_months`; when `months` is given it decides), move_in has an exact date (`answered` or `exception`), and phone, reason and occupants are filled; occupants must fit `max_occupants`; slots stay inside `policy.showing_hours` |
-| Ops | `web_search`, `fetch_page`, `find_vendors`, `create_job`, `request_quote`, `book_vendor` | vendors with `responds: false` return `TIMEOUT` (not retryable, hint: try another vendor); `BUDGET_EXCEEDED` above `policy.spend_limit_usd` (default $500); quote amounts are deterministic within each vendor's range |
+| Ops | `web_search`, `fetch_page`, `find_vendors`, `create_job`, `request_quote`, `book_vendor` | `create_job` resolves `property` (room id, street address, or text with a ZIP) against the rooms and returns the job with `room_id`, `address`, `zip`, `area`; `find_vendors` takes `zip` or `job_id` (uses the job's zip), and its `INVALID_ARGS` hints say where a zip comes from; vendors with `responds: false` return `TIMEOUT` (not retryable, hint: try another vendor); `BUDGET_EXCEEDED` above `policy.spend_limit_usd` (default $500); quote amounts are deterministic within each vendor's range |
 | Owner | `escalate_to_owner`, `report_to_owner` | `ref_id` must exist (thread, job, renter, listing, quote, room or event) |
 
 Hidden simulator truth (`vendors[].responds`, `vendors[].quote_range`) never appears in tool output.

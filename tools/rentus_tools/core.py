@@ -17,6 +17,8 @@ from .schemas import PARAMS
 from .world import World
 
 REGISTRY: dict[str, Callable[..., Any]] = {}
+# Extra guidance appended to an INVALID_ARGS hint from argument validation.
+ARG_HINTS = {"find_vendors": "give job_id from create_job, or the 5-digit zip from job.zip or get_room; never guess a zip"}
 
 
 def tool(name: str):
@@ -35,7 +37,8 @@ def _arg_summary(name: str) -> str:
         if "enum" in v:
             t = "|".join(v["enum"])
         parts.append(f"{k} ({t}{'' if k in p['required'] else ', optional'})")
-    return f"{name} args: " + (", ".join(parts) or "none")
+    out = f"{name} args: " + (", ".join(parts) or "none")
+    return f"{out}; {ARG_HINTS[name]}" if name in ARG_HINTS else out
 
 
 def validate_args(name: str, args: Any) -> dict:

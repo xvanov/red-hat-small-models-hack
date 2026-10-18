@@ -406,6 +406,55 @@ def test_find_vendors_hides_simulator_truth(world):
     call_err(world, "find_vendors", {"trade": "astrologer", "zip": "27701"}, "INVALID_ARGS")
 
 
+def test_create_job_resolves_property_zip_and_address(world):
+    r20 = world.get("rooms", "R020")
+    street = r20["address"].split(",")[0]
+    by_id = call_ok(world, "create_job", {"property": "r020", "issue": "leak", "severity": "medium"})
+    j = by_id["job"]
+    assert (j["room_id"], j["zip"], j["address"], j["area"]) == ("R020", r20["zip"], r20["address"], r20["area"])
+    assert j["job_id"] in by_id["next"] and "hint" not in by_id
+    by_addr = call_ok(world, "create_job", {"property": street, "issue": "dripping ceiling", "severity": "medium"})["job"]
+    assert by_addr["zip"] == r20["zip"] and by_addr["address"] == r20["address"] and by_addr["room_id"] == "R020"
+    full = call_ok(world, "create_job", {"property": f"Tenant at {street.upper()}, Raleigh", "issue": "x", "severity": "low"})["job"]
+    assert full["zip"] == r20["zip"]
+    z = call_ok(world, "create_job", {"property": "some house in 27701", "issue": "x", "severity": "low"})["job"]
+    assert z["zip"] == "27701" and z["address"] is None
+    miss = call_ok(world, "create_job", {"property": "1 Nowhere Lane", "issue": "x", "severity": "low"})
+    assert miss["job"]["zip"] is None and "list_rooms" in miss["hint"]
+
+
+def test_find_vendors_by_job_id(world):
+    j = call_ok(world, "create_job", {"property": "R001", "issue": "sink leak", "severity": "medium"})["job"]
+    by_job = call_ok(world, "find_vendors", {"trade": "plumber", "job_id": j["job_id"]})
+    by_zip = call_ok(world, "find_vendors", {"trade": "plumber", "zip": j["zip"]})
+    assert by_job["vendors"] == by_zip["vendors"] and by_job["zip"] == j["zip"] and by_job["job_id"] == j["job_id"]
+    assert call_ok(world, "find_vendors", {"trade": "plumber", "zip": j["zip"], "job_id": j["job_id"]})["vendors"]
+    e = call_err(world, "find_vendors", {"trade": "plumber", "zip": "27999", "job_id": j["job_id"]}, "INVALID_ARGS")
+    assert e["details"]["job_zip"] == j["zip"] and "job_id alone" in e["hint"]
+    call_err(world, "find_vendors", {"trade": "plumber", "job_id": "J999"}, "NOT_FOUND")
+
+
+def test_find_vendors_invalid_args_say_how_to_get_a_zip(world):
+    e = call_err(world, "find_vendors", {"trade": "plumber"}, "INVALID_ARGS")
+    assert "job_id" in e["hint"] and "get_room" in e["hint"]
+    e = call_err(world, "find_vendors", {"trade": "plumber", "zip": "Silverbell Run"}, "INVALID_ARGS")
+    assert "5-digit" in e["message"] and "create_job" in e["hint"] and "never guess" in e["hint"]
+    nz = call_ok(world, "create_job", {"property": "1 Nowhere Lane", "issue": "x", "severity": "low"})["job"]
+    e = call_err(world, "find_vendors", {"trade": "plumber", "job_id": nz["job_id"]}, "INVALID_ARGS")
+    assert "list_rooms" in e["hint"]
+    # an explicit zip still works for a job whose property matched no room
+    assert call_ok(world, "find_vendors", {"trade": "plumber", "job_id": nz["job_id"], "zip": "27701"})["vendors"]
+
+
+def test_find_vendors_and_create_job_descriptions_explain_zip():
+    for variant in ("verbose", "terse"):
+        tools = {t["function"]["name"]: t["function"] for t in rt.tool_schemas(variant)}
+        fv, cj = tools["find_vendors"], tools["create_job"]
+        assert fv["parameters"]["required"] == ["trade"] and {"zip", "job_id"} <= set(fv["parameters"]["properties"])
+        assert "job_id" in fv["description"] and "zip" in cj["description"]
+        assert fv["parameters"]["properties"]["job_id"].get("description")
+
+
 def test_ops_quote_and_book_flow(world):
     job = call_ok(world, "create_job", {"property": "R001", "issue": "kitchen sink leaking", "severity": "medium"})["job"]
     q1 = call_ok(world, "request_quote", {"vendor_id": "V02", "job_id": job["job_id"], "description": "leak under sink"})["quote"]

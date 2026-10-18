@@ -74,10 +74,10 @@ Arguments are JSON. All return the envelope above; the `data` shape is listed.
 | | `propose_showing` | `renter_id`, `room_id`, `start` | `event` (status proposed); `POLICY_BLOCKED` unless the renter's gate is complete |
 | Ops | `web_search` | `query` | `results[{title, url, snippet}]` (sandbox: from vendor fixtures) |
 | | `fetch_page` | `url` | `{text}` |
-| | `find_vendors` | `trade`, `zip` | `vendors[]` |
+| | `find_vendors` | `trade`, `zip?`, `job_id?` (one of them; `job_id` uses the job's zip) | `{vendors[], trade, zip, job_id?}`; `INVALID_ARGS` with a hint on how to get a zip when neither resolves |
 | | `request_quote` | `vendor_id`, `job_id`, `description` | `quote` or `TIMEOUT` when the vendor doesn't respond |
 | | `book_vendor` | `quote_id` | `job`; `BUDGET_EXCEEDED` above `policy.spend_limit_usd` |
-| | `create_job` | `property`, `issue`, `severity` | `job` |
+| | `create_job` | `property` (room id or street address), `issue`, `severity` | `job` with `room_id`, `address`, `zip`, `area` resolved from the rooms (null when the property matches no room, plus a `hint`) |
 | Owner | `escalate_to_owner` | `reason`, `ref_id`, `draft?` | `escalation` |
 | | `report_to_owner` | `summary` | `{ok}` |
 
