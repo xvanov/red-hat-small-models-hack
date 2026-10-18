@@ -36,6 +36,7 @@
   button:disabled { opacity: .5; }
   .empty { text-align: center; color: var(--muted); padding: 64px 16px; }
   .empty b { display: block; color: var(--text); font-size: 17px; margin-bottom: 4px; }
+  .err { margin-top: 10px; padding: 8px 10px; border-radius: 8px; background: color-mix(in srgb, var(--err) 12%, transparent); color: var(--err); font-size: 14px; }
   .done { color: var(--muted); font-size: 14px; padding: 10px 2px; border-top: 1px solid var(--line); }
 </style>
 </head>
@@ -55,7 +56,15 @@
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const NAMES = { messenger_personal: "Marketplace · Messenger", messenger: "Messenger", sms: "SMS", email: "Email" };
-const S = { items: [], editing: {}, key: "", recent: [] };
+const S = { items: [], editing: {}, key: "", recent: [], sending: {}, err: {} };
+const isNote = (a) => ["report", "error"].includes(a.kind);
+function humanize(t) {
+  return String(t ?? "")
+    .replace(/\b(thread_id|thread|approval_id|message_id|ref_id|esc_id)\s*[=:]?\s*['"]?[\w:.-]+['"]?/gi, "this conversation")
+    .replace(/\b(messenger_personal|messenger|sms|email|craigslist|roomies|padsplit|marketplace):[0-9a-f]{6,}\b/gi, "this conversation")
+    .replace(/\b[0-9a-f]{10,}\b/gi, "").replace(/\b(ESC|ap_|t_)\w+/g, "")
+    .replace(/(this conversation)(\s+this conversation)+/g, "$1").replace(/\s{2,}/g, " ").trim();
+}
 
 async function load() {
   try {
@@ -69,23 +78,27 @@ async function load() {
 }
 function render() {
   if (document.activeElement && document.activeElement.tagName === "TEXTAREA") return; // don't clobber typing
-  const key = JSON.stringify([S.items, S.editing, S.recent]);
+  const key = JSON.stringify([S.items, S.editing, S.recent, S.sending, S.err]);
   if (key === S.key) return;
   S.key = key;
-  $("#head").textContent = S.items.length ? `Needs you · ${S.items.length}` : "Needs you";
-  $("#list").innerHTML = S.items.length ? S.items.map((a) => {
-    const ed = a.id in S.editing;
+  const acts = S.items.filter((a) => !isNote(a)), notes = S.items.filter(isNote);
+  $("#head").textContent = acts.length ? `Needs you · ${acts.length}` : "Needs you";
+  $("#list").innerHTML = (acts.length ? acts.map((a) => {
+    const ed = a.id in S.editing, hasDraft = !!(a.draft_text || "").trim();
     return `<div class="card" data-id="${esc(a.id)}">
       <div class="who">${esc(a.who || "Renter")}${a.channel ? `<span class="chip">${esc(NAMES[a.channel] || a.channel[0].toUpperCase() + a.channel.slice(1))}</span>` : ""}${a.source === "assistant" ? `<span class="chip">Assistant</span>` : ""}</div>
       ${a.last_message ? `<div class="quote">${esc(a.last_message)}</div>` : ""}
-      ${a.reason ? `<div class="reason">${esc(a.reason)}</div>` : ""}
+      ${a.reason ? `<div class="reason">${esc(humanize(a.reason))}</div>` : ""}
       ${ed ? `<div class="lbl">Your reply</div><textarea>${esc(S.editing[a.id])}</textarea>`
            : a.draft_text ? `<div class="lbl">Drafted reply</div><div class="draft">${esc(a.draft_text)}</div>` : ""}
-      <div class="btns">${ed
+      ${S.err[a.id] ? `<div class="err">${esc(S.err[a.id])}</div>` : ""}
+      <div class="btns">${S.sending[a.id] ? `<button class="approve" disabled>Sending…</button><span></span><span></span>` : ed
         ? `<button class="approve" data-act="send-edit">Send</button><button data-act="cancel">Cancel</button><span></span>`
-        : `<button class="approve" data-act="approve">Approve</button><button data-act="edit">Edit</button><button class="deny" data-act="deny">Deny</button>`}</div>
+        : hasDraft ? `<button class="approve" data-act="approve">Approve</button><button data-act="edit">Edit</button><button class="deny" data-act="deny">Deny</button>`
+        : `<button data-act="dismiss">Dismiss</button><span></span><span></span>`}</div>
     </div>`;
-  }).join("") : `<div class="empty"><b>You're all caught up</b>Nothing is waiting for your decision.</div>`;
+  }).join("") : `<div class="empty"><b>You're all caught up</b>Nothing is waiting for your decision.</div>`)
+  + (notes.length ? `<h2>Notes from the operator</h2>` + notes.map((a) => `<div class="card note" data-id="${esc(a.id)}"><div class="reason" style="margin:0">${esc(humanize(a.reason || ""))}</div><div class="btns" style="grid-template-columns:1fr"><button data-act="dismiss">Dismiss</button></div></div>`).join("") : "");
   $("#recent").innerHTML = S.recent.length ? `<h2>Just decided</h2>` + S.recent.map((r) => `<div class="done">${esc(r)}</div>`).join("") : "";
 }
 document.addEventListener("input", (e) => {
@@ -99,17 +112,24 @@ document.addEventListener("click", async (e) => {
   const a = S.items.find((x) => x.id === id) || {};
   if (act === "edit") { S.editing[id] = a.draft_text || ""; S.key = ""; render(); card.querySelector("textarea")?.focus(); return; }
   if (act === "cancel") { delete S.editing[id]; document.activeElement.blur(); S.key = ""; render(); return; }
-  const body = act === "send-edit" ? { decision: "edit", text: S.editing[id] || "", source: "phone" } : { decision: act, source: "phone" };
+  const body = act === "send-edit" ? { decision: "edit", text: S.editing[id] || "", source: "phone" } : { decision: act === "dismiss" ? "approve" : act, source: "phone" };
+  if (act === "send-edit" && !(S.editing[id] || "").trim()) return;
   card.querySelectorAll("button").forEach((x) => (x.disabled = true));
+  delete S.err[id];
+  if (act === "approve" || act === "send-edit") { S.sending[id] = true; S.key = ""; render(); }
   const r = await fetch("/api/live/approvals/" + encodeURIComponent(id), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  if (r.ok) {
+  const d = await r.json().catch(() => ({}));
+  delete S.sending[id];
+  const delivered = r.ok && d.ok && (d.sent || ["sent", "recorded"].includes(d.status));
+  if (r.ok && !delivered && (act === "approve" || act === "send-edit")) {
+    S.err[id] = "Not sent: " + (d.error || d.status || "the channel did not confirm delivery");
+  } else if (r.ok) {
     delete S.editing[id];
     S.items = S.items.filter((x) => x.id !== id);
-    S.recent.unshift(`${act === "deny" ? "Denied" : act === "send-edit" ? "Sent your edited reply to" : "Approved reply to"} ${a.who || "renter"}`);
+    S.recent.unshift(act === "dismiss" ? "Dismissed a note" : `${act === "deny" ? "Denied" : act === "send-edit" ? "Sent your edited reply to" : "Sent the reply to"} ${a.who || "renter"}`);
     S.recent = S.recent.slice(0, 5);
   } else {
-    const d = await r.json().catch(() => ({}));
-    alert("Couldn't record that: " + (d.detail || d.error || r.status));
+    S.err[id] = "Not sent: " + (d.detail || d.error || r.status);
   }
   if (document.activeElement) document.activeElement.blur();
   S.key = "";

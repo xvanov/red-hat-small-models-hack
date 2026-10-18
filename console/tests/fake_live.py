@@ -55,10 +55,14 @@ THREADS: dict[str, dict] = {
     },
 }
 APPROVALS: dict[str, dict] = {
-    "ap_2": {"id": "ap_2", "thread_id": "t_test_mp", "reason": "Marketplace reply", "draft_text": "Hi Alex, yes it is! When are you hoping to move in?", "created": _ts(1)},
-    "ap_1": {"id": "ap_1", "thread_id": "t_test_sam", "reason": "Asked for $700 instead of $750",
+    "ap_2": {"id": "ap_2", "thread_id": "t_test_mp", "kind": "draft", "reason": "Marketplace reply", "draft_text": "Hi Alex, yes it is! When are you hoping to move in?", "created": _ts(1)},
+    "ap_1": {"id": "ap_1", "thread_id": "t_test_sam", "kind": "escalation", "reason": "Asked for $700 instead of $750",
              "draft_text": "Thanks Sam. The rent is $750 a month; I can check with the owner about anything else.", "created": _ts(5)},
 }
+APPROVALS["ap_3"] = {"id": "ap_3", "thread_id": "t_test_lee", "kind": "report", "draft_text": "", "created": _ts(3),
+                     "reason": "thread_id 'sms:9f8e7d6c5b4a' not found in store; reply skipped, will retry on the next poll"}
+THREADS["t_test_lee"]["busy"] = True
+THREADS["t_test_lee"]["busy_since"] = _ts(0.2)
 DECISIONS: list[tuple] = []
 
 
@@ -108,14 +112,16 @@ def decide(approval_id, decision, text=None):
             t["messages"].append({"id": f"m{next(_IDS)}", "direction": "out", "text": text or a["draft_text"], "ts": _ts(0),
                                   "status": "sent", "channel": t["channel"]})
             t["needs_owner"] = False
-        return {"ok": True}
+        return {"ok": True, "decision": decision, "sent": decision != "deny", "status": "sent" if decision != "deny" else None}
 
 
 def send_owner_message(thread_id, text):
     with _LOCK:
         t = THREADS[thread_id]
+        if thread_id == "t_test_lee" and text.startswith("BLOCKED"):
+            return {"ok": False, "status": "awaiting_approval", "error": "sending is switched off (kill switch)"}
         t["messages"].append({"id": f"m{next(_IDS)}", "direction": "out", "text": text, "ts": _ts(0), "status": "sent", "channel": t["channel"]})
-        return {"ok": True}
+        return {"ok": True, "status": "sent"}
 
 
 def start_conversation(channel, to, text):

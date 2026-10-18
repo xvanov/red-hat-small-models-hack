@@ -13,6 +13,7 @@ import time
 _POOL = cf.ThreadPoolExecutor(max_workers=4, thread_name_prefix="live")
 _STATE: dict = {"mod": None, "error": None, "tried": 0.0}
 CALL_TIMEOUT_S = float(os.environ.get("CONSOLE_LIVE_TIMEOUT_S") or 8)
+SEND_TIMEOUT_S = float(os.environ.get("CONSOLE_LIVE_SEND_TIMEOUT_S") or 40)  # decide / reply actually deliver
 GATE = ["lease", "move_in", "phone", "reason", "people"]
 
 
@@ -39,16 +40,16 @@ def _api():
         raise Unavailable(_STATE["error"])
 
 
-def call(fn: str, *args, **kw):
+def call(fn: str, *args, _timeout: float | None = None, **kw):
     mod = _api()
     f = getattr(mod, fn, None)
     if f is None:
         raise Unavailable(f"{module_name()}.{fn} is missing")
     fut = _POOL.submit(f, *args, **kw)
     try:
-        return fut.result(timeout=CALL_TIMEOUT_S)
+        return fut.result(timeout=_timeout or CALL_TIMEOUT_S)
     except cf.TimeoutError:
-        raise Unavailable(f"{fn} did not answer within {CALL_TIMEOUT_S:.0f}s")
+        raise Unavailable(f"{fn} did not answer within {_timeout or CALL_TIMEOUT_S:.0f}s; it may still complete, check the thread")
 
 
 def last_error() -> str | None:

@@ -6,6 +6,15 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const md = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>");
+function humanize(t) {
+  return String(t ?? "")
+    .replace(/\b(thread_id|thread|approval_id|message_id|ref_id|esc_id)\s*[=:]?\s*['"]?[\w:.-]+['"]?/gi, "this conversation")
+    .replace(/\b(messenger_personal|messenger|sms|email|craigslist|roomies|padsplit|marketplace):[0-9a-f]{6,}\b/gi, "this conversation")
+    .replace(/\b[0-9a-f]{10,}\b/gi, "")
+    .replace(/\b(ESC|ap_|t_)\w+/g, "")
+    .replace(/(this conversation)(\s+this conversation)+/g, "$1")
+    .replace(/\s{2,}/g, " ").trim().replace(/^./, (c) => c.toUpperCase());
+}
 const pct = (x, d = 0) => (x == null || isNaN(x) ? "–" : (x * 100).toFixed(d) + "%");
 const fix = (x, d = 2) => (x == null || isNaN(x) ? "–" : Number(x).toFixed(d));
 async function j(url) {
@@ -76,16 +85,16 @@ const I = {
   wrench: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0 5 5L21 13l-8 8-4-4 8-8-1.3-1.3a4 4 0 0 0-5-5z" transform="translate(-3 0)"/></svg>',
   cal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>',
 };
-const LISTING_SITES = ["marketplace", "facebook", "roomies", "craigslist", "padsplit", "zillow", "furnished_finder"];
+const LISTING_SITES = ["marketplace", "facebook_page", "facebook", "roomies", "craigslist", "padsplit", "zillow", "furnished_finder"];
 function chIcon(ch) {
   ch = (ch || "").toLowerCase();
-  if (ch.includes("messenger") || ch === "facebook_page") return I.messenger;
+  if (ch.includes("messenger")) return I.messenger;
   if (ch.includes("sms") || ch.includes("text") || ch.includes("phone")) return I.sms;
   if (ch.includes("mail")) return I.email;
   if (LISTING_SITES.some((x) => ch.includes(x))) return I.listing;
   return I.chat;
 }
-const CH_NAME = { messenger_personal: "Marketplace · Messenger", messenger: "Messenger", sms: "SMS", email: "Email", marketplace: "Marketplace", roomies: "Roomies", craigslist: "Craigslist", padsplit: "PadSplit", facebook: "Facebook" };
+const CH_NAME = { facebook_page: "Facebook Page", messenger_personal: "Marketplace · Messenger", messenger: "Messenger", sms: "SMS", email: "Email", marketplace: "Marketplace", roomies: "Roomies", craigslist: "Craigslist", padsplit: "PadSplit", facebook: "Facebook" };
 const chName = (c) => CH_NAME[(c || "").toLowerCase()] || (c ? c[0].toUpperCase() + c.slice(1) : "Unknown");
 
 const GATE = [["lease", "Lease"], ["move_in", "Move-in"], ["phone", "Phone"], ["reason", "Reason"], ["people", "People"]];
@@ -117,7 +126,7 @@ function emptyState(icon, title, text, detail) {
 const S = {
   tab: "inbox", threadId: null, status: null, live: null, threads: null, threadsErr: null, approvals: [], approvalsErr: null,
   thread: null, threadKey: "", filter: store.get("filter", "all"), activity: store.get("activity", true), actFilter: "all",
-  editing: {}, run: null, runView: null, turns: [], es: null, results: null, trust: null, perf: null, pipeFilter: "all",
+  editing: {}, sending: {}, apErr: {}, run: null, runView: null, turns: [], es: null, results: null, trust: null, perf: null, pipeFilter: "all",
 };
 
 async function pollStatus() {
@@ -136,8 +145,9 @@ async function pollStatus() {
     } else {
       el.title = `${S.live.send_enabled ? "Sending enabled" : "Drafts only, nothing is sent"} · allow-list ${S.live.allowlist_size}`;
       const byCh = {};
-      (S.live.channels || []).forEach((c) => { const k = c.channel; byCh[k] = byCh[k] ? { ...byCh[k], connected: byCh[k].connected || c.connected, line: byCh[k].line + ", " + (c.line || "") } : { ...c }; });
-      el.innerHTML = Object.values(byCh).map((c) => `<span class="stat" title="${esc(c.line || "")} ${esc(c.detail || "")}"><span class="dot ${c.connected ? "on" : "off"}"></span>${esc(chName(c.channel))}</span>`).join("") || "No channels";
+      (S.live.channels || []).forEach((c) => { const k = c.channel; const d = [c.line, c.detail].filter(Boolean).join(": ");
+        byCh[k] = byCh[k] ? { ...byCh[k], connected: byCh[k].connected || c.connected, tip: byCh[k].tip + "\n" + d } : { ...c, tip: d }; });
+      el.innerHTML = Object.values(byCh).map((c) => `<span class="stat" title="${esc(chName(c.channel))}: ${c.connected ? "connected" : "not connected"}\n${esc(c.tip || "")}"><span class="dot ${c.connected ? "on" : "off"}"></span>${esc(chName(c.channel))}</span>`).join("") || "No channels";
     }
   } catch { /* keep last */ }
 }
@@ -156,7 +166,8 @@ async function pollLive() {
   } catch (e) {
     S.threadsErr = String(e.message || e);
   }
-  const liveNeeds = (S.approvals || []).filter((x) => x.source === "live").length;
+  const liveNeeds = (S.approvals || []).filter((x) => x.source === "live" && actionable(x)).length;
+  for (const id of Object.keys(S.sending)) if (!(S.approvals || []).some((a) => a.id === id)) delete S.sending[id];
   const asstNeeds = (S.approvals || []).filter((x) => x.source === "assistant").length;
   badge("#nav-inbox", liveNeeds);
   badge("#nav-assistant", asstNeeds);
@@ -222,8 +233,9 @@ function mountInbox() {
   renderConvo();
 }
 
+const actionable = (a) => !["report", "error"].includes(a.kind);
 function needsYou(t) {
-  return t.needs_owner || (S.approvals || []).some((a) => a.source === "live" && a.thread_id === t.thread_id);
+  return t.needs_owner || (S.approvals || []).some((a) => a.source === "live" && actionable(a) && a.thread_id === t.thread_id);
 }
 
 function renderThreadList() {
@@ -252,7 +264,7 @@ function renderThreadList() {
       <div class="name">${esc(t.renter_name || t.contact_display)}</div>
       <div class="time">${esc(ago(t.last_ts))}</div>
       <div class="last">${esc(t.last_text || "")}</div>
-      <div class="meta">${needsYou(t) ? `<span class="chip warn">Needs you</span>` : gateDots(t.gate)}</div>
+      <div class="meta">${t.busy ? `<span class="chip accent">typing…</span>` : needsYou(t) ? `<span class="chip warn">Needs you</span>` : gateDots(t.gate)}</div>
     </div>`).join("");
 }
 
@@ -261,6 +273,7 @@ async function openThread(id) {
   S.thread = null;
   S.threadKey = "";
   S.editing = {};
+  S.replyErr = "";
   renderThreadList();
   renderConvo();
   if (id) await refreshThread();
@@ -319,7 +332,9 @@ function renderConvo() {
       </div>
       <div class="qual">${gateFull(t.gate)}</div>
       <div class="msgs" id="msgs">${renderMessages((t.messages || []).filter((m) => !(["awaiting_approval", "draft"].includes(m.status) && pend.some((a) => (a.draft_text || "").trim() === (m.text || "").trim()))))}</div>
+      ${t.busy ? `<div class="typing" data-since="${esc(t.busy_since || "")}"><span class="dots"><i></i><i></i><i></i></span>Operator is typing… <span class="secs"></span></div>` : ""}
       ${pend.map(renderPending).join("")}
+      <div class="flag" id="reply-err" style="margin:8px 20px 0" ${S.replyErr ? "" : "hidden"}>${esc(S.replyErr || "")}</div>
       <div class="composer">
         <textarea id="reply-text" rows="2" placeholder="Write a reply as yourself…"></textarea>
         <div class="bar"><span>Replies go out on ${esc(chName(t.channel))}${S.live && !S.live.send_enabled ? " as drafts (sending is off)" : ""}</span><button class="btn primary sm" id="reply-send">${I.send}Send</button></div>
@@ -357,19 +372,30 @@ function renderMessages(ms) {
 }
 
 function renderPending(a) {
-  const editing = a.id in S.editing;
+  if (!actionable(a)) {
+    const txt = humanize(a.reason || a.draft_text || "");
+    return `<details class="note" data-aid="${esc(a.id)}"><summary>${I.alert}<span>Note from operator</span><b>${esc(txt.length > 70 ? txt.slice(0, 67) + "…" : txt)}</b></summary>
+      <div class="nb"><div>${esc(txt)}</div><button class="btn sm" data-act="dismiss">Dismiss</button></div></details>`;
+  }
+  const editing = a.id in S.editing, sending = S.sending[a.id], err = S.apErr[a.id];
+  const hasDraft = !!(a.draft_text || "").trim();
+  const toRenter = a.source === "live" || !!a.channel;  // an Assistant escalation about a listing has no one to send to
+  const reason = humanize(a.reason || "");
+  let acts;
+  if (sending) acts = `<button class="btn ok" disabled><span class="spinner"></span>Sending…</button>`;
+  else if (editing) acts = `<button class="btn ok" data-act="send-edit">${I.check}Send edited reply</button><button class="btn ghost" data-act="cancel">Cancel</button>`;
+  else if (hasDraft && !toRenter) acts = `<button class="btn ok" data-act="approve">${I.check}Approve</button><button class="btn danger" data-act="deny">Deny</button>`;
+  else if (hasDraft) acts = `<button class="btn ok" data-act="approve">${I.check}Approve &amp; send</button><button class="btn" data-act="edit">Edit</button><button class="btn danger" data-act="deny">Deny</button>`;
+  else acts = `<button class="btn" data-act="write">Write a reply</button><button class="btn ghost" data-act="dismiss">Dismiss</button>`;
   return `<div class="pending" data-aid="${esc(a.id)}">
-    <div class="why"><b>Draft reply waiting for your approval</b>${a.reason ? `<div>${esc(a.reason)}</div>` : ""}</div>
-    ${editing ? `<textarea rows="3" class="edit-text">${esc(S.editing[a.id])}</textarea>` : a.draft_text ? `<div class="draft">${esc(a.draft_text)}</div>` : `<div class="muted small">No draft: write the reply yourself or approve the operator's plan.</div>`}
-    <div class="acts">
-      ${editing
-        ? `<button class="btn ok" data-act="send-edit">${I.check}Send edited reply</button><button class="btn ghost" data-act="cancel">Cancel</button>`
-        : `<button class="btn ok" data-act="approve">${I.check}Approve &amp; send</button><button class="btn" data-act="edit">Edit</button><button class="btn danger" data-act="deny">Deny</button>`}
-    </div>
+    <div class="why"><b>${hasDraft && toRenter ? "Draft reply waiting for your approval" : "The operator needs your decision"}</b>${reason ? `<div>${esc(reason)}</div>` : ""}</div>
+    ${editing ? `<textarea rows="3" class="edit-text">${esc(S.editing[a.id])}</textarea>` : hasDraft ? `<div class="draft">${esc(a.draft_text)}</div>` : ""}
+    ${err ? `<div class="flag">${esc(err)}</div>` : ""}
+    <div class="acts">${acts}</div>
   </div>`;
 }
 function bindPending(root, after) {
-  $$(".pending", root).forEach((el) => {
+  $$(".pending, .note", root).forEach((el) => {
     const id = el.dataset.aid;
     el.addEventListener("input", (e) => { if (e.target.classList.contains("edit-text")) S.editing[id] = e.target.value; });
     el.addEventListener("click", async (e) => {
@@ -379,15 +405,26 @@ function bindPending(root, after) {
       const act = b.dataset.act;
       if (act === "edit") { S.editing[id] = a.draft_text || ""; return rerenderApprovals(after); }
       if (act === "cancel") { delete S.editing[id]; return rerenderApprovals(after); }
-      const body = act === "send-edit" ? { decision: "edit", text: S.editing[id] } : { decision: act };
-      $$("button", el).forEach((x) => (x.disabled = true));
+      if (act === "write") { const ta = $("#reply-text"); if (ta) ta.focus(); return; }
+      const body = act === "send-edit" ? { decision: "edit", text: S.editing[id] } : { decision: act === "dismiss" ? "approve" : act };
+      if (act === "send-edit" && !(S.editing[id] || "").trim()) return;
+      delete S.apErr[id];
+      if (act === "approve" || act === "send-edit") { S.sending[id] = true; rerenderApprovals(after); }
+      else $$("button", el).forEach((x) => (x.disabled = true));
       try {
-        await post("/api/live/approvals/" + encodeURIComponent(id), body);
-        delete S.editing[id];
-        S.approvals = S.approvals.filter((x) => x.id !== id);
-        toast(act === "deny" ? "Denied" : "Approved");
+        const r = await post("/api/live/approvals/" + encodeURIComponent(id), body);
+        const delivered = r.ok && (r.sent || ["sent", "recorded"].includes(r.status));
+        if (act === "deny" || act === "dismiss" || delivered) {
+          delete S.editing[id];
+          S.approvals = S.approvals.filter((x) => x.id !== id);
+          toast(act === "deny" ? "Denied" : act === "dismiss" ? "Dismissed" : "Sent");
+        } else {
+          delete S.sending[id];
+          S.apErr[id] = "Not sent: " + (r.error || r.status || "the channel did not confirm delivery");
+        }
       } catch (err) {
-        toast("Couldn't record the decision: " + err.message);
+        delete S.sending[id];
+        S.apErr[id] = "Not sent: " + err.message;
       }
       await pollLive();
       rerenderApprovals(after);
@@ -401,18 +438,28 @@ function rerenderApprovals(after) {
   refreshThread();
 }
 
+function setReplyErr(msg) {
+  S.replyErr = msg;
+  const el = $("#reply-err");
+  if (el) { el.textContent = msg; el.hidden = !msg; }
+}
 async function sendReply() {
   const ta = $("#reply-text");
   const text = ta.value.trim();
   if (!text || !S.threadId) return;
   $("#reply-send").disabled = true;
   try {
-    await post(`/api/live/threads/${encodeURIComponent(S.threadId)}/reply`, { text });
-    ta.value = "";
+    const r = await post(`/api/live/threads/${encodeURIComponent(S.threadId)}/reply`, { text });
+    if (r.ok && (r.sent || r.status === "sent")) {
+      ta.value = "";
+      setReplyErr("");
+    } else {
+      setReplyErr("Not sent: " + (r.error || r.status || "the channel did not confirm delivery"));
+    }
     S.threadKey = "";
     await refreshThread();
   } catch (e) {
-    toast("Not sent: " + e.message);
+    setReplyErr("Not sent: " + e.message);
   } finally {
     const b = $("#reply-send");
     if (b) b.disabled = false;
@@ -529,6 +576,7 @@ function attachRun(id) {
   S.run = id;
   S.turns = [];
   S.runView = null;
+  S.posts = null;
   S.calls = {};
   renderChat();
   renderSide();
@@ -609,6 +657,7 @@ function renderChat() {
     return `<div class="turn-owner">${esc(t.owner)}</div>
       <div class="turn-op"><div class="av">${I.bot}</div><div class="body">
         ${t.reply ? `<div class="text">${md(t.reply)}</div>` : ""}
+        ${t.steps.filter((x) => x.kind === "verifier" && x.ok === false).map((x) => `<div class="flag">Verifier flagged (${esc(x.name)}): ${esc(humanize(x.err || ""))}</div>`).join("")}
         ${!t.done ? `<div class="working"><span class="spinner"></span>${t.steps.length ? esc(lastStepLabel(t)) : "Thinking…"}</div>` : ""}
         ${t.steps.length ? `<button class="steps-toggle" data-i="${i}">${t.open ? "Hide" : "Show"} ${tools} tool call${tools === 1 ? "" : "s"}${t.stats?.seconds ? ` · ${Math.round(t.stats.seconds)}s` : ""}${issues ? ` <span class="chip err">${issues} caught</span>` : ""}${recov ? ` <span class="chip ok">${recov} recovered</span>` : ""}</button>` : ""}
         ${t.open ? `<div class="steps">${renderTrace(trace, "all")}</div>` : ""}
@@ -630,7 +679,7 @@ async function ask() {
   const st = S.status?.run_status;
   try {
     if (!S.run || ["stopped", "error"].includes(st)) {
-      const r = await post("/api/runs", { goal: text, seed_renters: false });
+      const r = await post("/api/runs", { goal: text, seed_renters: false, live_channels: true });
       attachRun(r.run_id);
       S.status = { ...(S.status || {}), active_run: r.run_id, run_status: "starting" };
     } else {
@@ -645,19 +694,33 @@ async function ask() {
 async function pollRunView() {
   if (S.tab !== "assistant" || !S.run) return;
   try {
-    S.runView = await j(`/api/runs/${S.run}/view`);
+    const [v, p] = await Promise.all([j(`/api/runs/${S.run}/view`), j(`/api/runs/${S.run}/posts`)]);
+    S.runView = v;
+    S.posts = p;
     renderSide();
   } catch { /* run gone */ }
 }
 
-const POST_STATUS = {
-  live: ["ok", "Posted"], posted: ["ok", "Posted"], ready_to_submit: ["warn", "Needs your click"], draft: ["", "Draft"],
-  failed: ["err", "Failed"], error: ["err", "Failed"], pending: ["", "Posting…"],
-};
+const POST_CLS = { posted: "ok", published: "ok", ready: "warn", draft: "warn", login: "warn", failed: "err", not_connected: "", not_prepared: "" };
+function postRow(lid, r) {
+  const cls = POST_CLS[r.state] ?? "";
+  let act = "";
+  if (r.channel === "facebook_page") {
+    if (r.state === "not_prepared" || r.state === "failed") act = `<button class="btn sm" data-fb="prepare" data-lid="${esc(lid)}">Prepare Page post</button>`;
+    else if (r.state === "draft") act = `<button class="btn primary sm" data-fb="publish" data-lid="${esc(lid)}">Publish</button>`;
+    else if (r.state === "published" && r.url) act = `<a class="btn sm" href="${esc(r.url)}" target="_blank" rel="noopener">View post</a>`;
+  } else if (r.url && r.state === "posted") act = `<a class="btn sm" href="${esc(r.url)}" target="_blank" rel="noopener">View</a>`;
+  const extra = [];
+  if (r.screenshot) extra.push(`<a href="/api/file?path=${encodeURIComponent(r.screenshot)}" target="_blank" title="Open the filled form"><img class="shot" src="/api/file?path=${encodeURIComponent(r.screenshot)}" alt="Filled form on ${esc(chName(r.channel))}"></a>`);
+  if (r.state === "login" && r.command) extra.push(`<div class="small muted">Log in once, then ask again:</div><code class="cmd">${esc(r.command)}</code>`);
+  else if (r.state === "draft") extra.push(`<div class="small muted">Created on the Page as an unpublished post. Nobody sees it until you click Publish.</div>`);
+  else if (r.detail && r.state !== "posted") extra.push(`<div class="small muted">${esc(humanize(r.detail))}</div>`);
+  return `<div class="prow"><div class="ph">${chIcon(r.channel)}${esc(chName(r.channel))}<span class="r"><span class="chip ${cls}">${esc(r.label)}</span>${act}</span></div>${extra.length ? `<div class="px">${extra.join("")}</div>` : ""}</div>`;
+}
 function renderSide() {
   const el = $("#side");
   if (!el || S.tab !== "assistant") return;
-  const key = JSON.stringify([S.runView, (S.approvals || []).filter((a) => a.source === "assistant"), S.editing]);
+  const key = JSON.stringify([S.runView, S.posts, (S.approvals || []).filter((a) => a.source === "assistant"), S.editing]);
   if (key === el.dataset.key) return;
   if ($(".edit-text", el) && document.activeElement?.classList.contains("edit-text")) return; // don't clobber typing
   el.dataset.key = key;
@@ -665,20 +728,14 @@ function renderSide() {
   const aps = (S.approvals || []).filter((a) => a.source === "assistant");
   const out = [];
   if (aps.length) out.push(`<h2>Needs your approval</h2>` + aps.map(renderPending).join(""));
-  for (const l of v?.listings || []) {
-    const chans = Object.entries(l.channels || {});
+  for (const l of S.posts?.listings || []) {
+    const rows = l.channels || [];
+    const ready = rows.filter((r) => ["ready", "draft", "login"].includes(r.state)).length;
     out.push(`<h2>Listing</h2><div class="card listing-prev"><div class="card-body">
-      <div style="display:flex;gap:8px;align-items:baseline"><div class="ttl">${esc(l.title || l.listing_id)}</div><div class="price" style="margin-left:auto">${l.price ? "$" + esc(l.price) + "/mo" : ""}</div></div>
+      <div style="display:flex;gap:8px;align-items:baseline"><div class="ttl">${esc(l.title || "")}</div><div class="price" style="margin-left:auto">${l.price ? "$" + esc(l.price) + "/mo" : ""}</div></div>
       ${l.body ? `<div class="desc">${esc(l.body)}</div>` : ""}
-    </div>${chans.length ? `<div class="card-body rows" style="border-top:1px solid var(--line)">${chans.map(([ch, p]) => {
-      p = typeof p === "object" && p ? p : { status: String(p) };
-      let [cls, label] = POST_STATUS[p.status] || ["", p.status || "–"];
-      const sandbox = /\.local\b|sandbox/.test(p.url || "");
-      if (sandbox) label += " · sandbox";
-      const link = p.url && !sandbox ? `<a class="btn sm" href="${esc(p.url)}" target="_blank" rel="noopener">${p.status === "ready_to_submit" ? "Publish" : "View"}</a>`
-        : p.screenshot ? `<a class="btn sm" href="/api/file?path=${encodeURIComponent(p.screenshot)}" target="_blank">${p.status === "ready_to_submit" ? "Review &amp; publish" : "Screenshot"}</a>` : "";
-      return `<div>${chIcon(ch)}${esc(chName(ch))}<span class="r"><span class="chip ${cls}">${esc(label)}</span>${link}</span></div>`;
-    }).join("")}</div>` : ""}</div>`);
+    </div><div class="card-head" style="border-top:1px solid var(--line)">Where it's posted<span class="right muted small">${rows.filter((r) => ["posted", "published"].includes(r.state)).length} live · ${ready} waiting on you</span></div>
+    <div class="card-body rows">${rows.map((r) => postRow(l.listing_id, r)).join("")}</div></div>`);
   }
   for (const jb of v?.jobs || []) {
     const qs = (v.quotes || []).filter((q) => q.job_id === jb.job_id);
@@ -693,6 +750,16 @@ function renderSide() {
   if (cal.length) out.push(`<h2>Showings</h2><div class="card"><div class="card-body rows">${cal.map((c) => `<div>${I.cal}${esc(c.title)}<span class="r"><span class="muted small">${esc((c.start || "").replace("T", " "))}</span><span class="chip ${c.status === "confirmed" ? "ok" : "warn"}">${esc(c.status)}</span></span></div>`).join("")}</div></div>`);
   el.innerHTML = out.length ? out.join("") : emptyState(I.listing, "Nothing here yet", "Listings, posting status, repair quotes and showings the operator works on appear here.");
   bindPending(el, () => { delete el.dataset.key; renderSide(); });
+  $$("button[data-fb]", el).forEach((b) => (b.onclick = async () => {
+    const lid = b.dataset.lid, action = b.dataset.fb;
+    if (action === "publish" && !confirm("Publish this listing on the Rentus Homes Facebook Page? It becomes visible to everyone.")) return;
+    b.disabled = true;
+    try {
+      await post(`/api/runs/${S.run}/listings/${encodeURIComponent(lid)}/facebook`, { action });
+      toast(action === "publish" ? "Published on the Facebook Page" : "Unpublished Page post created");
+    } catch (e) { toast("Facebook Page: " + e.message); }
+    await pollRunView();
+  }));
 }
 
 // ================================================================== PIPELINE
@@ -893,6 +960,13 @@ async function tick() {
   }
   if (S.tab === "model" && S.modelAt && Date.now() - S.modelAt > 60000) renderModel(true);
 }
+setInterval(() => {
+  $$(".typing").forEach((el) => {
+    const d = parseTs(el.dataset.since);
+    const sec = el.querySelector(".secs");
+    if (sec) sec.textContent = d ? Math.max(0, Math.round((Date.now() - d) / 1000)) + "s" : "";
+  });
+}, 1000);
 (async function boot() {
   await pollStatus();
   route();

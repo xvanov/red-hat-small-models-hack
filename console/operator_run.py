@@ -155,7 +155,8 @@ def opening_goal(task: dict, session):
 
 class OperatorRun:
     def __init__(self, run_id: str, run_dir: Path, goal: str, scenario: dict | None, speed: float,
-                 live: bool, badge: dict, world_patch: dict | None = None, seed_renters: bool | None = None):
+                 live: bool, badge: dict, world_patch: dict | None = None, seed_renters: bool | None = None,
+                 live_channels: bool = False):
         import rentus_operator as op
         import rentus_tools as rt
         from rentus_operator import toolbox
@@ -201,7 +202,11 @@ class OperatorRun:
             self.submit(opening_goal(scenario, self.session))
         else:
             self.world = rt.load(patch=world_patch) if world_patch else rt.load()
-            if FIXTURE.exists():
+            self.live_channels = None
+            if live_channels:  # real adapters, the real Appling Way room only (console/live_world.py)
+                from . import live_world
+                self.live_channels = live_world.prepare_world(self.world, toolbox)
+            elif FIXTURE.exists():
                 toolbox.add_room(self.world, json.loads(FIXTURE.read_text())["room"])
             self.session = FreePlaySession(rt, self.world)
             if goal:

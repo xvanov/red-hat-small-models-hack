@@ -32,7 +32,7 @@ def base(tmp_path_factory):
     port = _free_port()
     runs = tmp_path_factory.mktemp("runs")
     env = {**os.environ, "CONSOLE_FORCE_STUB": "1", "OPERATOR_BASE_URL": "", "CONSOLE_RUNS_DIR": str(runs),
-           "CONSOLE_LIVE_MODULE": "console.tests.fake_live"}
+           "CONSOLE_LIVE_MODULE": "console.tests.fake_live", "CONSOLE_FB_MODULE": "console.tests.fake_fb"}
     proc = subprocess.Popen([sys.executable, "-m", "uvicorn", "console.app:app", "--port", str(port),
                              "--log-level", "warning"], cwd=REPO, env=env)
     url = f"http://127.0.0.1:{port}"
@@ -194,15 +194,20 @@ def test_live_channels_api(base):
     t = httpx.get(base + "/api/live/threads/t_test_sam").json()
     assert t["messages"] and t["trace"]
     assert httpx.get(base + "/api/live/threads/nope").status_code == 404
-    assert httpx.post(base + "/api/live/threads/t_test_lee/reply", json={"text": "See you Saturday."}).json()["ok"]
+    r = httpx.post(base + "/api/live/threads/t_test_lee/reply", json={"text": "See you Saturday."}).json()
+    assert r["ok"] and r["sent"] and r["status"] == "sent"
+    r = httpx.post(base + "/api/live/threads/t_test_lee/reply", json={"text": "BLOCKED test"}).json()
+    assert not r["ok"] and not r["sent"] and "kill switch" in r["error"]
     assert httpx.get(base + "/api/live/threads/t_test_lee").json()["messages"][-1]["text"] == "See you Saturday."
     ap = httpx.get(base + "/api/live/approvals").json()["items"]
     live = [a for a in ap if a["source"] == "live"]
-    assert {a["id"] for a in live} >= {"ap_1", "ap_2"}
+    assert {a["id"] for a in live} >= {"ap_1", "ap_2", "ap_3"}
+    assert next(a for a in live if a["id"] == "ap_3")["kind"] == "report"
     assert httpx.post(base + "/api/live/approvals/ap_1", json={"decision": "edit"}).status_code == 400
     assert httpx.post(base + "/api/live/approvals/ap_1", json={"decision": "edit", "text": "Rent is $750, firm."}).json()["ok"]
     assert httpx.get(base + "/api/live/threads/t_test_sam").json()["messages"][-1]["text"] == "Rent is $750, firm."
     assert httpx.post(base + "/api/live/approvals/ap_2", json={"decision": "deny"}).json()["ok"]
+    assert httpx.post(base + "/api/live/approvals/ap_3", json={"decision": "approve"}).json()["ok"]  # dismiss a note
     assert not [a for a in httpx.get(base + "/api/live/approvals").json()["items"] if a["source"] == "live"]
     c = httpx.post(base + "/api/live/conversations", json={"channel": "sms", "to": "+15550000", "text": "Hi"}).json()
     assert c["ok"] and c["result"]["thread_id"]
@@ -236,3 +241,21 @@ def _ok(u):
         return httpx.get(u, timeout=0.5).status_code == 200
     except httpx.HTTPError:
         return False
+
+
+def test_posting_status_and_facebook_publish_on_click(base):
+    """Honest per-channel status of a run's listings; the Facebook Page path only on an explicit call (fake Page)."""
+    base, _ = base
+    rid = httpx.post(base + "/api/runs", json={"goal": "Appling Way room free Nov 1, $750, private bath"}).json()["run_id"]
+    ls = _wait(lambda: httpx.get(base + f"/api/runs/{rid}/posts").json()["listings"], 30)
+    assert ls, "the stub driver lists the room"
+    rows = {r["channel"]: r for r in ls[0]["channels"]}
+    assert rows["facebook_page"]["state"] == "not_prepared"
+    assert all(r["label"] != "Posted" for r in rows.values() if r["channel"] != "facebook_page"), "sandbox posts are never shown as posted"
+    lid = ls[0]["listing_id"]
+    assert httpx.post(base + f"/api/runs/{rid}/listings/{lid}/facebook", json={"action": "nope"}).status_code == 400
+    r = httpx.post(base + f"/api/runs/{rid}/listings/{lid}/facebook", json={"action": "prepare"}).json()
+    assert r["state"] == "draft" and r["post_id"].startswith("fake_")
+    r = httpx.post(base + f"/api/runs/{rid}/listings/{lid}/facebook", json={"action": "publish"}).json()
+    assert r["state"] == "published" and r["permalink"].startswith("https://example.invalid/")
+    httpx.post(base + f"/api/runs/{rid}/stop")

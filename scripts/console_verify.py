@@ -124,7 +124,8 @@ def path_approval(p):
     port = _free_port()
     runs = REPO / "runs" / "_verify_fake"
     runs.mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, "CONSOLE_LIVE_MODULE": "console.tests.fake_live", "CONSOLE_FORCE_STUB": "1",
+    env = {**os.environ, "CONSOLE_LIVE_MODULE": "console.tests.fake_live", "CONSOLE_FB_MODULE": "console.tests.fake_fb",
+           "CONSOLE_FORCE_STUB": "1",
            "OPERATOR_BASE_URL": "", "CONSOLE_RUNS_DIR": str(runs)}
     proc = subprocess.Popen([str(PY if PY.exists() else sys.executable), "-m", "uvicorn", "console.app:app",
                              "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"], cwd=REPO, env=env)
@@ -148,9 +149,36 @@ def path_approval(p):
         pg.wait_for_timeout(2600)
         last = pg.query_selector_all("#msgs .msg.out .b")[-1].inner_text()
         check("Edit sends the owner's text, not the draft", "it's firm" in last, last[:60])
+        pg.goto(base + "/#/inbox/t_test_lee")
+        pg.wait_for_selector(".note", timeout=15000)
+        note = pg.inner_text(".note summary")
+        check("operator reports show as a compact note without internal ids", "Note from operator" in note
+              and "9f8e7d6c" not in note and not pg.query_selector('.note button[data-act="approve"]'), note[:80])
+        check("operator typing indicator", pg.is_visible(".typing") and pg.is_visible(".titem .chip.accent"))
+        pg.click(".note summary")
+        shoot(pg, "console-inbox-note.png")
         pg.goto(base + "/#/inbox/t_test_mp")
         pg.wait_for_selector(".pending", timeout=15000)
         check("Marketplace Messenger thread labeled", "Marketplace · Messenger" in pg.inner_text(".convo-head"))
+
+        # Facebook Page: prepare (unpublished) and Publish only on the owner's click, against the fake Page
+        rid = httpx.post(base + "/api/runs", json={"goal": "Appling Way room free Nov 1, $750, private bath"}, timeout=30).json()["run_id"]
+        for _ in range(60):
+            if get(f"/api/runs/{rid}/posts", base)["listings"]:
+                break
+            time.sleep(0.5)
+        pg.on("dialog", lambda d: d.accept())
+        pg.goto(base + "/#/assistant")
+        pg.wait_for_selector('button[data-fb="prepare"]', timeout=20000)
+        fb0 = get(f"/api/runs/{rid}/posts", base)["listings"][0]["channels"][-1]["state"]
+        check("Facebook Page is never posted without a click", fb0 == "not_prepared", fb0)
+        pg.click('button[data-fb="prepare"]')
+        pg.wait_for_selector('button[data-fb="publish"]', timeout=15000)
+        pg.click('button[data-fb="publish"]')
+        pg.wait_for_selector('text=View post', timeout=15000)
+        fb1 = get(f"/api/runs/{rid}/posts", base)["listings"][0]["channels"][-1]
+        check("Publish on the owner's click publishes the Page post (fake Page)", fb1["state"] == "published", fb1["label"])
+        shoot(pg, "console-assistant-facebook.png")
         b.close()
 
         b, ph = open_page(p, base + "/approve", width=390, height=844, mobile=True)

@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import integration as integ
 from . import live as livemod
+from . import live_world
 from . import panels
 from .demo import DEMO_PATCH, Director
 from .events import Tail, utc_now
@@ -190,6 +191,8 @@ def start_run(body: dict = Body(default={})):
     if mode in ("operator", "operator-stub"):
         try:
             kw = {"seed_renters": False} if body.get("seed_renters") is False and not scenario else {}
+            if body.get("live_channels") and not scenario:
+                kw["live_channels"] = True
             run = OperatorRun(run_id, run_dir, goal, scenario, speed, live=mode == "operator", badge=badge, **kw)
         except Exception as e:
             _console_note(run_id, "fallback", {"from": "rentus_operator", "to": "console stub driver",
@@ -307,6 +310,69 @@ def run_view(run_id: str):
     v["status"] = getattr(run, "status", "finished")
     v["mode"] = getattr(run, "mode", None)
     return v
+
+
+def _run_events(run_id: str) -> list[dict]:
+    p = integ.RUNS / run_id / "events.jsonl"
+    out = []
+    if p.exists():
+        for line in p.read_text().splitlines():
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                pass
+    return out
+
+
+def _fb_state(run_id: str) -> dict:
+    run = RUNS.get(run_id)
+    if run is not None and not hasattr(run, "fb"):
+        run.fb = {}
+    return getattr(run, "fb", {}) if run is not None else {}
+
+
+@app.get("/api/runs/{run_id}/posts")
+def run_posts(run_id: str):
+    """Honest per-channel posting status of the run's listings (console/live_world.py)."""
+    run = _get_run(run_id)
+    world = run.snapshot() if run is not None else {}
+    lc = getattr(run, "live_channels", None)
+    return {"live": bool(lc), "live_setup": lc, "mode": (world or {}).get("mode"),
+            "listings": live_world.posts((world or {}).get("listings") or [], _run_events(run_id), _fb_state(run_id))}
+
+
+@app.post("/api/runs/{run_id}/listings/{listing_id}/facebook")
+def run_facebook(run_id: str, listing_id: str, body: dict = Body(...)):
+    """Facebook Page: `prepare` creates an unpublished post; `publish` publishes it. Only from the owner's click."""
+    action = body.get("action")
+    if action not in ("prepare", "publish"):
+        raise HTTPException(400, "action must be prepare or publish")
+    run = _live_run(run_id)
+    listing = next((l for l in run.snapshot().get("listings") or [] if l.get("listing_id") == listing_id), None)
+    if not listing:
+        raise HTTPException(404, f"no listing {listing_id}")
+    fb = _fb_state(run_id)
+    cur = fb.get(listing_id) or {}
+    try:
+        if action == "prepare":
+            if cur.get("state") in ("draft", "published"):
+                return {"ok": True, **cur}
+            r = live_world.fb_prepare(listing)
+            fb[listing_id] = {"state": "draft", "post_id": r.get("post_id"), "is_published": r.get("is_published")}
+        else:
+            if cur.get("state") == "published":
+                return {"ok": True, **cur}
+            r = live_world.fb_publish(listing, cur.get("post_id"))
+            fb[listing_id] = {"state": "published" if r.get("is_published", True) else "failed",
+                              "post_id": r.get("post_id"), "permalink": r.get("permalink_url")}
+    except Exception as e:
+        fb[listing_id] = {**cur, "state": cur.get("state") if action == "publish" and cur.get("state") else "failed",
+                          "error": f"{type(e).__name__}: {e}"[:300]}
+        _console_note(run_id, "facebook_page", {"action": action, "listing_id": listing_id, "ok": False}, actor="owner")
+        raise HTTPException(502, fb[listing_id]["error"])
+    _console_note(run_id, "facebook_page", {"action": action, "listing_id": listing_id, "ok": True,
+                                            "state": fb[listing_id]["state"]}, actor="owner")
+    return {"ok": True, **fb[listing_id]}
 
 
 @app.get("/api/runs/{run_id}/events")
@@ -454,10 +520,10 @@ def live_reply(thread_id: str, body: dict = Body(...)):
     text = (body.get("text") or "").strip()
     if not text:
         raise HTTPException(400, "text required")
-    r, err = _live("send_owner_message", thread_id, text)
+    r, err = _live("send_owner_message", thread_id, text, _timeout=livemod.SEND_TIMEOUT_S)
     if err:
         raise HTTPException(503, err)
-    return {"ok": True, "result": r}
+    return _delivery(r)
 
 
 @app.post("/api/live/conversations")
@@ -465,7 +531,7 @@ def live_start(body: dict = Body(...)):
     ch, to, text = (body.get("channel") or "").strip(), (body.get("to") or "").strip(), (body.get("text") or "").strip()
     if not (ch and to and text):
         raise HTTPException(400, "channel, to and text are required")
-    r, err = _live("start_conversation", ch, to, text)
+    r, err = _live("start_conversation", ch, to, text, _timeout=livemod.SEND_TIMEOUT_S)
     if err:
         raise HTTPException(503, err)
     return {"ok": True, "result": r}
@@ -519,14 +585,20 @@ def live_decide(approval_id: str, body: dict = Body(...)):
         raise HTTPException(400, "edit needs text")
     if approval_id.startswith("run:"):
         _, run_id, esc_id = approval_id.split(":", 2)
-        return decide(run_id, esc_id, {"decision": "deny" if decision == "deny" else "approve", "text": text,
-                                       "source": (body.get("source") or "console")})
-    r, err = _live("decide", approval_id, decision, text=text)
-    if err and decision == "edit":  # an api that only knows approve/deny takes the edited text with approve
-        r, err = _live("decide", approval_id, "approve", text=text)
-    if err:
+        decide(run_id, esc_id, {"decision": "deny" if decision == "deny" else "approve", "text": text,
+                                "source": (body.get("source") or "console")})
+        return {"ok": True, "status": "recorded", "sent": False, "error": None}
+    r, err = _live("decide", approval_id, decision, text=text, _timeout=livemod.SEND_TIMEOUT_S)
+    if err:  # never fall back to sending the original draft
         raise HTTPException(503, err)
-    return {"ok": True, "result": r}
+    return _delivery(r)
+
+
+def _delivery(r) -> dict:
+    """What the live module did with a send: ok + status ("sent", "awaiting_approval", ...) + reason if not sent."""
+    r = r if isinstance(r, dict) else {"ok": bool(r)}
+    return {"ok": bool(r.get("ok", True)), "status": r.get("status"), "sent": bool(r.get("sent") or r.get("status") == "sent"),
+            "error": r.get("error") or r.get("reason"), "result": r}
 
 
 @app.get("/api/file")
