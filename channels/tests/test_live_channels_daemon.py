@@ -86,6 +86,7 @@ def env(tmp_path, monkeypatch):
     for k in ("LIVE_PUBLIC_MODE", "LIVE_PUBLIC_DEMO", "LIVE_ROLE_SMS", "LIVE_ROLE_EMAIL", "LIVE_ROLE_MESSENGER",
               "LIVE_LEASE_LINK_URL", "LIVE_DEMO_EMAIL_TO"):
         monkeypatch.setenv(k, "")
+    monkeypatch.setenv("LIVE_DEBOUNCE_S", "0")
     tf, loc, em = FakeSms("tollfree", "+18885550001"), FakeSms("local", "+19105550002"), FakeEmail()
     outbound.set_providers({"sms": {"tollfree": tf, "local": loc}, "email": em, "messenger": None})
     yield {"store": Store(), "tf": tf, "loc": loc, "email": em, "dir": tmp_path / "live"}
@@ -922,3 +923,40 @@ def test_never_resend_one_of_the_last_three_replies(env):
     # also outside a turn (unbuffered operator send)
     assert outbound.deliver(env["store"], tid, q.upper(), origin="operator")["status"] == "duplicate_skipped"
     assert len(env["tf"].sent) == 1
+
+
+
+def test_signature_and_quote_are_stripped():
+    from channels.live import providers as pv
+    body = "Is the room still available?\n\nThanks,\nJane\nSent from my iPhone\n\nOn Sat, Oct 17 Rentus wrote:\n> hi"
+    assert pv.strip_quoted(body) == "Is the room still available?"
+    assert pv.strip_quoted("Thanks, see you Saturday!") == "Thanks, see you Saturday!"
+
+
+def test_debounce_batches_split_messages(env, monkeypatch):
+    import time as _t
+    import rentus_tools as rt
+    monkeypatch.setenv("LIVE_DEBOUNCE_S", "0.8")
+    monkeypatch.setenv("LIVE_POLL_SMS", "0.1")
+    daemon.register_adapters(env["store"])
+    seen = []
+
+    def turn(tid):
+        def runner(w, inbound, h):
+            seen.append(inbound["text"])
+            rt.call(w, "send_message", {"thread_id": inbound["thread_id"], "text": "Yes, it is available."})
+            return _Res([])
+        return daemon.run_turn(env["store"], tid, runner=runner)
+
+    r = daemon.Runner(env["store"], {"sms": {"tollfree": env["tf"]}}, turn=turn, log=lambda *a: None).start()
+    try:
+        env["tf"].push(OWNER_PHONE, "Hi is the room", "SM-b1")
+        _t.sleep(0.4)
+        env["tf"].push(OWNER_PHONE, "on Appling Way still available?", "SM-b2")
+        t0 = _t.time()
+        while not env["tf"].sent and _t.time() - t0 < 5:
+            _t.sleep(0.05)
+        _t.sleep(0.5)
+    finally:
+        r.close()
+    assert seen == ["Hi is the room\non Appling Way still available?"] and len(env["tf"].sent) == 1

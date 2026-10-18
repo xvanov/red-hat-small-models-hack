@@ -133,10 +133,18 @@ REF_RE = re.compile(r"\[ref ([0-9a-f]{6,10})\]")
 QUOTE_RE = re.compile(r"^(On .{0,200}wrote:|-{2,} ?Original Message|From: .*<.*@.*>|>)", re.M)
 
 
+SIG_RE = re.compile(r"^(-- ?$|__+$|Sent from my |Get Outlook for |Best,?$|Best regards,?$|Regards,?$|Thanks,?$|"
+                    r"Thank you,?$|Cheers,?$|Sincerely,?$)", re.M | re.I)
+
+
 def strip_quoted(text: str) -> str:
-    """Keep the new part of a reply: cut at the first 'On ... wrote:' line or quoted block."""
+    """Keep the new part of a reply: cut at the first 'On ... wrote:' line or quoted block, then at a signature
+    ("-- ", "Sent from my iPhone", a sign-off line like "Best," / "Thanks,")."""
     m = QUOTE_RE.search(text or "")
     body = text[:m.start()] if m else (text or "")
+    s_ = SIG_RE.search(body)
+    if s_ and s_.start() > 0 and body[:s_.start()].strip():
+        body = body[:s_.start()]
     return re.sub(r"\n{3,}", "\n\n", body).strip()
 
 

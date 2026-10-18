@@ -168,6 +168,7 @@ def poll_source(store: Store, key: str, prov, allow: config.Allowlist | None = N
             if any(m.get("ext_id") == it["ext_id"] for m in t["messages"]):
                 continue
             store.add_message(t, "in", it["text"], "received", ext_id=it["ext_id"], ts=it.get("ts"))
+            t["last_in_epoch"] = time.time()
             if it["channel"] == "email":
                 meta = it.get("meta") or {}
                 em = t.setdefault("email", {})
@@ -544,6 +545,13 @@ def tick(store: Store) -> dict:
     return {"new": len(touched), "turns": turns}
 
 
+def debounce_s() -> float:
+    try:
+        return float(config.env("LIVE_DEBOUNCE_S", "4") or 0)
+    except ValueError:
+        return 4.0
+
+
 def _interval(key: str) -> float:
     name = {"sms": "LIVE_POLL_SMS", "messenger": "LIVE_POLL_MESSENGER", "email": "LIVE_POLL_EMAIL",
             "email_zoho": "LIVE_POLL_EMAIL"}.get(key.split(":")[0])
@@ -605,12 +613,19 @@ class Runner:
                 continue
             with self._qmu:
                 self._queued.discard(tid)
+            t = self.store.get_thread(tid) or {}
+            wait = debounce_s() - (time.time() - float(t.get("last_in_epoch") or 0))
+            if t.get("pending_turn") and wait > 0:  # a renter often splits a message: wait for quiet first
+                threading.Timer(wait, self.enqueue, args=(tid,)).start()
+                continue
             try:
                 r = self.turn(tid)
             except Exception as e:  # counts as a failed attempt; other threads keep going
                 r = _fail_turn(self.store, tid, f"{type(e).__name__}: {str(e)[:200]}")
             if r and not r.get("skipped"):
                 self.log(time.strftime("%H:%M:%S"), {tid: r})
+                if (self.store.get_thread(tid) or {}).get("pending_turn"):
+                    self.enqueue(tid)  # messages that arrived during the turn: one follow-up turn, never in parallel
 
     def _sweeper(self) -> None:
         while not self.stop.wait(5.0):
