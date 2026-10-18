@@ -40,7 +40,7 @@ REPO = HERE.parent
 REAL_SRC = REPO / "data/published/twins/reader_test.jsonl"
 FIXTURE_SRC = REPO / "data/twins/fixtures/out/published/reader_test.jsonl"
 SPLITS = REPO / "data/twins/splits.json"
-OUT = HERE / "out"
+OUT = Path(os.environ.get("LABELER_OUT") or HERE / "out").resolve()   # tests point this at a copy
 SEED = 0
 MIN_ROWS = 150
 
@@ -182,15 +182,62 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
+def log_path(mode: str) -> Path:
+    return OUT / f"labels_log.{mode}.jsonl"
+
+
+def append_log(mode: str, rec: dict) -> None:
+    """Append-only: every save, audit change and undo is a new line; nothing is ever rewritten or deleted."""
+    OUT.mkdir(exist_ok=True)
+    with open(log_path(mode), "a") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def read_log(mode: str) -> list[dict]:
+    """The append-only label log. Seeded once from the pre-log snapshot file (labels saved before the log
+    existed), so those saves are kept as the first version of each item."""
+    lp = log_path(mode)
+    if not lp.exists():
+        old = read_jsonl(MODES[mode]["labels"])
+        for r in sorted(old, key=lambda r: r.get("ts") or ""):
+            append_log(mode, {**r, "event": "save", "save_reason": "imported_pre_log"})
+    recs = read_jsonl(lp)
+    for k, r in enumerate(recs):
+        r["seq"] = k
+    return recs
+
+
+def effective(recs: list[dict]) -> tuple[dict[str, dict], dict[str, list[dict]]]:
+    """Latest non-undone save per item, plus every save per item (oldest first)."""
+    undone = {r["undoes"] for r in recs if r.get("event") == "undo"}
+    latest: dict[str, dict] = {}
+    versions: dict[str, list[dict]] = {}
+    for r in recs:
+        if r.get("event") != "save":
+            continue
+        versions.setdefault(r["id"], []).append(r)
+        if r["seq"] not in undone:
+            latest[r["id"]] = r
+    return latest, versions
+
+
 def labels_of(mode: str) -> dict[str, dict]:
-    return {r["id"]: r for r in read_jsonl(MODES[mode]["labels"])}
+    return effective(read_log(mode))[0]
+
+
+SNAPSHOT_KEYS = ("id", "labeler", "ts", "mode", "sample_sha256", "skipped", "output", "ui", "save_reason")
 
 
 def write_labels(mode: str, labels: dict[str, dict], order: list[str]) -> None:
+    """owner_labels*.jsonl = a derived snapshot (latest label per item, sample order) for scripts/owner_gold.py.
+    The source of truth is the append-only labels_log.<mode>.jsonl."""
     OUT.mkdir(exist_ok=True)
     p = MODES[mode]["labels"]
     pos = {i: k for k, i in enumerate(order)}
-    lines = [json.dumps(labels[i], ensure_ascii=False) for i in sorted(labels, key=lambda i: pos.get(i, 1e9))]
+    lines = [json.dumps({k: labels[i][k] for k in SNAPSHOT_KEYS if k in labels[i]}, ensure_ascii=False)
+             for i in sorted(labels, key=lambda i: pos.get(i, 1e9))]
     tmp = p.with_suffix(".tmp")
     tmp.write_text("".join(line + "\n" for line in lines))
     os.replace(tmp, p)
@@ -279,32 +326,88 @@ def to_schema(lb: Label) -> dict:
             "reason": reason, "intents": [i for i in INTENTS if i in lb.intents], "language": lb.language}
 
 
-# ---------------------------------------------------------------- API
+UI_KEYS = list(Label.model_fields)
+
+
+def ui_of(rec: dict | None) -> dict | None:
+    """Every UI field of a saved label, complete. Prefers the stored button values; fills any missing key from
+    the stored schema output, so a field can never fall back to its default when a saved value exists."""
+    if not rec:
+        return None
+    ui = dict(rec.get("ui") or {})
+    out = rec.get("output") or {}
+    if out:
+        derived = {}
+        ls = (out.get("lease") or {}).get("status")
+        derived["lease"] = {"answered": "yes", "no": "no", "vague": "vague", "exception": "exception"}.get(ls, "absent")
+        mi = out.get("move_in") or {}
+        if mi.get("status") in ("answered", "exception"):
+            derived.update(move_in="exact", move_in_date=mi.get("date"), move_in_cond=mi.get("status") == "exception")
+        else:
+            derived["move_in"] = mi.get("status") or "absent"
+        ph = out.get("phone") or {}
+        if ph.get("status") in ("answered", "exception"):
+            derived.update(phone="given", phone_value=ph.get("value"), phone_cond=ph.get("status") == "exception")
+        else:
+            derived["phone"] = {"no": "declined"}.get(ph.get("status"), ph.get("status") or "absent")
+        oc = out.get("occupants") or {}
+        if oc.get("status") in ("answered", "exception") and oc.get("value"):
+            n = int(oc["value"])
+            derived.update(occupants=str(n) if n < 5 else "5+", occupants_n=n if n >= 5 else None,
+                           occupants_cond=oc.get("status") == "exception")
+        else:
+            derived["occupants"] = oc.get("status") or "absent"
+        derived["reason"] = {"answered": "given", "no": "declined"}.get((out.get("reason") or {}).get("status"),
+                                                                        (out.get("reason") or {}).get("status") or "absent")
+        derived["intents"] = list(out.get("intents") or [])
+        if out.get("language"):
+            derived["language"] = out["language"]
+        for k, v in derived.items():
+            ui.setdefault(k, v)
+    defaults = Label(id="x").model_dump()
+    full = {k: ui.get(k, defaults[k]) for k in UI_KEYS if k != "id"}
+    full["skip"] = bool(rec.get("skipped"))
+    return full
+
+
+def record_save(mode: str, st: dict, rid: str, lb: Label, reason: str, extra: dict | None = None) -> dict:
+    ids = st["manifest"]["row_ids"]
+    ui = lb.model_dump(exclude={"id"})
+    ui = {k: v for k, v in ui.items() if k in UI_KEYS}
+    rec = {"id": rid, "labeler": "owner", "ts": now(), "mode": mode, "sample_sha256": st["manifest"]["row_ids_sha256"],
+           "skipped": lb.skip, "output": None if lb.skip else to_schema(lb), "ui": ui, "event": "save",
+           "save_reason": reason, **(extra or {})}
+    append_log(mode, rec)
+    write_labels(mode, labels_of(mode), ids)
+    history(mode, {"event": "save", "id": rid, "skipped": lb.skip, "save_reason": reason})
+    return rec
+
 
 app = FastAPI(title="Owner blind labeler")
 
 
-def item_view(st: dict, idx: int, labels: dict) -> dict:
+def item_view(st: dict, idx: int, labels: dict, versions: dict) -> dict:
     ids = st["manifest"]["row_ids"]
     rid = ids[idx]
     row = st["by_id"][rid]
     inp = row["input"]
     saved = labels.get(rid)
     return {"index": idx, "id": rid, "today": inp.get("today"), "context": (inp.get("context") or [])[-2:],
-            "message": inp.get("message", ""), "saved_ui": (saved or {}).get("ui")}
+            "message": inp.get("message", ""), "saved_ui": ui_of(saved),
+            "saved_ts": (saved or {}).get("ts"), "n_saves": len(versions.get(rid, []))}
 
 
 def state(idx: int | None = None) -> dict:
     mode, why = current_mode()
     st = load(mode)
-    labels = labels_of(mode)
+    labels, versions = effective(read_log(mode))
     ids = st["manifest"]["row_ids"]
     if idx is None:
         idx = next((k for k, i in enumerate(ids) if i not in labels), len(ids))
     idx = max(0, min(idx, len(ids)))
     return {"mode": mode, "mode_reason": why, "warning": st["warning"], "total": len(ids),
             "done": sum(1 for i in ids if i in labels), "sample_sha256": st["manifest"]["row_ids_sha256"],
-            "item": item_view(st, idx, labels) if idx < len(ids) else None, "index": idx}
+            "item": item_view(st, idx, labels, versions) if idx < len(ids) else None, "index": idx}
 
 
 @app.get("/")
@@ -321,6 +424,9 @@ def get_state(index: int | None = None):
 class SaveReq(Label):
     mode: str
     index: int
+    base_ts: str | None = None   # ts of the saved label the form was filled from (None = item had no label)
+    save_reason: str = "label"   # label | audit (opened from /audit to edit a flagged item)
+    audit_rule: str | None = None
 
 
 @app.post("/api/save")
@@ -333,31 +439,123 @@ def save(req: SaveReq):
         ids = st["manifest"]["row_ids"]
         if req.id not in ids:
             raise HTTPException(404, "id not in sample")
-        ui = req.model_dump(exclude={"mode", "index", "id"})
-        rec = {"id": req.id, "labeler": "owner", "ts": now(), "mode": mode,
-               "sample_sha256": st["manifest"]["row_ids_sha256"], "skipped": req.skip,
-               "output": None if req.skip else to_schema(req), "ui": ui}
-        labels = labels_of(mode)
-        labels[req.id] = rec
-        write_labels(mode, labels, ids)
-        history(mode, {"event": "save", "id": req.id, "skipped": req.skip})
+        cur = labels_of(mode).get(req.id)
+        if (cur or {}).get("ts") != req.base_ts:
+            # the form was filled from an older version (stale tab, browser back/forward cache): refuse rather
+            # than overwrite the newer label; the page reloads this item with its latest saved values
+            raise HTTPException(409, "this item was saved since the form was loaded; showing the latest saved label")
+        if req.save_reason not in ("label", "audit"):
+            raise HTTPException(422, "save_reason")
+        lb = Label(**req.model_dump(exclude={"mode", "index", "base_ts", "save_reason", "audit_rule"}))
+        extra = {"audit_rule": req.audit_rule, "supersedes_ts": req.base_ts} if req.save_reason == "audit" else None
+        record_save(mode, st, req.id, lb, req.save_reason, extra)
         return state(ids.index(req.id) + 1)
 
 
 @app.post("/api/undo")
 def undo():
+    """Undo the most recent save that is not undone yet. Appends an undo record; the save stays in the log and
+    the item falls back to its previous save (or to unlabeled)."""
     with LOCK:
         mode, _ = current_mode()
         st = load(mode)
         ids = st["manifest"]["row_ids"]
-        labels = labels_of(mode)
-        if not labels:
+        recs = read_log(mode)
+        undone = {r["undoes"] for r in recs if r.get("event") == "undo"}
+        cand = [r for r in recs if r.get("event") == "save" and r["seq"] not in undone
+                and r.get("save_reason") != "imported_pre_log"]
+        if not cand:
             return state()
-        last = max(labels.values(), key=lambda r: r["ts"])
-        del labels[last["id"]]
-        write_labels(mode, labels, ids)
+        last = cand[-1]
+        append_log(mode, {"event": "undo", "id": last["id"], "undoes": last["seq"], "undoes_ts": last["ts"],
+                          "ts": now(), "mode": mode})
+        write_labels(mode, labels_of(mode), ids)
         history(mode, {"event": "undo", "id": last["id"]})
         return state(ids.index(last["id"]))
+
+
+# ---------------------------------------------------------------- audit (rule-based, labeler/audit.py)
+
+@app.get("/audit")
+def audit_page():
+    return FileResponse(HERE / "static/audit.html", headers={"Cache-Control": "no-store"})
+
+
+def decisions_path(mode: str) -> Path:
+    return OUT / f"audit_decisions.{mode}.jsonl"
+
+
+@app.get("/api/audit")
+def get_audit():
+    import audit as rules
+    with LOCK:
+        mode, _ = current_mode()
+        st = load(mode)
+        recs = read_log(mode)
+        labels, versions = effective(recs)
+        hist = read_jsonl(OUT / f"history.{mode}.jsonl")
+        flags = rules.run(st["manifest"]["row_ids"], st["by_id"], labels, versions, hist, ui_of)
+        dkey = lambda d: (d["id"], d["rule"], d.get("why"), json.dumps(d.get("owner_value"), sort_keys=True))
+        dec = {dkey(d): d for d in read_jsonl(decisions_path(mode))}
+        items = []
+        for rid in st["manifest"]["row_ids"]:
+            fl = [f for f in flags if f["id"] == rid]
+            if not fl:
+                continue
+            for f in fl:
+                d = dec.get(dkey(f))
+                f["decision"] = d["action"] if d else None
+            row = st["by_id"][rid]["input"]
+            items.append({"id": rid, "index": st["manifest"]["row_ids"].index(rid), "today": row.get("today"),
+                          "context": (row.get("context") or [])[-2:], "message": row.get("message", ""),
+                          "label": ui_of(labels.get(rid)), "label_ts": (labels.get(rid) or {}).get("ts"),
+                          "label_reason": (labels.get(rid) or {}).get("save_reason"), "flags": fl})
+        decided_ids = {d["id"] for d in dec.values()}
+        return JSONResponse({"mode": mode, "items": items, "n_flags": len(flags),
+                             "open": sum(1 for it in items for f in it["flags"] if not f["decision"]),
+                             "decided_items": len(decided_ids)}, headers={"Cache-Control": "no-store"})
+
+
+class DecideReq(BaseModel):
+    id: str
+    rule: str
+    label_ts: str
+    action: str                  # keep | change
+    patch: dict = {}             # UI-field changes the rule suggests (applied only on change)
+    why: str | None = None
+    owner_value: object = None
+
+
+@app.post("/api/audit/decide")
+def audit_decide(req: DecideReq):
+    if req.action not in ("keep", "change"):
+        raise HTTPException(422, "action must be keep or change")
+    with LOCK:
+        mode, _ = current_mode()
+        st = load(mode)
+        cur = labels_of(mode).get(req.id)
+        if not cur:
+            raise HTTPException(404, "item has no label")
+        if cur["ts"] != req.label_ts:
+            raise HTTPException(409, "this label changed since the audit page loaded; reload")
+        new_ts = None
+        if req.action == "change":
+            ui = ui_of(cur)
+            bad = [k for k in req.patch if k not in UI_KEYS or k in ("id", "skip")]
+            if bad:
+                raise HTTPException(422, f"unknown fields {bad}")
+            ui.update(req.patch)
+            ui["skip"] = False
+            rec = record_save(mode, st, req.id, Label(id=req.id, **ui), "audit",
+                              {"audit_rule": req.rule, "supersedes_ts": cur["ts"]})
+            new_ts = rec["ts"]
+        OUT.mkdir(exist_ok=True)
+        with open(decisions_path(mode), "a") as f:
+            f.write(json.dumps({"ts": now(), "id": req.id, "rule": req.rule, "label_ts": req.label_ts,
+                                "why": req.why, "owner_value": req.owner_value,
+                                "action": req.action, "patch": req.patch if req.action == "change" else None,
+                                "new_label_ts": new_ts}, ensure_ascii=False) + "\n")
+        return {"ok": True, "new_label_ts": new_ts}
 
 
 def main():
@@ -366,14 +564,16 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8090)
     ap.add_argument("--reset", action="store_true",
-                    help="delete this mode's saved labels and history (the sample manifest is kept), then exit")
+                    help="move this mode's labels, log and history aside (*.reset-<time>.jsonl; the manifest is kept), then exit")
     a = ap.parse_args()
     ARGS.source = a.source
     if a.reset:
         mode, _ = current_mode()
-        for p in (MODES[mode]["labels"], OUT / f"history.{mode}.jsonl"):
-            p.unlink(missing_ok=True)
-        print(f"reset {mode} labels")
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        for p in (MODES[mode]["labels"], OUT / f"history.{mode}.jsonl", log_path(mode), decisions_path(mode)):
+            if p.exists():   # moved aside, never deleted
+                p.rename(p.with_name(f"{p.stem}.reset-{stamp}{p.suffix}"))
+        print(f"reset {mode} labels (old files kept as *.reset-{stamp}.jsonl)")
         return
     import uvicorn
     mode, why = current_mode()
