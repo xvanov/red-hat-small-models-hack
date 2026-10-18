@@ -19,7 +19,8 @@ Task set v2 additions (all opt-in, so v1 tasks replay exactly as before):
                              "any" line answers only a message that asks something.
   spec "classifier": "v2"    a question the v1 rules call "other" but that is about the room's
                              availability or a different date ("it's available from Jan 1, would that
-                             work?") counts as a move_in question.
+                             work?") counts as a move_in question, and one naming a lease length in
+                             months ("would 6 months work for you?") counts as a lease question.
 """
 from __future__ import annotations
 
@@ -53,6 +54,10 @@ _AVAIL_V2 = re.compile(r"availab|earliest|instead|later date|different date|that
                        r"\b(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b")
 
 
+# v2 only: an "other" question naming a lease length in months is a lease question.
+_TERM_V2 = re.compile(r"\b(\d{1,2}|six|nine|seis|nueve)[- ]?(months?|meses)\b")
+
+
 def last_question(text: str) -> str | None:
     """The last sentence of `text` that ends with '?', or None."""
     if not text or "?" not in text:
@@ -74,6 +79,8 @@ def classify_question(text: str, version: str = "v1") -> str | None:
     for item, pat in _PATTERNS:
         if re.search(pat, low):
             return item
+    if version == "v2" and _TERM_V2.search(low):  # "would 6 months work for you?" is about the lease (D23)
+        return "lease"
     if version == "v2" and _AVAIL_V2.search(low):
         return "move_in"
     return "other"

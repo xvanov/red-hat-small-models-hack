@@ -26,6 +26,7 @@ Q = {"en": {"lease": "How long do you want to stay, is a one year lease okay wit
             "showing": "I proposed a showing at {t}, pending confirmation. Does that time work for you?",
             "ack": "Thanks for writing, the room is available.",
             "floor": "The shortest lease I can do is 6 months.",
+            "floor_offer": "The shortest lease I can do is a 6-month lease. Would a 6-month lease work for you?",
             "price": "I will check with my partner about the price and get back to you.",
             "close": "Thanks for letting me know, good luck with the search."},
      "es": {"lease": "¿Cuánto tiempo quieres quedarte, te funciona un contrato de un año?",
@@ -36,6 +37,7 @@ Q = {"en": {"lease": "How long do you want to stay, is a one year lease okay wit
             "showing": "Propuse una visita el {t}, pendiente de confirmación. ¿Te funciona esa hora?",
             "ack": "Gracias por escribir, el cuarto está disponible.",
             "floor": "El contrato más corto que puedo ofrecer es de 6 meses.",
+            "floor_offer": "El contrato más corto que puedo ofrecer es de 6 meses. ¿Te funciona un contrato de 6 meses?",
             "price": "Voy a consultar el precio y te aviso.",
             "close": "Gracias por avisarme, mucha suerte con la búsqueda."}}
 ITEMS = ("lease", "move_in", "phone", "reason", "occupants")
@@ -78,7 +80,9 @@ def lease_task(s: RolloutSession, t: dict):
         n_lines = sum(1 for ln in script if ln.get("when_asked") == item and not ln.get("reuse"))
         for k in range(max(1, n_lines)):
             text = q[item]
-            if item == "lease" and sub == "shorter_lease" and k == 1:
+            if item == "lease" and sub == "shorter_lease" and k == 1 and exp.get("lease") == "answered":
+                text = q["floor_offer"]  # D23 (a): the renter will accept 6 months
+            elif item == "lease" and sub == "shorter_lease" and k == 1:
                 text = q["floor"] + " " + q["lease"].split(", ")[-1].capitalize() if lang == "en" else \
                     q["floor"] + " ¿Te funciona un contrato de un año?"
             r = s.call("send_message", {"thread_id": tid, "text": text})
@@ -89,6 +93,8 @@ def lease_task(s: RolloutSession, t: dict):
             gate[item] = {"status": "answered", "date": exp[item], "raw": last[:60]}
         elif item == "reason":
             gate[item] = {"status": "answered", "value": last[:80]}
+        elif item == "lease" and exp[item] == "answered":  # accepted 6 months, refused a year (D23)
+            gate[item] = {"status": "answered", "value": False, "months": 6}
         else:
             gate[item] = {"status": "answered", "value": exp[item]}
     for item in volunteered:

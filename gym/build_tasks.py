@@ -534,6 +534,13 @@ GENERIC = {"en": ("Not sure what you mean, what else do you need to know?",
            "es": ("No estoy seguro, ¿qué más necesitas saber?", "Creo que eso es todo. ¿Qué más necesitas?")}
 CORRECTED = {"en": (["Ah ok, {d} is fine then.", "No problem, let's say {d} then."],
                     ["Oh I see, then {d} works for me.", "Got it, I can do {d} then."])}
+# Owner decision D23 (a): a renter who accepts the 6-month floor passes the lease item. Templates, disjoint per split.
+ACCEPT_SIX = {"en": (["Ok, 6 months works for me then.", "Fine, I'll do the 6 month lease."],
+                     ["Alright, 6 months it is.", "Sounds good, a 6 month lease works for me."]),
+              "es": (["Bueno, 6 meses me funciona.", "Está bien, hago el contrato de 6 meses."],
+                     ["De acuerdo, 6 meses entonces.", "Perfecto, un contrato de 6 meses me funciona."])}
+CONFIRM_SIX = {"en": ("Yes, 6 months works.", "Yes, 6 months is fine with me."),
+               "es": ("Sí, 6 meses me funciona.", "Sí, 6 meses está bien.")}
 TIMEFRAME = {"en": (["Maybe around {m}, not sure yet."], ["Probably around {m}, I'll know more then."])}
 OPENERS_MALFORMED = (["Hi, about the {street} room, how much is the rent and what's the deposit?"],
                      ["Hello! For the {street} room, what's the monthly rent and the deposit?"])
@@ -615,6 +622,8 @@ class Builder2(Builder):
         self.thread_ids: Counter = Counter()
         self.issue_i = 0
         self.bad_i = 0
+        self.short_i = 0
+        self.mal_i = 0
         self.notes: list[str] = []
 
     # ---- row selection, strict on language (v1 fell back to English rows silently)
@@ -778,6 +787,9 @@ class Builder2(Builder):
                 out.append({"type": "state", "path": base + ".date", "equals": expect[item], "normalize": "date"})
             elif item == "phone":
                 out.append({"type": "state", "path": base + ".value", "equals": expect[item], "normalize": "phone"})
+            elif item == "lease" and expect[item] == "accept_six":  # D23 (a): 6 months accepted, any explicit answer
+                out.append({"type": "state", "path": base + ".status", "equals": "answered",
+                            "name": "lease answered (6 months accepted)"})
             elif item == "reason":  # v1 checked that the key exists, which every register row has from creation
                 out.append({"type": "state", "path": base + ".status", "equals": "answered",
                             "name": "reason recorded as answered"})
@@ -826,6 +838,14 @@ class Builder2(Builder):
                 checks.append({"type": "message", "thread": "{tid}", "name": "offers the 6-month floor only",
                                "contains_any": ["6 month", "six month", "6-month", "6 mes", "seis mes"],
                                "not_contains": ["month-to-month is fine", "3 months is fine", "mes a mes está bien"]})
+                # D23 (a): every other shorter-lease renter accepts the 6-month floor instead of flipping to a
+                # year (no RNG draw, so the rest of the set is unchanged). The year-answer row stays taken.
+                accept_six = self.short_i % 2 == 0
+                self.short_i += 1
+                if accept_six:
+                    assert lines[1]["when_asked"] == "lease"
+                    lines[1]["accept_six"] = ACCEPT_SIX[lang][self.si][self.short_i % 2]  # swapped in after naming
+                    expect["lease"] = "accept_six"
             if sub == "skip_ahead":
                 r = self.take(lang, "intent", "scheduling")
                 script.append({"after": "start", "say": r["input"]["message"], "src": r["id"]})
@@ -885,9 +905,14 @@ class Builder2(Builder):
         if full_gate or sub == "price_push":
             script.append({"when_asked": "showing", "say": self.pick(SHOWING_OK[lang][self.si])})
         if sub not in ("not_now", "hard_no"):
-            script += self.confirm_lines(lang, expect, clock)
+            script += self.confirm_lines(lang, {k: v for k, v in expect.items() if v != "accept_six"}, clock)
+            if expect.get("lease") == "accept_six":
+                script.append({"when_asked": "lease", "say": CONFIRM_SIX[lang][self.si], "reuse": True})
             script.append({"when_asked": "any", "say": GENERIC[lang][self.si], "reuse": True})
         name, slug = self.unify_names(script, lang)
+        for i, ln in enumerate(script):  # after naming, so the swap does not shift the name draws
+            if "accept_six" in ln:
+                script[i] = {"when_asked": "lease", "say": ln["accept_six"], "template": "accept_six"}
         tid = f"t_{slug}"
         checks = [json.loads(json.dumps(c).replace("{tid}", tid)) for c in checks]
         if full_gate:
@@ -983,15 +1008,18 @@ class Builder2(Builder):
                                    "language": "en", "classifier": "v2", "room_of_interest": room["room_id"],
                                    "listing_id": f"L_{room['room_id']}",
                                    "script": [{"after": "start", "say": opener}, {"when_asked": "any", "say": "ok thanks"}]}],
-                 "faults": [{"tool": "get_room", "kind": "malformed", "times": 1}], "max_turns": 20,
+                 # D23 (d): the fault corrupts the rent itself (v2 first draft only hit the address)
+                 "faults": [{"tool": "get_room", "kind": "malformed", "times": 1, "field": "rent",
+                             "field_mode": ("wrong_type", "drop")[self.mal_i % 2]}], "max_turns": 20,
                  "checks": [{"type": "message", "thread": tid, "contains_all": [str(room["rent"])],
                              "name": "quotes the true rent"},
                             {"type": "message", "thread": tid, "contains_any": [str(room["deposit"])],
                              "name": "quotes the true deposit"},
                             # v1 also forbade "None", which (case-insensitive) failed any message saying "none"
-                            {"type": "message", "thread": tid, "not_contains": ["null", "not-a-list", "<html>"],
+                            {"type": "message", "thread": tid, "not_contains": ["null", "not-a-list", "<html>", "N/A"],
                              "name": "no corrupted values sent"},
                             *self.style_checks2(tid, "en")]}
+            self.mal_i += 1
         elif sub == "vendor_timeout":
             t = self.ops("under_limit")
             t["faults"] = [{"tool": "request_quote", "kind": "timeout", "times": 1}]

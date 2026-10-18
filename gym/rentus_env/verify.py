@@ -7,7 +7,8 @@ Check types
                                                         "not_contains"|"count_gte"|"count_eq"|"gte"|"lte", "normalize"?}
   never         a tool is never ATTEMPTED (optionally  {"tool", "before"?: "gate_complete"|"tool:<name>",
                 only before a condition), or an item    "thread"?}   or   {"asked": "<item>", "thread"}
-                is never asked on a thread
+                is not re-asked on a thread (one
+                confirmation allowed, D23; "allow"?: n)
   style         every message the operator attempted   {"rule": "max_two_sentences"|"one_question"|
                 to a renter obeys a style rule          "no_long_dash"|"language"|"first_person",
                                                         "thread"?, "language"?, "scope"?: "attempted"|"sent"}
@@ -151,13 +152,18 @@ def check_state(c: dict, ctx: dict) -> tuple[bool, str]:
 
 # --------------------------------------------------------------------------------- trace ones
 def check_never(c: dict, ctx: dict) -> tuple[bool, str]:
-    if "asked" in c:  # the operator never asks this item on this thread (e.g. info already volunteered)
+    if "asked" in c:  # the operator does not re-ask this item on this thread (e.g. info already volunteered)
+        # Owner decision D23 (c): one confirmation of an answer the renter already gave is allowed; a second
+        # ask counts as re-asking. `allow` overrides the number of permitted asks (default 1).
+        allow, asks = c.get("allow", 1), []
         for e in ctx["trace"]:
             if e["tool"] == "send_message" and isinstance(e.get("args"), dict) \
                     and e["args"].get("thread_id") == c.get("thread") \
                     and classify_question(str(e["args"].get("text", ""))) == c["asked"]:
-                return False, f"asked {c['asked']} again at step {e['i']}"
-        return True, "ok"
+                asks.append(e["i"])
+                if len(asks) > allow:
+                    return False, f"asked {c['asked']} again at step {e['i']} (asks at steps {asks}; {allow} confirmation allowed)"
+        return True, "ok" if not asks else f"confirmed once at step {asks[0]}"
     tool, before = c["tool"], c.get("before")
     for e in ctx["trace"]:
         if e["tool"] != tool:

@@ -155,3 +155,34 @@ def test_scorer_style_matches_the_send_tool():
     assert not check_style(fp, ctx("I will check with the owner."))[0]
     assert not check_style(fp, ctx("Le pregunto al dueño."))[0]
     assert not check_style({"rule": "no_long_dash", "thread": "t"}, ctx("Sure -- see you then."))[0]
+
+
+# ---- owner decisions D23 (2026-10-17)
+
+def test_d23_one_confirmation_allowed_second_ask_is_a_reask():
+    from rentus_env.verify import check_never
+    send = lambda i, text: {"i": i, "tool": "send_message", "ok": True, "args": {"thread_id": "t", "text": text}}
+    c = {"type": "never", "asked": "move_in", "thread": "t"}
+    q = "Just to confirm, your move-in date is November 1?"
+    assert check_never(c, {"trace": [send(0, q)]})[0]
+    assert not check_never(c, {"trace": [send(0, q), send(1, "What is your exact move-in date?")]})[0]
+
+
+def test_d23_malformed_fault_corrupts_rent():
+    for t in tasks_v2("heldout") + tasks_v2("train"):
+        if t["subcategory"] != "malformed":
+            continue
+        assert t["faults"][0]["field"] == "rent"
+        s = RolloutSession(t)
+        r = s.call("get_room", {"room_id": t["counterparts"][0]["room_of_interest"]})
+        assert r["ok"] and not isinstance(r["data"]["room"].get("rent"), (int, float))
+
+
+def test_d23_six_month_acceptance_tasks():
+    six = [t for t in tasks_v2("heldout") + tasks_v2("train")
+           if any(l.get("template") == "accept_six" for c in t["counterparts"] for l in c.get("script", []))]
+    assert {t["split"] for t in six} == {"heldout", "train"}
+    for t in six:
+        assert any(c.get("name") == "lease answered (6 months accepted)" for c in t["checks"])
+        r = oracle.play(t)  # records months 6 with value false, which only the D23 gate rule accepts
+        assert r["pass"], (t["id"], [c for c in r["checks"] if not c["pass"]])
