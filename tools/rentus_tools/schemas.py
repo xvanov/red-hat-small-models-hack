@@ -64,7 +64,24 @@ PARAMS: dict[str, dict] = {
     # Owner
     "escalate_to_owner": _obj({"reason": S, "ref_id": S, "draft": S}, ["reason", "ref_id"]),
     "report_to_owner": _obj({"summary": S}, ["summary"]),
+    # Concierge / demand capture (docs/spec/concierge.md). Not in the default tool list: exposed with
+    # tool_schemas("concierge") so earlier configs and baselines see exactly the tools they always did.
+    "listing_disclosure": _obj({"room_id": S, "thread_id": S}, []),
+    "capture_demand": _obj({"thread_id": S, "criteria": {"type": "object"}, "listing_of_interest": S, "phone": S,
+                            "email": S, "proxy": {"type": "boolean"}}, ["thread_id"]),
+    "match_inventory": _obj({"renter_id": S}, ["renter_id"]),
+    "search_external_rooms": _obj({"renter_id": S}, ["renter_id"]),
+    "park_prospect": _obj({"renter_id": S, "reason": S, "timeframe": S}, ["renter_id", "reason"]),
+    "log_followup": _obj({"renter_id": S, "event": {"type": "string", "enum": ["application_sent", "checkin_sent", "reply",
+                                                                          "reconnect_sent", "applied", "closed", "placed"]},
+                          "note": S}, ["renter_id", "event"]),
+    "due_followups": _obj({"now": {"type": "string", "pattern": r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$"}}, []),
+    "cluster_report": _obj({"as_of": {"type": "string", "pattern": r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$"},
+                            "min_watch": {"type": "integer", "minimum": 1}, "min_signal": {"type": "integer", "minimum": 1}}, []),
 }
+
+CONCIERGE_TOOLS = ["listing_disclosure", "capture_demand", "match_inventory", "search_external_rooms", "park_prospect",
+                   "log_followup", "due_followups", "cluster_report"]
 
 GROUPS = {
     "inventory": ["list_rooms", "get_room", "update_room"],
@@ -77,6 +94,7 @@ GROUPS = {
     "calendar": ["find_showing_slots", "propose_showing"],
     "ops": ["web_search", "fetch_page", "find_vendors", "request_quote", "book_vendor", "create_job"],
     "owner": ["escalate_to_owner", "report_to_owner"],
+    "demand": CONCIERGE_TOOLS,
 }
 
 DESCRIPTIONS: dict[str, dict[str, str]] = {
@@ -127,6 +145,20 @@ DESCRIPTIONS: dict[str, dict[str, str]] = {
         "escalate_to_owner": "Hand a decision to the owner (over-budget quote, shorter lease request, conditional answer, anything you may not decide). Include a draft reply when useful.",
         "escalate_to_owner.ref_id": "The thread_id, job_id, renter_id, listing_id or quote_id the decision is about.",
         "report_to_owner": "Send the owner a short status summary of what you did.",
+        "listing_disclosure": "Get the full-disclosure messages for a room, built from its record only: type, what is private and shared, rent, deposit, utilities, street (never the house number), availability and the 1 year lease, plus the house rules (smoking, parties, pets). Send each as its own message before the first gate question.",
+        "listing_disclosure.thread_id": "Thread whose room and language to use. Give this or room_id.",
+        "capture_demand": "Record what an inquirer wants (every inquiry is demand, fit or not) on their register row, then check it against the inventory. Returns whether the room they asked about is available and fits, other open rooms that fit, and the next step.",
+        "capture_demand.criteria": "Only what they stated, never guesses: {\"area\": \"near the airport\", \"budget\": 800, \"type\": \"room\", \"private_bath\": true, \"move_in\": \"2026-11-01\", \"stay_months\": 12, \"occupants\": 1, \"pets\": \"cat\", \"language\": \"es\"}.",
+        "capture_demand.listing_of_interest": "The listing_id or room_id they asked about (defaults to the thread's).",
+        "capture_demand.phone": "Their phone if given; a person already on file with this phone is merged into one row.",
+        "match_inventory": "Rooms that fit a renter's stated criteria (hard gates: type, budget more than 15% below rent, occupants, pets, stay, private bath, area; unknowns never disqualify; needs at least 2 stated criteria).",
+        "search_external_rooms": "Sourcing step when nothing in the inventory fits: search off-inventory leads (partners, pipeline), mark the renter 'sourcing' with a due date a few days out. Leads are for the owner only, never offered to the renter as yours.",
+        "park_prospect": "Park a not-now prospect with a reconnect date taken from their timeframe: a named month is the 1st of that month, an exact date is that date, no timeframe is 30 days out. Stops check-ins until then.",
+        "park_prospect.reason": "Their own words, e.g. 'not looking until January'.",
+        "park_prospect.timeframe": "What they said about timing ('January', 'next month', 'in 2 weeks', '2027-01-15'); leave out if they gave none.",
+        "log_followup": "Record a follow-up event so the cadence advances: application_sent (check-ins every 12 h, then 24 h, then doubling), checkin_sent, reply (resets to 12 h), reconnect_sent, applied, closed, placed.",
+        "due_followups": "List prospects whose reconnect, check-in or sourcing date has come, each with the next step. Optional now (YYYY-MM-DD or YYYY-MM-DDTHH:MM); default is the current time.",
+        "cluster_report": "Demand report for the owner: totals by status, new captures by channel, and clusters of people wanting the same area, type and $150 budget band (WATCH at 3, SUPPLY SIGNAL at 5 qualified people; 5 counting unqualified people is 'nominal'). Use the summary in report_to_owner.",
     },
     "terse": {
         "list_rooms": "List rooms.",
@@ -158,10 +190,19 @@ DESCRIPTIONS: dict[str, dict[str, str]] = {
         "create_job.property": "Room id or address.",
         "escalate_to_owner": "Escalate to the owner.",
         "report_to_owner": "Report to the owner.",
+        "listing_disclosure": "Disclosure messages and house rules for a room.",
+        "capture_demand": "Record an inquirer's criteria and check the inventory.",
+        "match_inventory": "Rooms that fit a renter.",
+        "search_external_rooms": "Search off-inventory leads; mark sourcing.",
+        "park_prospect": "Park a not-now prospect with a reconnect date.",
+        "log_followup": "Record a follow-up event.",
+        "due_followups": "Follow-ups that are due.",
+        "cluster_report": "Demand clusters and supply signals.",
     },
 }
 
-TOOL_NAMES = list(PARAMS)
+TOOL_NAMES = [n for n in PARAMS if n not in CONCIERGE_TOOLS]
+DESCRIPTIONS["concierge"] = dict(DESCRIPTIONS["verbose"])   # verbose wording + the concierge tools
 
 
 def tool_schemas(variant: str = "verbose", only: list[str] | None = None,
@@ -172,7 +213,8 @@ def tool_schemas(variant: str = "verbose", only: list[str] | None = None,
         raise KeyError(f"unknown description variant {variant!r}; have {sorted(DESCRIPTIONS)}")
     desc = {**DESCRIPTIONS[variant], **(descriptions or {})}
     out = []
-    for name in (only or TOOL_NAMES):
+    names = only or (TOOL_NAMES + CONCIERGE_TOOLS if variant == "concierge" else TOOL_NAMES)
+    for name in names:
         params = copy.deepcopy(PARAMS[name])
         for pname, pschema in params["properties"].items():
             d = desc.get(f"{name}.{pname}")
