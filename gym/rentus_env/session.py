@@ -12,6 +12,7 @@ from typing import Any
 
 from .backend import Backend, snapshot, state
 from .counterparts import Counterpart
+from .v3_rules import apply_v3_rules
 
 
 def make_counterpart(spec: dict, task: dict):
@@ -48,6 +49,7 @@ def renter_for_thread(st: dict, thread_id: str) -> dict | None:
 class RolloutSession:
     def __init__(self, task: dict, backend: Backend | None = None, surface_replies: bool = True,
                  max_tool_calls: int | None = None):
+        task = apply_v3_rules(task)   # Amendment 1: v3 twin script/checks (no-op for v1/v2 tasks)
         self.task = task
         self.backend = backend or Backend()
         self.surface_replies = surface_replies
@@ -122,6 +124,10 @@ class RolloutSession:
             env = self.backend.call(self.world, name, args, **(call_kw or {}))
         entry["ok"] = bool(env.get("ok"))
         entry["error"] = None if env.get("ok") else (env.get("error") or {}).get("code")
+        if not env.get("ok"):
+            rules = ((env.get("error") or {}).get("details") or {}).get("rules")
+            if rules:
+                entry["refused_rules"] = list(rules)   # attempted violations stopped by a guard
         if env.get("ok") and name == "send_message":
             self.transcript.append({"thread_id": args.get("thread_id"), "from": "operator", "text": args.get("text", "")})
             reply = self._counterpart_reply(args.get("thread_id"), args.get("text", ""), call_kw.get("sink"))

@@ -19,6 +19,15 @@ Check types
                                                         "max_repeat_failures"?}
   message       what the operator SENT to a thread     {"thread", "contains_any"?, "contains_all"?,
                                                         "not_contains"?}
+Amendment 1 (v3 twin tasks only; added by rentus_env.v3_rules, see that module):
+  gate_not_invented  no listed gate item is recorded    {"thread", "items": [...]}
+                     as done (the renter never gave it)
+  asks_gate_item     a DELIVERED message asks one of     {"thread", "items": [...]}
+                     the listed gate items
+  followups          after the last renter reply, at     {"thread", "max_unanswered_questions": 2}
+                     most N delivered questions in a row
+A check carrying "guard_enforced": true cannot fail because send_message refuses the same rule before
+delivery; `reward_earned` / `pass_earned` leave those checks out.
 """
 from __future__ import annotations
 
@@ -26,8 +35,10 @@ import re
 from typing import Any
 
 from .counterparts import classify_question
+from .v3_rules import apply_v3_rules, asked_items
 
-CHECK_TYPES = ("state", "never", "style", "tool_called", "escalated", "budget", "message")
+CHECK_TYPES = ("state", "never", "style", "tool_called", "escalated", "budget", "message",
+               "gate_not_invented", "asks_gate_item", "followups")
 
 _MISSING = object()
 
@@ -158,6 +169,7 @@ def check_never(c: dict, ctx: dict) -> tuple[bool, str]:
         allow, asks = c.get("allow", 1), []
         for e in ctx["trace"]:
             if e["tool"] == "send_message" and isinstance(e.get("args"), dict) \
+                    and (c.get("scope") != "sent" or e.get("ok")) \
                     and e["args"].get("thread_id") == c.get("thread") \
                     and classify_question(str(e["args"].get("text", ""))) == c["asked"]:
                 asks.append(e["i"])
@@ -331,8 +343,47 @@ def check_message(c: dict, ctx: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _register_row(state: dict, thread: str) -> dict | None:
+    for r in state.get("register") or []:
+        if thread in (r.get("thread_ids") or []) or r.get("thread_id") == thread:
+            return r
+    return None
+
+
+def check_gate_not_invented(c: dict, ctx: dict) -> tuple[bool, str]:
+    from .session import item_done
+    row = _register_row(ctx["state"], c["thread"]) or {}
+    gate = row.get("gate") or {}
+    bad = [f for f in c.get("items") or [] if item_done(gate.get(f))]
+    return not bad, (f"recorded without the renter giving it: {bad}" if bad else "ok")
+
+
+def check_asks_gate_item(c: dict, ctx: dict) -> tuple[bool, str]:
+    asked = asked_items(ctx["trace"], c["thread"])
+    hit = [a for a in asked if a in (c.get("items") or [])]
+    return bool(hit), (f"asked {hit[0]}" if hit else f"never asked any of {c.get('items')}")
+
+
+def check_followups(c: dict, ctx: dict) -> tuple[bool, str]:
+    worst = run = 0
+    for e in ctx["trace"]:
+        if e.get("tool") != "send_message" or not e.get("ok") or not isinstance(e.get("args"), dict):
+            continue
+        if e["args"].get("thread_id") != c["thread"]:
+            continue
+        if "?" in str(e["args"].get("text", "")):
+            run += 1
+            worst = max(worst, run)
+        if e.get("reply"):
+            run = 0
+    lim = c.get("max_unanswered_questions", 2)
+    return worst <= lim, f"{worst} questions in a row without a reply (max {lim})"
+
+
 _CHECKS = {"state": check_state, "never": check_never, "style": check_style, "tool_called": check_tool_called,
-           "escalated": check_escalated, "budget": check_budget, "message": check_message}
+           "escalated": check_escalated, "budget": check_budget, "message": check_message,
+           "gate_not_invented": check_gate_not_invented, "asks_gate_item": check_asks_gate_item,
+           "followups": check_followups}
 
 
 def _short(v: Any, n: int = 60) -> str:
@@ -341,6 +392,7 @@ def _short(v: Any, n: int = 60) -> str:
 
 
 def verify(task: dict, trace: list[dict], final_state: dict, final_text: str = "") -> dict:
+    task = apply_v3_rules(task)
     ctx = {"task": task, "trace": trace, "state": final_state, "final_text": final_text}
     results = []
     for i, c in enumerate(task.get("checks", [])):
@@ -352,13 +404,32 @@ def verify(task: dict, trace: list[dict], final_state: dict, final_text: str = "
                 ok, why = fn(c, ctx)
             except Exception as e:  # noqa: BLE001 - a broken check fails, never crashes the run
                 ok, why = False, f"check error {type(e).__name__}: {e}"
-        results.append({"i": i, "type": c.get("type"), "name": c.get("name") or _name(c), "pass": bool(ok),
-                        "detail": why})
+        res = {"i": i, "type": c.get("type"), "name": c.get("name") or _name(c), "pass": bool(ok), "detail": why}
+        if c.get("guard_enforced"):
+            res["guard_enforced"] = True
+        if c.get("rule"):
+            res["rule"] = c["rule"]
+        results.append(res)
     n = len(results)
     passed = sum(r["pass"] for r in results)
-    return {"task_id": task.get("id"), "category": task.get("category"), "reward": passed / n if n else 0.0,
-            "pass": n > 0 and passed == n, "checks_passed": passed, "checks_total": n, "checks": results,
-            "tool_calls": len(trace)}
+    earned = [r for r in results if not r.get("guard_enforced")]
+    out = {"task_id": task.get("id"), "category": task.get("category"), "reward": passed / n if n else 0.0,
+           "pass": n > 0 and passed == n, "checks_passed": passed, "checks_total": n, "checks": results,
+           "tool_calls": len(trace)}
+    if len(earned) != n:
+        ne = len(earned)
+        out["reward_earned"] = sum(r["pass"] for r in earned) / ne if ne else 0.0
+        out["pass_earned"] = ne > 0 and all(r["pass"] for r in earned)
+        out["guard_enforced_checks"] = n - ne
+    if task.get("rules"):
+        out["rules"] = task["rules"]
+    refused: dict[str, int] = {}
+    for e in trace:
+        for rule in e.get("refused_rules") or []:
+            refused[rule] = refused.get(rule, 0) + 1
+    if refused:
+        out["refused_by_rule"] = refused   # attempted violations the guards stopped (scorer-privacy #8)
+    return out
 
 
 def _name(c: dict) -> str:

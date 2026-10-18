@@ -6,6 +6,12 @@ A counterpart's script is a list of lines:
   {"when_asked": "any", "say": "..."}         reply to any operator message that asks something
                                               no scripted line covers (or to the first message
                                               at all, when it has no question)
+  {"when_asked": "next", "at_reply": j, "say": "..."}
+                                              Amendment 1 (v3): a line carrying a non-gate behaviour
+                                              (hard no, not now, price push, question). It answers the
+                                              next operator message WHATEVER it asks, once every earlier
+                                              one-shot line is used, and at the latest on the j-th
+                                              operator message to this counterpart.
 Lines are consumed in order, once each. If nothing matches, the counterpart stays silent.
 
 <item> is one of: lease, move_in, phone, reason, occupants, showing, other.
@@ -104,6 +110,7 @@ class Counterpart:
         self.classifier = spec.get("classifier", "v1")
         self.used: set[int] = set()
         self.replies_sent = 0
+        self.operator_msgs = 0
 
     def opening(self) -> list[str]:
         out = []
@@ -116,6 +123,12 @@ class Counterpart:
     def respond(self, operator_text: str) -> tuple[str | None, str | None]:
         """Returns (asked_item, reply_text or None)."""
         item = classify_question(operator_text, self.classifier)
+        self.operator_msgs += 1
+        nxt = self._due_next()
+        if nxt is not None:
+            self.used.add(nxt)
+            self.replies_sent += 1
+            return item, self.script[nxt]["say"]
         if item is not None:
             hit = self._take(item, reuse=False) or self._take(item, reuse=True)
             if hit is not None:
@@ -129,6 +142,18 @@ class Counterpart:
             if hit is not None:
                 return item, hit
         return item, None
+
+    def _due_next(self) -> int | None:
+        """Index of a "next" line that is due now, else None."""
+        for i, line in enumerate(self.script):
+            if line.get("when_asked") != "next" or i in self.used:
+                continue
+            earlier = [k for k, l in enumerate(self.script[:i])
+                       if not l.get("reuse") and l.get("after") != "start" and k not in self.used]
+            if not earlier or self.operator_msgs >= int(line.get("at_reply") or 10 ** 6):
+                return i
+            return None
+        return None
 
     def _take(self, item: str, reuse: bool) -> str | None:
         for i, line in enumerate(self.script):

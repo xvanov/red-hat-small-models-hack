@@ -52,6 +52,23 @@ from datetime import date
 
 from .counterparts import classify_question
 
+KEY_INTENTS = ("hard_no", "not_now", "price_negotiation")
+
+
+def key_lines(spec: dict) -> list[dict]:
+    """Amendment 1: the twin's not-now / hard-no / price-push lines, said VERBATIM at their reply position.
+
+    Returns [{"at_reply": j, "say": text, "behavior": [...]}] from twin_script (empty for non-twin tasks)."""
+    from .v3_rules import _renter_blocks
+    ts = spec.get("twin_script") or {}
+    _, blocks = _renter_blocks(ts.get("turns") or [])
+    out = []
+    for j, b in enumerate(blocks, start=1):
+        beh = [i for i in b["intents"] if i in KEY_INTENTS]
+        if beh:
+            out.append({"at_reply": j, "say": " ".join(b["texts"]), "behavior": beh})
+    return out
+
 REPLY_SCHEMA = {
     "type": "object",
     "properties": {
@@ -111,6 +128,11 @@ class LLMRenter:
         self.opening_lines = list(spec.get("opening") or [])
         self.script = [{"after": "start", "say": s} for s in self.opening_lines]   # run_eval.opening_goal reads this
         self.truth = dict(spec.get("truth") or {})
+        gold_reason = (((spec.get("twin_script") or {}).get("gold_facts") or {}).get("reason") or {}).get("value")
+        if gold_reason:   # the gold value, not the whole twin message (which can carry other intents)
+            self.truth["reason"] = gold_reason
+        self.key_lines = key_lines(spec)
+        self.key_said: set[int] = set()
         self.behaviors = dict(spec.get("behaviors") or {})
         self.persona = spec.get("persona") or f"{self.name}, looking for a room to rent"
         self.sim = {"temperature": 0.0, "seed": 7, "max_tokens": 300, **(spec.get("simulator") or {})}
@@ -192,7 +214,8 @@ class LLMRenter:
         if b.get("vague_first") and t.get("move_in_vague"):
             rules.append(f"The first time the move-in date comes up, answer only vaguely (\"{t['move_in_vague']}\"). "
                          "Give the exact date only when they ask again.")
-        if b.get("price_push"):
+        if b.get("price_push") and (not self.key_lines or any(
+                "price_negotiation" in k["behavior"] for i, k in enumerate(self.key_lines) if i in self.key_said)):
             rules.append("You already asked about a discount. If the owner says no or that they'll check, accept that "
                          "and keep going; do not keep pushing.")
         return (f"You are role-playing a person who is texting a landlord about a room. Stay in character.\n\n"
@@ -239,6 +262,14 @@ class LLMRenter:
             self.log.append({"turn": len(self.log) + 1, "operator": operator_text, "asked": asked, "reply": None,
                              "ghosted": True})
             return asked, None
+        for k, kl in enumerate(self.key_lines):   # scripted key behaviour due on this reply: say it verbatim
+            if k not in self.key_said and self.replies_sent + 1 >= kl["at_reply"]:
+                self.key_said.add(k)
+                self.history.append(("renter", kl["say"]))
+                self.replies_sent += 1
+                self.log.append({"turn": len(self.log) + 1, "operator": operator_text, "asked": asked, "reply": kl["say"],
+                                 "revealed": [], "scripted_key_behavior": kl["behavior"]})
+                return asked, kl["say"]
         note = self.director_note(asked)
         entry = {"turn": len(self.log) + 1, "operator": operator_text, "asked": asked, "director": note, "attempts": []}
         reply, revealed = None, []
