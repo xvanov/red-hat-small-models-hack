@@ -32,10 +32,11 @@ from .renters import DEFAULT_COUNTERPARTS
 from .renters import Counterpart as ConsoleCounterpart
 
 FIXTURE = integ.REPO / "operator" / "fixtures" / "appling_way.json"
-# The held-out winner (docs/results.md, "final" row): guard + prompt v3 + style pre-check + reasoning history.
-FINAL_CONFIG = {"prompt_version": "v3", "renter_guard": True, "style_precheck": True,
-                "keep_reasoning_in_history": True}
-FINAL_CONFIG_NAME = "guard+prompt3+style+rhist"
+# The confirmatory "final" setup (docs/eval-protocol.md, Amendment 6): prompt v4 + concierge tools + stand-down guard,
+# on top of the renter guard, style pre-check and reasoning history.
+FINAL_CONFIG = {"prompt_version": "v4", "tool_descriptions": "concierge", "guard_stand_down": True,
+                "renter_guard": True, "style_precheck": True, "keep_reasoning_in_history": True}
+FINAL_CONFIG_NAME = "final-v4-concierge"
 RENTER_WORKERS = 3
 
 
