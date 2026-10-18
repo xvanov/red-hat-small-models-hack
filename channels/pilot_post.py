@@ -34,6 +34,14 @@ ROOM = {
     "rent": 750,
     "available_from": "2026-11-01",
     "amenities": ["Private bathroom", "Separate entrance"],
+    # Not confirmed by the owner: null in the record and listed here, so the tools refuse any text that
+    # states them (tools/rentus_tools/impl/fact_guards.py; spec R-DISC-3).
+    "deposit": None,
+    "utilities": None,
+    "lease_min_months": None,
+    "furnished": None,
+    "pets": "unconfirmed",
+    "unconfirmed": ["lease_min_months", "deposit", "utilities", "furnished", "shared_spaces", "house_rules", "pets"],
     "notes": "Owner-confirmed facts only. Deposit, utilities, lease length, furnishing, shared spaces and house "
              "rules are NOT confirmed: never state them; say 'message us for details'.",
 }

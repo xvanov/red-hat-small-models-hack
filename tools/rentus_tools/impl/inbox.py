@@ -10,6 +10,7 @@ from ..errors import ToolError
 from ._util import dollar_figures, need
 from .listings import allowed_figures
 from .reader import read_reply_fallback
+from .fact_guards import check_unconfirmed
 from .guards import booking_claims, has_confirmed_showing, language_mismatch
 from .demand import room_available as room_available_for_offer
 from .demand_guards import first_person_hint, house_numbers, owner_names, public_street, third_person_refs
@@ -176,6 +177,9 @@ def send_message(world, thread_id: str, text: str, attachments: list[str] | None
                             f"message quotes {', '.join(f'${b:g}' for b in bad)}, which is not in the record for {where}",
                             hint="quote the record's rent/deposit; price changes and discounts go to escalate_to_owner",
                             details={"rules": ["price_not_in_record"]})
+    # Unconfirmed facts (R-DISC-3, C18; post-freeze fix): never state what the owner has not confirmed.
+    if room is not None:
+        check_unconfirmed(text, room, "message", skip_questions=True)
     # Lease terms (owner decision D23): the public minimum is the default; the private floor
     # (policy.lease_floor_months, 6) may be named only after the renter asked for a shorter lease.
     floor = world.policy.get("lease_min_months_public", 12)

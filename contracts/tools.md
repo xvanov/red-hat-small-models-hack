@@ -34,7 +34,7 @@ Calling convention: `rentus_tools.call(world, name: str, args: dict) -> dict`. I
 One JSON document, loaded from `data/published/inventory.json` plus a scenario's `initial_state` patch.
 
 ```
-rooms[]          room_id, area, zip, address_public, type, private_bath, rent, deposit, utilities, available_from, pets, lease_min_months, photos[]
+rooms[]          room_id, area, zip, address_public, type, private_bath, rent, deposit, utilities, available_from, pets, lease_min_months, photos[], unconfirmed[]? (fact keys the owner has not confirmed: lease_min_months, deposit, utilities, furnished, shared_spaces, house_rules; a null/missing lease_min_months, deposit or utilities also counts as unconfirmed)
 listings[]       listing_id, room_id, status(draft|live|filled|removed), title, body, price, channels{channel: {post_id, status, url}}
 channels         marketplace | roomies | craigslist | padsplit | sms | email  (each: posts[], threads[])
 threads[]        thread_id, channel, renter_name, language, messages[{id, from(renter|operator), text, attachments[], ts}]
@@ -57,7 +57,7 @@ Arguments are JSON. All return the envelope above; the `data` shape is listed.
 | Inventory | `list_rooms` | `available_by?` date, `area?` | `rooms[]` |
 | | `get_room` | `room_id` | `room` |
 | | `update_room` | `room_id`, `fields{}` | `room` |
-| Listings | `create_listing` | `room_id`, `title`, `body`, `price` | `listing` (draft) |
+| Listings | `create_listing` | `room_id`, `title`, `body`, `price` | `listing` (draft); `POLICY_BLOCKED` (`unconfirmed_fact`) if the text states a fact unconfirmed in the room record (same check in `update_listing`, `publish_listing`, `send_message`) |
 | | `publish_listing` | `listing_id`, `channel` | `{post_id, url, status}` (sandbox: live; live adapters: `ready_to_submit` with `screenshot`) |
 | | `update_listing` | `listing_id`, `fields{}` | `listing` |
 | | `mark_filled` | `listing_id` | `listing` (removes from all channels) |
@@ -66,7 +66,7 @@ Arguments are JSON. All return the envelope above; the `data` shape is listed.
 | Market | `get_market_rent` | `zip`, `bedrooms?` | `{zori, source, as_of}` |
 | Inbox | `list_threads` | `channel?`, `unanswered_only?` | `threads[]` (summaries) |
 | | `read_thread` | `thread_id` | `thread` |
-| | `send_message` | `thread_id`, `text`, `attachments?[]` | `{message_id}`; refused with `POLICY_BLOCKED` if text breaks style rules (>2 sentences, >1 question, long dashes) or quotes a price/term not in the room record |
+| | `send_message` | `thread_id`, `text`, `attachments?[]` | `{message_id}`; refused with `POLICY_BLOCKED` if text breaks style rules (>2 sentences, >1 question, long dashes) or quotes a price/term not in the room record, or states an unconfirmed fact (questions exempt) |
 | Reader | `read_reply` | `thread_id` or `text`, `pending_item?` | reader JSON (`data/reader_schema.md`); backed by the ≤1.5B reader when served, else a deterministic fallback |
 | Register | `upsert_renter` | `thread_id`, `fields{}` | `renter` |
 | | `match_renters` | `room_id` | `matches[{renter_id, score, reasons[]}]` |

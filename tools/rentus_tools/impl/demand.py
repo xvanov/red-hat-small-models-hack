@@ -233,11 +233,33 @@ def resolve_timeframe(timeframe: str | None, today: date) -> tuple[date, str]:
 
 # ----------------------------------------------------------------------------- disclosure
 
-_TYPE_EN = {"room in house": "a private room in a shared house", "room in townhouse": "a private room in a shared townhouse",
-            "room in duplex": "a private room in a shared duplex", "basement suite": "a basement suite in a house"}
-_TYPE_ES = {"room in house": "un cuarto privado en una casa compartida",
-            "room in townhouse": "un cuarto privado en una casa adosada compartida",
-            "room in duplex": "un cuarto privado en un dúplex compartido", "basement suite": "un sótano independiente en una casa"}
+# Room types with their articles (EN, ES). "{shared}" is filled only when shared spaces are confirmed.
+_TYPE_EN = {"room in house": "a private room in a{shared} house", "room in townhouse": "a private room in a{shared} townhouse",
+            "room in duplex": "a private room in a{shared} duplex", "bedroom in house": "a bedroom in a{shared} house",
+            "basement suite": "a basement suite in a house", "studio": "a studio", "apartment": "an apartment"}
+_TYPE_ES = {"room in house": "un cuarto privado en una casa{shared}",
+            "room in townhouse": "un cuarto privado en una casa adosada{shared}",
+            "room in duplex": "un cuarto privado en un dúplex{shared}", "bedroom in house": "una habitación en una casa{shared}",
+            "basement suite": "un sótano independiente en una casa", "studio": "un estudio", "apartment": "un apartamento"}
+_SHARED_EN, _SHARED_ES = " shared", {"casa": " compartida", "casa adosada": " compartida", "dúplex": " compartido"}
+DISCLOSURE_MAX_CHARS = 160   # target per message (one SMS segment); never more than 2 sentences (R-STYLE)
+
+
+def room_kind(room_type: str, lang: str = "en", shared: bool = True) -> str:
+    """'bedroom in house' -> 'a bedroom in a house' / 'una habitación en una casa' (articles always present)."""
+    t = (room_type or "").strip().lower()
+    if lang == "es":
+        tpl = _TYPE_ES.get(t)
+        if tpl is None:
+            return "un cuarto"
+        tail = re.search(r"en (?:una|un) ([\wúé ]+)\{shared\}", tpl)
+        return tpl.replace("{shared}", _SHARED_ES.get(tail.group(1), "") if (shared and tail) else "")
+    tpl = _TYPE_EN.get(t)
+    if tpl is None:  # unknown type: add the articles it lacks ("loft in house" -> "a loft in a house")
+        tpl = re.sub(r"\b(in|on) (?!a |an |the )", r"\1 a ", t or "room")
+        tpl = ("an " if tpl[:1] in "aeiou" else "a ") + tpl
+        return tpl
+    return tpl.replace("{shared}", _SHARED_EN if shared else "")
 
 
 def _money(v) -> str:
@@ -245,36 +267,64 @@ def _money(v) -> str:
     return f"${f:,.0f}" if f is not None and float(f).is_integer() else f"${f:,.2f}"
 
 
+def pack_messages(sentences: list[str], max_chars: int = DISCLOSURE_MAX_CHARS) -> list[str]:
+    """Greedy: join consecutive sentences into one message while it stays at most 2 sentences and max_chars."""
+    out, cur, n = [], "", 0
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        if cur and n < 2 and len(cur) + 1 + len(s) <= max_chars:
+            cur, n = f"{cur} {s}", n + 1
+        else:
+            if cur:
+                out.append(cur)
+            cur, n = s, 1
+    if cur:
+        out.append(cur)
+    return out
+
+
 def disclosure_messages(world, room: dict, lang: str = "en") -> dict:
-    unconf = set(room.get("unconfirmed") or [])
+    """Short messages (at most 2 sentences, about 160 characters each) from the room record's CONFIRMED facts
+    only (fact_guards.unconfirmed_facts), then the house rules as their own message(s)."""
+    from .fact_guards import unconfirmed_facts
+    unconf = set(room.get("unconfirmed") or []) | unconfirmed_facts(room)
     street = public_street(room.get("address", ""))
     area = room.get("area", "")
     avail = room.get("available_from")
     now_avail = (not avail) or avail <= world.today()
     es = lang == "es"
-    msgs, rules = [], []
-    # 1. type, what is private and shared, street (never the house number)
-    kind = (_TYPE_ES if es else _TYPE_EN).get(room.get("type", ""), room.get("type", "a room"))
+    rtype = room.get("type", "")
+    shared_ok = "shared_spaces" not in unconf
+    kind = room_kind(rtype, lang, shared=shared_ok)
     bath = room.get("private_bath")
+    sents = []
+    # 1. type, street (never the house number), private bath / entrance, shared spaces
     if es:
         s1 = f"Es {kind} en {street}, {area}"
+        feats = []
         if "private_bath" not in unconf and bath is not None:
-            s1 += ", con baño privado" if bath else ", con baño compartido"
+            feats.append("baño privado" if bath else "baño compartido")
         if room.get("own_entrance") and "own_entrance" not in unconf:
-            s1 += " y entrada propia"
-        s1 += "."
-        if "room in" in room.get("type", ""):
-            s1 += " La cocina y las áreas comunes son compartidas."
+            feats.append("entrada propia")
+        if feats:
+            s1 += ", con " + " y ".join(feats)
+        sents.append(s1 + ".")
+        if "room in" in rtype and shared_ok:
+            sents.append("La cocina y las áreas comunes son compartidas.")
     else:
         s1 = f"It's {kind} on {street} in {area}"
+        feats = []
         if "private_bath" not in unconf and bath is not None:
-            s1 += ", with a private bathroom" if bath else ", with a shared bathroom"
+            feats.append("a private bathroom" if bath else "a shared bathroom")
         if room.get("own_entrance") and "own_entrance" not in unconf:
-            s1 += " and its own entrance"
-        s1 += "."
-        if "room in" in room.get("type", ""):
-            s1 += " The kitchen and living areas are shared."
-    msgs.append(s1)
+            feats.append("its own entrance")
+        if feats:
+            s1 += ", with " + " and ".join(feats)
+        sents.append(s1 + ".")
+        if "room in" in rtype and shared_ok:
+            sents.append("The kitchen and living areas are shared.")
     # 2. rent, deposit, utilities
     util = str(room.get("utilities") or "").lower()
     if "rent" not in unconf and room.get("rent") is not None:
@@ -282,56 +332,57 @@ def disclosure_messages(world, room: dict, lang: str = "en") -> dict:
             s2 = f"La renta es {_money(room['rent'])} al mes"
             if "deposit" not in unconf and room.get("deposit") is not None:
                 s2 += f" y el depósito es {_money(room['deposit'])}"
-            s2 += "."
+            sents.append(s2 + ".")
             if "utilities" not in unconf and util:
-                s2 += (" Los servicios están incluidos." if "included" in util else
-                       f" Los servicios son {_money(re.search(r'[0-9.]+', util).group(0))} al mes fijos." if "$" in util else
-                       " Los servicios se dividen en partes iguales entre los compañeros.")
+                sents.append("Los servicios están incluidos." if "included" in util else
+                             f"Los servicios son {_money(re.search(r'[0-9.]+', util).group(0))} al mes fijos." if "$" in util else
+                             "Los servicios se dividen en partes iguales entre los compañeros.")
         else:
             s2 = f"Rent is {_money(room['rent'])} a month"
             if "deposit" not in unconf and room.get("deposit") is not None:
                 s2 += f" and the deposit is {_money(room['deposit'])}"
-            s2 += "."
+            sents.append(s2 + ".")
             if "utilities" not in unconf and util:
-                s2 += (" Utilities are included." if "included" in util else
-                       f" Utilities are a flat {_money(re.search(r'[0-9.]+', util).group(0))} a month." if "$" in util else
-                       " Utilities are split evenly among the housemates.")
-        msgs.append(s2)
-    # 3. availability (never a past date) and the public lease wording
+                sents.append("Utilities are included." if "included" in util else
+                             f"Utilities are a flat {_money(re.search(r'[0-9.]+', util).group(0))} a month." if "$" in util else
+                             "Utilities are split evenly among the housemates.")
+    # 3. availability (never a past date) and the public lease wording, only when the lease is confirmed
+    lease_ok = "lease_min_months" not in unconf
     if es:
         when = "ya" if now_avail else f"desde el {int(avail[8:])} de {MONTH_NAMES_ES[int(avail[5:7]) - 1]}"
-        msgs.append(f"Está disponible {when}, y el contrato es de 1 año.")
+        sents.append(f"Está disponible {when}, y el contrato es de 1 año." if lease_ok else f"Está disponible {when}.")
     else:
         when = "now" if now_avail else f"from {MONTH_NAMES_EN[int(avail[5:7]) - 1].title()} {int(avail[8:])}"
-        msgs.append(f"It's available {when}, and the lease is 1 year.")
-    # house rules: smoking, parties, pets (R-PET-1..3)
+        sents.append(f"It's available {when}, and the lease is 1 year." if lease_ok else f"It's available {when}.")
+    msgs = pack_messages(sents)
+    # house rules: smoking, parties, pets (R-PET-1..3), as their own message(s)
     pets = str(room.get("pets") or "").lower()
-    if es:
-        r1 = "Las reglas de la casa: no se fuma adentro y no se permiten fiestas."
-        if "pets" in unconf or not pets:
-            r2 = "Sobre mascotas, te confirmo los detalles."
-        elif pets in ("no", "none"):
-            r2 = "No se permiten mascotas."
-        elif "cat" in pets:
-            r2 = "Se aceptan gatos y mascotas en jaula o terrario, pero no roedores ni conejos."
-        elif "dog" in pets:
-            r2 = "Se aceptan perros pequeños y mascotas en jaula o terrario, pero no roedores ni conejos."
-        else:
-            r2 = "Las mascotas se ven caso por caso, cuéntame cuál tienes."
+    pets_unknown = "pets" in unconf or not pets or "unconfirmed" in pets
+    rule_sents = []
+    if "house_rules" in unconf:
+        rule_sents.append("Te confirmo las reglas de la casa y lo de mascotas." if es and pets_unknown else
+                          "Te confirmo las reglas de la casa." if es else
+                          "I'll confirm the house rules and pet details for you." if pets_unknown else
+                          "I'll confirm the house rules for you.")
     else:
-        r1 = "House rules: no smoking inside and no parties."
-        if "pets" in unconf or not pets:
-            r2 = "On pets, I'll confirm the details for you."
-        elif pets in ("no", "none"):
-            r2 = "No pets, sorry."
-        elif "cat" in pets:
-            r2 = "Cats are okay, and so are caged or terrarium pets, but no rodents or rabbits."
-        elif "dog" in pets:
-            r2 = "Small dogs are okay, and so are caged or terrarium pets, but no rodents or rabbits."
+        rule_sents.append("Las reglas de la casa: no se fuma adentro y no se permiten fiestas." if es else
+                          "House rules: no smoking inside and no parties.")
+    if not ("house_rules" in unconf and pets_unknown):
+        if es:
+            rule_sents.append("Sobre mascotas, te confirmo los detalles." if pets_unknown else
+                              "No se permiten mascotas." if pets in ("no", "none") else
+                              "Se aceptan gatos y mascotas en jaula o terrario, pero no roedores ni conejos." if "cat" in pets else
+                              "Se aceptan perros pequeños y mascotas en jaula o terrario, pero no roedores ni conejos." if "dog" in pets else
+                              "Las mascotas se ven caso por caso, cuéntame cuál tienes.")
         else:
-            r2 = "Pets are case by case, so tell me about yours."
-    rules.append(f"{r1} {r2}")
-    return {"room_id": room["room_id"], "language": lang, "messages": msgs, "house_rules": rules}
+            rule_sents.append("On pets, I'll confirm the details for you." if pets_unknown else
+                              "No pets, sorry." if pets in ("no", "none") else
+                              "Cats are okay, and so are caged or terrarium pets, but no rodents or rabbits." if "cat" in pets else
+                              "Small dogs are okay, and so are caged or terrarium pets, but no rodents or rabbits." if "dog" in pets else
+                              "Pets are case by case, so tell me about yours.")
+    rules = pack_messages(rule_sents)
+    return {"room_id": room["room_id"], "language": lang, "messages": msgs, "house_rules": rules,
+            "sequence": msgs + rules}
 
 
 @tool("listing_disclosure")
@@ -350,7 +401,8 @@ def listing_disclosure(world, room_id: str | None = None, thread_id: str | None 
         raise ToolError("INVALID_ARGS", "listing_disclosure: give room_id, or a thread_id tied to a room",
                         hint="for an ambiguous inquiry, ask which listing first (one short line per live room)")
     out = disclosure_messages(world, room, lang)
-    out["next_step"] = ("send each of messages, then house_rules, as its own send_message (no question in any of them); "
+    out["next_step"] = ("send each entry of sequence (messages, then house_rules), unchanged, as its own send_message "
+                        "(no question in any of them); "
                         "then ask the first missing gate item as the single question in the last message")
     return out
 

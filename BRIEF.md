@@ -66,6 +66,7 @@ Simulated renters and vendors in the Gym are scripted from open datasets, not a 
 - 2026-10-17: owner decisions D23. `contracts/tools.md` §5 malformed faults take `field`/`field_mode` (target one key, e.g. rent); §3 `gate.lease` takes optional `months` (accepting >= `lease_floor_months` passes the gate). Additive.
 - 2026-10-17: `contracts/tools.md` §9, task set v2 script fields (`reuse`, list `when_asked`, `classifier`, per-task room patches). Additive; v1 tasks unchanged.
 - 2026-10-17: `contracts/tools.md` §10, task format v3 (twin tasks: counterpart `persona` + `twin_script`), written by `data/twins/to_tasks.py`. Additive; v2 `script` kept.
+- 2026-10-18 (post-freeze): `contracts/tools.md` §3 rooms take optional `unconfirmed[]` (null/missing lease_min_months, deposit, utilities also count); §4 `create_listing`/`update_listing`/`publish_listing`/`send_message` refuse text stating an unconfirmed fact (`POLICY_BLOCKED`, rule `unconfirmed_fact`). `listing_disclosure` adds `sequence`. Additive.
 
 ## Concierge tools (lane 2, Oct 18)
 

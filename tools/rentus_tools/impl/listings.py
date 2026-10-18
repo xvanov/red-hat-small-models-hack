@@ -10,6 +10,7 @@ from ..world import POST_CHANNELS
 from . import compliance
 from ._util import dollar_figures, need, num
 from .demand_guards import house_numbers, public_street
+from .fact_guards import check_unconfirmed
 
 MEDIA_BASE = "https://sandbox.rentus.local/media"
 
@@ -59,6 +60,7 @@ def create_listing(world, room_id: str, title: str, body: str, price):
     _check_price(room, price)
     check_figures(f"{title}\n{body}", allowed_figures(room), room_id)
     check_address(world, f"{title}\n{body}", room)
+    check_unconfirmed(f"{title}\n{body}", room, "listing text")
     listing = {"listing_id": world.next_id("L"), "room_id": room_id, "status": "draft", "title": title, "body": body,
                "price": int(price) if float(price).is_integer() else price, "channels": {},
                "created_at": world.clock["now"]}
@@ -77,7 +79,9 @@ def publish_listing(world, listing_id: str, channel: str):
     if cur and cur.get("status") in ("live", "ready_to_submit"):
         raise ToolError("CONFLICT", f"listing {listing_id} is already {cur['status']} on {channel}",
                         hint="use update_listing to change it")
-    check_address(world, f"{listing['title']}\n{listing['body']}", world.get("rooms", listing["room_id"]) or {})
+    room = world.get("rooms", listing["room_id"]) or {}
+    check_address(world, f"{listing['title']}\n{listing['body']}", room)
+    check_unconfirmed(f"{listing['title']}\n{listing['body']}", room, "listing text")
     report = compliance.check(f"{listing['title']}\n{listing['body']}", world.policy)
     if not report["ok"]:
         phrases = "; ".join(f"'{f['phrase']}' ({f['rule']})" for f in report["findings"] if f["severity"] == "violation")
@@ -117,6 +121,7 @@ def update_listing(world, listing_id: str, fields: dict):
         raise ToolError("INVALID_ARGS", "update_listing: title and body must not be empty")
     check_figures(f"{title}\n{body}", allowed_figures(room), room["room_id"])
     check_address(world, f"{title}\n{body}", room)
+    check_unconfirmed(f"{title}\n{body}", room, "listing text")
     listing.update(fields)
     for entry in listing["channels"].values():
         if entry.get("status") == "live":
