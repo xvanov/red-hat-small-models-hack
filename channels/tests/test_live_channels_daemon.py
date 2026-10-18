@@ -492,3 +492,10 @@ def test_live_note_is_added_to_the_system_prompt(env):
     h2 = daemon.with_live_note(old, None, w)
     assert compose.LIVE_NOTE in h2[0]["content"] and h2[1] == old[1]
     assert daemon.with_live_note(h2, None, w)[0]["content"].count(compose.LIVE_NOTE) == 1
+
+
+def test_compose_drops_a_restated_fact_but_keeps_different_numbers():
+    from channels.live import compose
+    out = " ".join(compose.compose(["I have a room on Appling Way with a private bath for $750 a month.",
+                                    "Rent is $750 a month.", "Rent is $850 for the other room.", "Okay?"], "sms"))
+    assert out.count("$750") == 1 and "$850" in out

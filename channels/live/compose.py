@@ -54,12 +54,33 @@ def _near_dup(a: str, b: str) -> bool:
     return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.88
 
 
+STOP = {"with", "that", "this", "your", "have", "from", "will", "just", "also", "there", "here", "its", "it's",
+        "they", "them", "then", "than", "what", "when", "would", "could", "about", "a", "an", "the", "is", "are"}
+
+
+def _tokens(s: str) -> set:
+    return {w for w in re.findall(r"[a-z]{4,}|\d+", s.lower()) if w not in STOP}
+
+
+def _covered(s: str, kept: list[str]) -> bool:
+    """A statement whose numbers were all already stated and whose content words are mostly already said
+    ("Rent is $750 a month." after "...a private bath for $750 a month.") adds nothing."""
+    if s.rstrip().endswith("?"):
+        return False
+    toks = _tokens(s)
+    nums = {t for t in toks if t.isdigit()}
+    if not toks or not nums:
+        return False
+    have = set().union(*(_tokens(k) for k in kept)) if kept else set()
+    return nums <= have and len(toks & have) / len(toks) >= 0.6
+
+
 def merge(texts: list[str], renter_text: str = "") -> list[str]:
     """Pooled, de-duplicated sentences: statements (answer first), then the last question."""
     pool: list[str] = []
     for t in texts:
         for s in sentences(t):
-            if not any(_near_dup(s, k) for k in pool):
+            if not any(_near_dup(s, k) for k in pool) and not _covered(s, pool):
                 pool.append(s)
     questions = [s for s in pool if s.rstrip().endswith("?")]
     statements = [s for s in pool if not s.rstrip().endswith("?")]
