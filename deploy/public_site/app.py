@@ -68,7 +68,12 @@ def render_page() -> str:
     tpl = (HERE / "static" / "index.html").read_text()
     sms = _read_twilio_number()
     email = _demo_email()
+    console_link = os.environ.get("PUBLIC_CONSOLE_LINK", "").strip()
+    if not re.fullmatch(r"https://[a-z0-9.-]+\.rentus\.homes/?", console_link):
+        console_link = ""
     subs = {
+        "{{CONSOLE_LINK}}": console_link or "#",
+        "{{CONSOLE_HIDDEN}}": "" if console_link else "hidden",
         "{{MESSENGER_URL}}": MESSENGER_URL,
         "{{SMS_HREF}}": f"sms:{sms}?&body=Hi%2C%20is%20the%20room%20on%20Appling%20Way%20still%20available%3F" if sms else "#",
         "{{SMS_PRETTY}}": _pretty(sms) if sms else "coming soon",

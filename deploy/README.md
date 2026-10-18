@@ -48,3 +48,9 @@ Fallback without the named tunnel: `cloudflared tunnel --url http://127.0.0.1:80
 ```
 
 Note: Cloudflare's Email Obfuscation would rewrite the address into a script-decoded link that the CSP blocks; the page sends `Cache-Control: no-transform` and wraps the email in `<!--email_off-->` so the plain `mailto:` link survives.
+
+## Read-only public console (temporary)
+
+`console.rentus.homes` → `127.0.0.1:8092`, a separate console instance started with `CONSOLE_PUBLIC_READONLY=1` (every write answers 403). It is routed only after POSTs to `/api/runs` and `/api/live/*` were checked to return 403. The page shows "Open the live console (read-only)" only while the app runs with `PUBLIC_CONSOLE_LINK=https://console.rentus.homes`.
+
+Take it down: `deploy/takedown.sh` (removes the console ingress, restarts the tunnel, stops :8092, restarts the page without the button). `deploy/takedown.sh --all` also stops demo.rentus.homes.
