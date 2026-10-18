@@ -7,7 +7,8 @@ from ..core import tool
 from ..errors import ToolError
 
 REF_COLLECTIONS = (("threads", "thread_id"), ("jobs", "job_id"), ("register", "renter_id"), ("listings", "listing_id"),
-                   ("quotes", "quote_id"), ("rooms", "room_id"), ("calendar", "event_id"))
+                   ("quotes", "quote_id"), ("rooms", "room_id"), ("calendar", "event_id"),
+                   ("tenants", "tenant_id"))
 
 
 @tool("escalate_to_owner")
@@ -16,7 +17,7 @@ def escalate_to_owner(world, reason: str, ref_id: str, draft: str | None = None)
         raise ToolError("INVALID_ARGS", "escalate_to_owner: reason must not be empty")
     kind = next((key for coll, key in REF_COLLECTIONS if world.get(coll, ref_id)), None)
     if kind is None:
-        raise ToolError("NOT_FOUND", f"ref_id {ref_id!r} matches no thread, job, renter, listing, quote, room or event")
+        raise ToolError("NOT_FOUND", f"ref_id {ref_id!r} matches no thread, job, renter, listing, quote, room, event or tenant")
     for e in world.escalations:
         if e["ref_id"] == ref_id and e["reason"] == reason and e.get("status") == "open":
             return {"escalation": copy.deepcopy(e), "existing": True}

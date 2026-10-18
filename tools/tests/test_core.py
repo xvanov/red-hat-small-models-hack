@@ -18,8 +18,9 @@ def test_every_contract_tool_has_schema_and_impl():
                 "web_search", "fetch_page", "find_vendors", "request_quote", "book_vendor", "create_job",
                 "escalate_to_owner", "report_to_owner"}
     assert set(rt.TOOL_NAMES) == expected
-    from rentus_tools.schemas import CONCIERGE_TOOLS
-    assert set(rt.REGISTRY) == expected | set(CONCIERGE_TOOLS)  # concierge tools: tool_schemas("concierge")
+    from rentus_tools.schemas import CONCIERGE_TOOLS, TENANCY_TOOLS
+    # concierge + tenancy tools: tool_schemas("concierge")
+    assert set(rt.REGISTRY) == expected | set(CONCIERGE_TOOLS) | set(TENANCY_TOOLS)
 
 
 @pytest.mark.parametrize("variant", ["verbose", "terse"])

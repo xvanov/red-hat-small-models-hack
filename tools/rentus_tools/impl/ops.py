@@ -189,9 +189,14 @@ def book_vendor(world, quote_id: str):
     if q["status"] != "offered":
         raise ToolError("CONFLICT", f"quote {quote_id} is {q['status']}")
     limit = world.policy.get("spend_limit_usd")
-    if limit is not None and q["amount"] > limit:
+    # D29: every expenditure needs the owner's approval (limit 0) unless the owner approved this quote or job.
+    ok_ = next((a for a in world.approvals if a.get("kind") == "spend" and a.get("status", "approved") == "approved"
+                and a.get("ref_id") in (quote_id, job["job_id"])
+                and (a.get("max_usd") is None or q["amount"] <= float(a["max_usd"]))), None)
+    if limit is not None and q["amount"] > limit and ok_ is None:
         raise ToolError("BUDGET_EXCEEDED", f"quote {quote_id} is ${q['amount']}, above the ${limit} spending limit",
-                        hint="book a cheaper quote, or escalate_to_owner with this quote for approval",
+                        hint="book a cheaper quote, or escalate_to_owner with this quote for approval (compare_quotes "
+                             "puts the quotes side by side)",
                         details={"amount": q["amount"], "limit": limit})
     q["status"] = "accepted"
     for other in world.quotes:

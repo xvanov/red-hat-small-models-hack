@@ -65,7 +65,10 @@ def owner_confirm_showing(world, event_id: str, decision: str, note: str | None 
     return {"event": copy.deepcopy(ev), "renter_id": ev["renter_id"], "thread_ids": thread_ids, "next_step": nxt}
 
 
-OWNER_TOOLS = {"owner_confirm_showing": owner_confirm_showing}
+from .tenancy_owner import OWNER_APPROVE_PARAMS, owner_approve  # noqa: E402  (D29 approvals)
+
+OWNER_PARAMS["owner_approve"] = OWNER_APPROVE_PARAMS
+OWNER_TOOLS = {"owner_confirm_showing": owner_confirm_showing, "owner_approve": owner_approve}
 
 
 def owner_call(world, name: str, args: dict | None = None, *, sink=None, call_id: str | None = None) -> dict:
@@ -82,13 +85,17 @@ def owner_call(world, name: str, args: dict | None = None, *, sink=None, call_id
         missing = [k for k in schema["required"] if args.get(k) is None]
         if unknown or missing:
             raise ToolError("INVALID_ARGS", f"{name}: unknown {unknown or 'none'}, missing {missing or 'none'}",
-                            hint="args: event_id (string), decision (confirm|reject), note?, housemate?")
+                            hint=f"args: {', '.join(schema['properties'])} (required: {', '.join(schema['required'])})")
         result = ok(OWNER_TOOLS[name](world, **args))
     except ToolError as e:
         result = e.envelope()
     if sink:
         sink.emit("tool_result", "system", {**base, "result": result, "fault": None})
-        if result["ok"] and not result["data"].get("already"):
+        if result["ok"] and result["data"].get("approval"):
+            a = result["data"]["approval"]
+            sink.emit("owner_message", "owner", {"summary": f"{a['status']} {a['kind']} for {a['ref_id']}",
+                                                 "decision": a["status"], "approval": a})
+        elif result["ok"] and not result["data"].get("already"):
             ev = result["data"]["event"]
             sink.emit("owner_message", "owner", {"summary": f"{ev['status']} showing {ev['event_id']}",
                                                  "decision": ev["status"], "event": ev})

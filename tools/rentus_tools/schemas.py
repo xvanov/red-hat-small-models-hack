@@ -78,7 +78,28 @@ PARAMS: dict[str, dict] = {
     "due_followups": _obj({"now": {"type": "string", "pattern": r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$"}}, []),
     "cluster_report": _obj({"as_of": {"type": "string", "pattern": r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$"},
                             "min_watch": {"type": "integer", "minimum": 1}, "min_signal": {"type": "integer", "minimum": 1}}, []),
+    # Tenancy (owner decisions D29): ledger, payments, late-rent ladder, lease notices, payment plans,
+    # maintenance triage, quotes side by side. Exposed with the concierge variant only.
+    "get_ledger": _obj({"tenant_id": S, "thread_id": S}, []),
+    "record_payment": _obj({"tenant_id": S, "thread_id": S, "amount": {"type": "number"}, "date": DATE, "method": S,
+                            "note": S}, ["amount"]),
+    "rent_ladder": _obj({"tenant_id": S, "thread_id": S,
+                         "event": {"type": "string", "enum": ["warned", "reminder_sent", "assessed", "tenant_replied",
+                                                              "followup_sent", "checkin_sent", "plan_sent", "escalated"]},
+                         "promised_date": DATE, "note": S}, []),
+    "send_notice": _obj({"tenant_id": S, "thread_id": S, "kind": {"type": "string", "enum": ["late_rent"]}}, []),
+    "propose_payment_plan": _obj({"tenant_id": S, "thread_id": S,
+                                  "shape": {"type": "string", "enum": ["split", "due_date_shift", "catch_up"]},
+                                  "installments": {"type": "array", "items": {"type": "object"}},
+                                  "proposed_by": {"type": "string", "enum": ["tenant", "agent"]}, "tenant_words": S,
+                                  "new_due_day": {"type": "integer", "minimum": 1}, "paycheck_day": {"type": "integer", "minimum": 1}},
+                                 ["shape", "installments"]),
+    "triage_maintenance": _obj({"thread_id": S, "text": S}, ["thread_id"]),
+    "compare_quotes": _obj({"job_id": S}, ["job_id"]),
 }
+
+TENANCY_TOOLS = ["get_ledger", "record_payment", "rent_ladder", "send_notice", "propose_payment_plan",
+                 "triage_maintenance", "compare_quotes"]
 
 CONCIERGE_TOOLS = ["listing_disclosure", "capture_demand", "match_inventory", "search_external_rooms", "park_prospect",
                    "log_followup", "due_followups", "cluster_report"]
@@ -95,6 +116,7 @@ GROUPS = {
     "ops": ["web_search", "fetch_page", "find_vendors", "request_quote", "book_vendor", "create_job"],
     "owner": ["escalate_to_owner", "report_to_owner"],
     "demand": CONCIERGE_TOOLS,
+    "tenancy": TENANCY_TOOLS,
 }
 
 DESCRIPTIONS: dict[str, dict[str, str]] = {
@@ -158,6 +180,18 @@ DESCRIPTIONS: dict[str, dict[str, str]] = {
         "park_prospect.timeframe": "What they said about timing ('January', 'next month', 'in 2 weeks', '2027-01-15'); leave out if they gave none.",
         "log_followup": "Record a follow-up event so the cadence advances: application_sent (check-ins every 12 h, then 24 h, then doubling), checkin_sent, reply (resets to 12 h), reconnect_sent, applied, closed, placed.",
         "due_followups": "List prospects whose reconnect, check-in or sourcing date has come, each with the next step. Optional now (YYYY-MM-DD or YYYY-MM-DDTHH:MM); default is the current time.",
+        "get_ledger": "A tenant's exact money facts from the ledger and lease: rent due this period, received, remainder, arrears, balance, days late, and the late fee ONLY if the lease has one. Quote nothing else.",
+        "get_ledger.tenant_id": "Tenant id; or give thread_id.",
+        "record_payment": "Record money a tenant sent. Returns the exact amount received, the exact remainder, and acknowledgement messages to send as written (no new terms).",
+        "record_payment.amount": "Dollars received, e.g. 400.",
+        "rent_ladder": "The late-rent ladder: reminder, assess how they plan to pay, check in, escalate after the deadline (2 silent follow-ups, then the owner). Without event: what to do next (actions), including a lease notice when it is due. With event: record what you just did (reminder_sent, assessed, tenant_replied, followup_sent, checkin_sent, plan_sent, escalated) or that the tenant warned before the due date (warned + promised_date).",
+        "rent_ladder.promised_date": "YYYY-MM-DD the tenant said they can pay.",
+        "send_notice": "Send the lease's own late-rent notice (its template, exact ledger figures), recorded as a notice message. Always send it when rent_ladder says it is due, even while a plan is being made. Never write a notice yourself.",
+        "propose_payment_plan": "Put the tenant's proposed schedule (ask how they plan to pay first) into a plan and check it against the owner's bounds: split = at most 2 payments inside this month; due_date_shift = new due day 0 to 3 days after their paycheck; catch_up = arrears spread over at most 3 months on top of rent. Returns in_bounds and an owner_draft: escalate_to_owner with it. Never agree a plan before the owner approves.",
+        "propose_payment_plan.installments": "[{\"date\": \"2026-10-24\", \"amount\": 350}, ...] exactly as the tenant proposed.",
+        "triage_maintenance": "Safety screen first for a maintenance report (gas, fire, smoke, sparks, CO alarm, flooding, sewage, no heat in freezing weather, night lockout; EN/ES). Emergency: the owner is alerted at once and you get the safety_message to send FIRST. Otherwise: triage questions to ask one at a time before a job.",
+        "triage_maintenance.text": "The tenant's message; defaults to their latest message on the thread.",
+        "compare_quotes": "The quotes for a job side by side (vendor, amount, rating, earliest date), ready for escalate_to_owner: every expenditure needs the owner's approval.",
         "cluster_report": "Demand report for the owner: totals by status, new captures by channel, and clusters of people wanting the same area, type and $150 budget band (WATCH at 3, SUPPLY SIGNAL at 5 qualified people; 5 counting unqualified people is 'nominal'). Use the summary in report_to_owner.",
     },
     "terse": {
@@ -198,10 +232,17 @@ DESCRIPTIONS: dict[str, dict[str, str]] = {
         "log_followup": "Record a follow-up event.",
         "due_followups": "Follow-ups that are due.",
         "cluster_report": "Demand clusters and supply signals.",
+        "get_ledger": "Tenant ledger facts.",
+        "record_payment": "Record a tenant payment.",
+        "rent_ladder": "Late-rent ladder: next action or record an event.",
+        "send_notice": "Send the lease's late-rent notice.",
+        "propose_payment_plan": "Check a payment plan against the owner's bounds.",
+        "triage_maintenance": "Safety screen and triage questions.",
+        "compare_quotes": "Quotes side by side for the owner.",
     },
 }
 
-TOOL_NAMES = [n for n in PARAMS if n not in CONCIERGE_TOOLS]
+TOOL_NAMES = [n for n in PARAMS if n not in CONCIERGE_TOOLS and n not in TENANCY_TOOLS]
 DESCRIPTIONS["concierge"] = dict(DESCRIPTIONS["verbose"])   # verbose wording + the concierge tools
 
 
@@ -213,7 +254,7 @@ def tool_schemas(variant: str = "verbose", only: list[str] | None = None,
         raise KeyError(f"unknown description variant {variant!r}; have {sorted(DESCRIPTIONS)}")
     desc = {**DESCRIPTIONS[variant], **(descriptions or {})}
     out = []
-    names = only or (TOOL_NAMES + CONCIERGE_TOOLS if variant == "concierge" else TOOL_NAMES)
+    names = only or (TOOL_NAMES + CONCIERGE_TOOLS + TENANCY_TOOLS if variant == "concierge" else TOOL_NAMES)
     for name in names:
         params = copy.deepcopy(PARAMS[name])
         for pname, pschema in params["properties"].items():

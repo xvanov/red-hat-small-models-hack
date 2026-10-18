@@ -14,6 +14,9 @@ from .guards import booking_claims, has_confirmed_showing, language_mismatch
 from .demand import room_available as room_available_for_offer
 from .demand_guards import first_person_hint, house_numbers, owner_names, public_street, third_person_refs
 from .style import lease_terms, style_violations
+from .tenancy import tenant_figures
+from .tenancy_guards import (KIND_LABEL, late_fee_violation, mark_safety_sent, owner_draft_language,
+                             promise_violations, safety_first_violation)
 
 # A renter asking for less than a year, in words the regex reader's shorter_lease intent can miss
 # ("could I sign for 9 months instead?", "no, not a full year", "¿puede ser por menos tiempo?").
@@ -85,6 +88,18 @@ def send_message(world, thread_id: str, text: str, attachments: list[str] | None
     attachments = attachments or []
     if not text.strip():
         raise ToolError("INVALID_ARGS", "send_message: text is empty")
+    # D29: Russian is drafted for the owner, never sent by the agent.
+    if owner_draft_language(world, t, text):
+        raise ToolError("POLICY_BLOCKED", "this person writes in Russian: Russian messages are drafted for the owner",
+                        hint=f"escalate_to_owner(reason='Russian message, draft for owner', ref_id='{thread_id}', "
+                             "draft=<your reply, in Russian>) and send nothing on this thread",
+                        details={"rules": ["draft_for_owner_language"], "language": "ru"})
+    # D29: after an emergency is flagged, safety instructions go first.
+    em = safety_first_violation(t, text)
+    if em:
+        raise ToolError("POLICY_BLOCKED", f"safety emergency ({em['category'].replace('_', ' ')}): the safety instruction goes first",
+                        hint=f"send this first, as its own message: {em['safety_message']}",
+                        details={"rules": ["safety_first"], "safety_message": em["safety_message"]})
     problems = style_violations(text)
     if problems:
         raise ToolError("POLICY_BLOCKED", "message breaks style rules: " + "; ".join(m for _, m in problems),
@@ -120,12 +135,27 @@ def send_message(world, thread_id: str, text: str, attachments: list[str] | None
         raise ToolError("POLICY_BLOCKED", "message gives a house number before the showing is confirmed: " + ", ".join(map(repr, addr)),
                         hint=f"give the street name only ('{street}'); the full address goes to them once their showing is confirmed",
                         details={"rules": ["address_private"], "rewrite": True, "phrases": addr})
+    # D29: commitments only when the owner approved them (or inside an owner-set bound).
+    promises = promise_violations(world, t, text)
+    if promises:
+        kinds = sorted({k for k, _ in promises})
+        raise ToolError("POLICY_BLOCKED", "message commits to " + ", ".join(KIND_LABEL[k] for k in kinds)
+                        + " that the owner has not approved: " + " / ".join(s_ for _, s_ in promises),
+                        hint=f"escalate_to_owner(reason, ref_id='{thread_id}', draft=<this message>) and send at most one "
+                             "holding line ('Let me check on that and get back to you today.'); never legal advice",
+                        details={"rules": ["promise_not_approved"], "kinds": kinds})
+    fee = late_fee_violation(world, t, text)
+    if fee:
+        raise ToolError("POLICY_BLOCKED", f"this tenant's lease has no late fee: {fee!r}",
+                        hint="never mention or charge a late fee the lease does not have; quote get_ledger figures only",
+                        details={"rules": ["late_fee_not_in_lease"]})
     room, listing = thread_room(world, t)
     figs = dollar_figures(text)
     if figs:
         if room is not None:
             allowed = allowed_figures(room, listing)
             where = room["room_id"]
+            allowed |= tenant_figures(world, t)
         else:  # thread not tied to a room yet: any figure from any room or listing record
             allowed = set()
             for r in world.rooms:
@@ -133,6 +163,7 @@ def send_message(world, thread_id: str, text: str, attachments: list[str] | None
             for l in world.listings:
                 allowed.add(float(l["price"]))
             where = "any room or listing"
+            allowed |= tenant_figures(world, t)
         bad = [f for f in figs if f not in allowed]
         if bad:  # offering another room (concierge): figures of a room whose street the same message names
             for r in world.rooms:
@@ -178,4 +209,5 @@ def send_message(world, thread_id: str, text: str, attachments: list[str] | None
         msg["status"] = "sent"
         out["status"] = "sent"
     t["messages"].append(msg)
+    mark_safety_sent(t, text)
     return out
