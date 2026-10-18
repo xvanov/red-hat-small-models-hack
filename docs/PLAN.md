@@ -54,3 +54,14 @@ See `CLAUDE.md`. In short: commit your own folder often (`git add <your folder>`
 ## Open questions for organizers
 
 Kept in the local rules summary (`docs/hackathon/README.md` §10). The four that affect design: simulator model in the Gym vs the 33B budget; several agents on one model counting once; LoRA adapters counting; datasets under 2 weeks old.
+
+## Phase 2 additions (Sat ~16:00 ET, while the owner prepares the real-conversation dataset)
+
+| ID | Workstream | Deliverable | Status |
+|---|---|---|---|
+| P2.7 | Twins pipeline | `data/twins/`: ingest (iMazing CSV, Messenger JSON), local labeling, rewritten twins, privacy filter, Gym v3 tasks + reader test set; real data stays in `~/rentus-private-data/` | running |
+| P2.8 | Eval credibility | `gym/stats.py` (CIs, pass^k, paired tests), model-played renters (`llm_renter`), `docs/eval-method.md`, v1 re-analysis | running |
+| P2.9 | vLLM scale | agent-load benchmark N=1..128, leads/hour and cost per lead, optimization ablations, `docs/vllm.md` | running |
+| P2.10 | Console | verified demo paths, phone approval view, real-world + trust panels, one-click demo run, `docs/demo-script.md` | running |
+| P2.11 | Router | reader-as-router triage (multi-agent), measured on train | running |
+| — | Task v2 decisions | waiting on owner (see `docs/task-v2-changes.md`) | blocked on owner |
