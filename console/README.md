@@ -1,6 +1,6 @@
 # Console (W7)
 
-The live demo: one page where the owner types an instruction and watches the operator list the room, answer renters, qualify them, escalate decisions and book vendors, with every tool call, verifier catch, retry and fallback visible. Faults can be injected live to show recovery.
+The owner's leasing desk: one inbox for every live channel, an assistant that lists rooms and handles repairs, a pipeline of prospects, and the model's measured results. Every tool call, reader parse, verifier catch and recovery is visible per conversation.
 
 ## Run
 
@@ -35,43 +35,24 @@ Test: `python -m pytest console/tests -q` starts the app under uvicorn on a free
 
 Scenarios (`gym/tasks/*.jsonl`) run through the gym's own `RolloutSession`, so scripted renters answer inside `send_message` exactly as they do when scoring. In free play the console adds three synthetic renters once a listing is live.
 
-## Demo run (one click, for the video)
+## Page
 
-**▶ Demo run** starts a fresh free-play run on a demo world (sandbox inventory, three plumbers for the Appling Way zip, $400 limit; at the plumber step the director injects a timeout on the first `request_quote` call, so one plumber never answers whichever the model asks first) and `console/demo.py` plays the owner and the world while the live operator does everything else:
+A sidebar app with one page per job. Light and dark follow the system setting. The top bar shows only the product name, the operator (Lightning on vLLM) and reader (0.6B) status dots, and one dot per live channel.
 
-1. owner: "Appling Way room free Nov 1, $750 ..." → listing written, compliance-checked, posted to 3 lanes
-2. María (Spanish, vague date first) and Devon (asks if the rent is negotiable) write in at the same time
-3. faults: a rate limit on María's next message, a malformed reader result → retry and verifier catch in the trace
-4. owner: the tenant's sink leaks → job, quotes (one vendor times out), cheapest booked under the limit, tenant told
-5. Devon's price question waits for the owner; the bar shows the phone URL + QR code. If the operator did not escalate on its own, Devon asks once more for a payment-terms discount (which the prompt says must go to the owner).
+1. **Inbox** (default, `#/inbox/<thread_id>`): every live conversation from `channels/live/api.py` (Messenger Page, the owner's personal Messenger shown as "Marketplace · Messenger", SMS, email, listing sites; unknown channels get a generic icon). Left: threads with channel icon, name, last message, time, unread dot and a "Needs you" badge; filters All / Needs you / Unread. Right: the conversation as bubbles with channel and delivery status per message, the five qualification items (lease, move-in, phone, reason, people: exact / vague / missing), drafts waiting for approval with one-click **Approve & send / Edit / Deny**, a reply box for the owner, and the **Activity** drawer: the thread's tool calls, reader parses and verifier catches, with failed steps in red and the step that recovered from them in green ("Errors & recoveries" filters to those). **New conversation** starts a thread (channel, to, text); sending obeys the live allow-list. Polls every 2.5 s.
+2. **Assistant**: the owner chats with the operator (`POST /api/runs` with `seed_renters: false`, then `/api/runs/{id}/owner`, events over SSE). Each reply folds its tool calls ("Show 7 tool calls · 44 s", with caught errors and recoveries counted). The right column shows result cards from `/api/runs/{id}/view`: listing preview with per-channel status (Posted / Needs your click with a Publish link), maintenance jobs with quotes and spend vs limit, showings, and the run's escalations with Approve / Edit / Deny.
+3. **Pipeline**: one row per person from the live threads, stage inquiry → qualifying → qualified → showing → application, qualification dots, last message; a row opens the thread in the Inbox.
+4. **Model**: held-out evaluation (pass rate and mean reward with 95% CIs per config, paired Holm-corrected comparisons, per category), the reader's exact match against Claude Opus 5.5, Lightning prompted, the rules fallback and the untuned base (Wilson intervals), vLLM serving (prefix caching on/off, reasoning off/on, operator load vs reader latency on one GPU), and the parameter budget. Every number comes from `/api/results`, `/api/trust` and `/api/performance` at request time; `/api/results` uses the newest held-out protocol version that has both a baseline and a final run (`gym/results/v3-heldout-*` once they land, v2 until then), skipping runs still in progress.
 
-The bar on top shows the step, a plain-language line for narration and the elapsed time. On the live endpoint the whole sequence took 75 to 130 seconds at 1× across five verification runs. Speed scales the scripted pauses and tool pacing, never the model. **Reset** stops everything and clears the page.
+`/approve` is the phone page: every open approval (live drafts plus the Assistant run's escalations) with the renter's last message, the reason, the drafted reply and Approve / Edit / Deny. The console listens on 127.0.0.1 only; `scripts/tailnet_forward.py` relays it to this machine's Tailscale address. There is no login: the tailnet is the access control.
 
-## Owner approval on the phone
+If `channels/live/api.py` is missing, fails to import, raises or takes longer than `CONSOLE_LIVE_TIMEOUT_S` (8 s), the live endpoints answer with `available: false` and the pages show a clean empty state. `CONSOLE_LIVE_MODULE` swaps the module (tests use `console/tests/fake_live.py`, synthetic data).
 
-`/approve` is a phone-sized page listing open escalations (who, their last message, the reason, the drafted reply) with **Approve / Edit / Deny**. Edit lets the owner rewrite the reply; the operator is told to send that exact text. Decisions are tagged `via phone` in the trace and the side panel. The console listens on 127.0.0.1 only; `scripts/tailnet_forward.py` (started by `scripts/demo.sh`) relays it to this machine's Tailscale address, so the phone opens `http://<tailscale-ip>:8080/approve` and nothing is exposed on the LAN. There is no login: the tailnet is the access control.
-
-## Evidence panels (bottom right, ⤢ opens them full screen for the projector)
-
-- **Why trust it**: held-out reward and pass rate with 95% intervals (final vs baseline), tasks better/worse with the Holm p-value, who does what and the parameter budget, the reader's exact match on the same 400 held-out messages (Wilson intervals) against Claude Opus 5.5 and Lightning prompted.
-- **Results**: every v2 held-out config (`gym/results/v2-heldout-<name>-s<seed>/`, discovered by name) with reward and pass-rate intervals drawn as whiskers, pass in every run, time per task; paired tests (Holm-corrected); per category baseline vs final. All computed at request time by `gym/stats.py` from `per_task.jsonl` (`/api/results`), so the panel matches `docs/results.md`. The superseded v1 ladder sits folded below it.
-- **Performance**: vLLM numbers from `serving/results/serve_bench.jsonl` (`/api/performance`): peak throughput, prefix caching on vs off (paired), reasoning off vs on, reader latency under operator load, request and error totals, with two small bar charts. Method in `docs/vllm.md`.
-- **Real world**: the live Facebook Page post (permalink parsed from docs/DECISIONS.md D20, thumbnail cached by `scripts/pilot_thumb.py`, a read-only Graph GET) and the shadow inbox counters from `runs/pilot/stats.json` (counts only; renter text is never read here).
+The older one-click demo director (`/api/demo`), fault injection and scenario endpoints still work over the API for scripts; the page no longer exposes them.
 
 ## Verification
 
-`channels/.venv/bin/python scripts/console_verify.py all` drives every path on the live models with Playwright and writes screenshots to `docs/img/`: listing, a Spanish leasing scenario (showing proposed only after all five gate items), Break-something faults (page changed, login wall, rate limited, malformed), the plumber scenario, the three panels, and the demo run with the owner editing and approving on a phone-sized `/approve`.
-
-## Page
-
-Light and dark themes (follows the system, ◐ toggles). Built for a 1920×1080 recording; works at 1680 and stacks on narrow screens.
-
-- **Top bar**: product name, live model badges (operator Lightning on vLLM, reader 0.6B; grey when the endpoint is down), parameters used of 33B, spend of the owner's limit, run state; **▶ Demo run**, speed, **Gym ▾** (scenario picker), **Break something ▾**, **Reset**.
-- **Demo bar** (while a demo plays): five-step progress, the current step's title and narration line, elapsed time, and the phone URL with a QR code (it pulses when the owner's decision is waiting).
-- **Left**: the owner conversation (instructions, the operator's reports per turn) and **Needs you**: open escalations with the renter's last message, the drafted reply and Approve / Edit / Deny, plus proposed showings waiting for confirmation.
-- **Center**: the leasing pipeline. A channel strip (listing, then each channel live / not posted / failed with its thread count), then renter cards in Inquiries → Qualified → Showing → Application by register status. Each card shows the five gate items as a progress bar (green exact, striped amber vague, red no), key facts and the last two messages. **Maintenance** appears under it once a tenant writes or a job opens: quotes (the booked one highlighted), spend vs limit, the tenant thread.
-- **Right**: the demand register (everyone who wrote, status, what they want, reconnect dates) and **Supply signals**: demand clusters by area, type and $150 budget band (docs/spec/concierge.md 5.3), WATCH at 3 active, SUPPLY SIGNAL at 5 qualified. When a person stated no criteria, the room they asked about stands in and the cluster says so. Any `supply_signals` the tools write into the world are listed too.
-- **Bottom**: the live trace, grouped per turn (each group opens on an owner instruction or a renter message and counts steps and recoveries). A tool call and its result share one row; the reasoning behind a call is in the row's tooltip. Actors are color-coded: operator (Lightning), reader (0.6B), router, verifier (code), tools, scripted renters and vendors. Errors, retries, verifier catches, fallbacks and injected faults are highlighted; **recoveries only** filters to them. Older groups fold unless they hold a recovery. The ▾ button collapses trace and evidence.
+`channels/.venv/bin/python scripts/console_verify.py all` drives the UI with Playwright and writes screenshots to `docs/img/`: every tab in light and dark, a live inbox thread with its Activity drawer, the approval flow (Edit sends the owner's text; phone Approve) on a second console process wired to the fake channels so nothing reaches a real person, the Model numbers checked against the endpoints, the live `/approve`, and a live Assistant listing run (`assistant`, uses the GPU).
 
 ## API
 
@@ -84,7 +65,10 @@ Light and dark themes (follows the system, ◐ toggles). Built for a 1920×1080 
 | GET | `/api/results` | v2 held-out configs with 95% CIs, paired Holm tests, per category (`gym/stats.py`) |
 | GET | `/api/performance` | vLLM serving benchmarks (`serving/results/serve_bench.jsonl`) |
 | POST | `/api/demo` `/api/demo/speed` `/api/reset` | demo run, its speed, stop and clear |
-| GET | `/approve`, `/api/approvals` | phone view and its data (open escalations first) |
+| GET | `/approve`, `/api/approvals` | phone view; the active run's escalations (open first) |
+| GET | `/api/live/status` `/api/live/threads` `/api/live/threads/{id}` | live channels: per-channel connection, thread list, one thread with messages and trace |
+| POST | `/api/live/threads/{id}/reply` `/api/live/conversations` | owner reply `{text}`; new conversation `{channel, to, text}` |
+| GET/POST | `/api/live/approvals` `/api/live/approvals/{id}` | live drafts plus the Assistant run's open escalations (`run:<run_id>:<esc_id>`); decide `{decision: approve\|edit\|deny, text?, source?}` |
 | GET/POST | `/api/runs` | list / start `{goal?, scenario_id?, speed?}` |
 | GET | `/api/runs/{id}/view` | world rendered for the page |
 | GET | `/api/runs/{id}/events` | SSE: `runs/<id>/events.jsonl` (contract §6) merged with `console.jsonl` (fault and scenario notes the console writes) |
