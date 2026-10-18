@@ -48,9 +48,9 @@ If the run is still going at 2:00, keep narrating the trace (every row is the mo
 
 > "Three parts. Lightning, 30 billion parameters with 3 billion active, does all the talking and every tool call. The reader is Qwen3 0.6B, fine-tuned on 14,000 open and synthetic messages in English and Spanish, and published on Hugging Face. The verifier is ordinary code. That's 30.6 billion parameters, under the 33 billion limit."
 
-> "We pre-registered the test before running it. We built 46 held-out conversations as twins of my real leasing threads: same shape, invented people, frozen before any model saw them. The same Lightning weights go from {{V3_BASELINE_PASSPCT}} of tasks fully right with our starting setup to {{V3_FINAL_PASSPCT}} with the final one, only by changing the prompt, the tool descriptions and the harness, each change measured in NeMo Gym. Claude Opus 5.5 on the exact same harness: {{V3_FRONTIER_PASSPCT}}."
+> "We pre-registered the test before running it. We built 46 held-out conversations as twins of my real leasing threads: same shape, invented people, frozen before any model saw them. The same Lightning weights go from 9 percent of tasks fully right with our starting setup to 58 percent with the final one, only by changing the prompt, the tool descriptions and the harness, each change measured in NeMo Gym. Claude Opus 5.5 on the exact same harness: 61 percent."
 
-> "On messages I labeled myself, blind, our 0.6B reader gets {{READER_EM_FINETUNED}} exactly right, Lightning prompted {{READER_EM_LIGHTNING}}, Opus {{READER_EM_FRONTIER}}, and ours answers in half a second for free."
+> "On messages I labeled myself, blind, our 0.6B reader gets 0.522 exactly right, Lightning prompted 0.267, Opus 0.667, and ours answers in half a second for free."
 
 **Click** tab **Performance**.
 

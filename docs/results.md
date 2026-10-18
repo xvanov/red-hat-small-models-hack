@@ -1,5 +1,104 @@
 # Results: Gym-driven improvement of the operator
 
+## Confirmatory results (v3)
+
+Run 2026-10-18, 06:25 to 08:13 ET, all at the freeze commit **`c81cb21`** (re-freeze, protocol Amendment 8; manifest `docs/freeze-manifest.json`), from a clean git worktree of that commit, so no later commit (including the post-freeze safety fix `76341e3`) touched these runs. Pre-registration: `docs/eval-protocol.md` Amendments 1 to 9. Every number below comes from `gym/h2_combined.py` and `gym/stats.py` with no model calls; the raw outputs are `gym/results/v3-confirmatory.{json,md}` and `gym/results/v3-descriptive.md`.
+
+**Data.** v3 held-out = 46 leasing tasks built from twins of the owner's real threads that started on or after 2026-05-01, with no person shared with earlier threads (`gym/tasks/v3/heldout.jsonl`, sha256 `65069f5c…`). Reader H2 = 90 owner-labeled messages, labeled blind: 61 real-twin rows from 22 threads plus 29 pilot rows from 7 agent-written fictional conversations (Amendment 7).
+
+**Configs.**
+- `baseline`: v1 settings, rule-based reader.
+- `final`: prompt v4, concierge tool descriptions, renter guard with stand-down, verifier, style pre-check, reasoning kept in history, and the fine-tuned 0.6B reader. Chosen on development data only (Amendment 6).
+- `router`: `final` plus the triage router.
+- Frontier reference: Claude Opus 5.5 (`claude-opus-5-5`) through the OpenCode Zen Anthropic API with the same loop, prompt, tools and reader (Amendment 9).
+
+Lightning = Nemotron 3.5 Lightning 30B-A3B BF16 on vLLM 0.27.1, temperature 0.2.
+
+**Stopping rule applied (Amendment 8).** At 08:13, seeds 1 to 4 were complete for all three Lightning configs; seed 5 of `final` was not (35/46 rollouts), so **seeds 1 to 4** are analyzed for every config (seed 5 of baseline and router exists but is not used). The frontier ran **1 repeat on a pre-declared stratified subset of 36 of the 46 tasks** (budget: $0.25/task at list price; Amendment 9 addendum). H4 pairs on those 36.
+
+### Confirmatory family (Holm, one-sided, familywise α = 0.025, m = 5)
+
+| hypothesis | estimate | one-sided bound | p | Holm p | decision |
+|---|---|---|---|---|---|
+| **H1** final beats baseline (mean reward, 46 tasks, 4+4 seeds) | **+0.204** (0.930 vs 0.726) | lower bound +0.170 | <0.001 | <0.001 | **supported** |
+| **H2a** fine-tuned reader beats Lightning (thinking off), exact match, 90 rows / 29 threads, stratified by source | **+0.256** (0.522 vs 0.267) | lower bound +0.093 | 0.002 | 0.009 | **supported** |
+| **H2b** fine-tuned reader beats Opus 5.5, same rows | **−0.144** (0.522 vs 0.667) | lower bound −0.260 | 0.994 | 1.000 | **not supported: Opus reads better** |
+| **H3** router: fewer Lightning calls (i) AND within δ = 0.05 reward of final (ii) | (i) −13.2 calls/task (2.8 vs 16.0); (ii) **−0.227** reward (0.702 vs 0.930) | (i) upper −11.0; (ii) lower −0.271 | (i) <0.001; (ii) 1.000 → max 1.000 | 1.000 | **not supported**: cheaper, but loses far more than δ |
+| **H4** local final within δ = 0.05 of Opus (36 paired tasks, 4 seeds vs 1 run) | **+0.014** (final − Opus) | lower bound −0.040 (bootstrap −0.035) | 0.011 | 0.033 | **not supported at the Holm level** (passes unadjusted at 0.025; Holm needs ≤ 0.0083 at its rank) |
+
+p = the larger of the bootstrap p and the paired-t p (Amendment 1). The H1/H3/H4 bootstrap resamples tasks; H2 resamples threads within source.
+
+**H2 as pre-registered before Amendment 7 (real-twin rows only, 61 rows / 22 threads).** H2a +0.197 (0.508 vs 0.311), p 0.043, Holm p 0.128: **not supported**. H2b −0.066 (0.508 vs 0.574), p 0.87. H2a's primary analysis moved to the combined 90 rows after the owner saw the content of the rows and before any model was scored on them, so the combined result is flagged as such. Both are shown here.
+
+### Secondary (uncorrected, descriptive)
+
+| config | runs | tasks | pass rate (95% Wilson) | mean reward (95% bootstrap) | pass^4 | pass@4 | reward without guard-enforced checks | Lightning calls / task | task time p50 |
+|---|---|---|---|---|---|---|---|---|---|
+| baseline | 4 | 46 | 9.2% (4 to 21%) | 0.726 (0.695 to 0.758) | 2.2% | 23.9% | 0.817 | 9.5 | 39 s |
+| **final** | 4 | 46 | **58.2% (44 to 71%)** | **0.930 (0.909 to 0.949)** | 28.3% | 80.4% | 0.925 | 16.0 | 204 s |
+| final + router | 4 | 46 | 13.0% (6 to 26%) | 0.702 (0.663 to 0.743) | 4.3% | 19.6% | 0.831 | 2.8 | 0 s (p50) |
+| Opus 5.5 (Zen), 36-task subset | 1 | 36 | 61.1% (45 to 75%) | 0.906 (0.857 to 0.950) | n/a | n/a | 0.935 | 14.0 (Opus) | 40 s |
+
+- **Read reward against the floor.** Trivial agents on these 46 tasks (`gym/results/v3-floors.json`, frozen): do-nothing 0.612, **greet-only 0.841**, escalate-all 0.624, mark-lost 0.630 mean reward; every trivial agent passes 0 tasks. So the pass rate carries the signal. `final` passes 58% of tasks, the baseline 9%. The router's 0.70 reward is **below the greet-only floor**: in most rollouts it made almost no model calls (2.8 per task, median task time under 1 s), so in effect it hardly acted.
+- **Reliability.** `final` passes 28% of tasks in all 4 runs (pass^4) and 80% in at least one (pass@4). 24 of 46 tasks flip between runs.
+- **Reader detail (90 rows).**
+  - Intent F1 (micro): fine-tuned 0.754, Lightning 0.612, Opus 0.794.
+  - Language accuracy: 1.000, 0.867 and 1.000.
+  - Subsets:
+    - Pilot only (29): fine-tuned 0.552, Lightning 0.172, Opus 0.862.
+    - Informative rows only (21 rows that have at least one gate field): fine-tuned 0.524, Lightning 0.048, Opus 0.905.
+  - On the rows that carry information, Opus is clearly better than the 0.6B reader. Most of the reader's "win" over Lightning comes from Lightning failing the format and the all-absent rows.
+- **Opus cost.** $7.33 at list price for 36 tasks (plus a $0.76 probe on 3 v2 TRAIN tasks; total $8.09 of the $10.50 cap). Zen returned no per-call cost, so these are list-price estimates. No second frontier family was run: less than $2.50 was left.
+- **Not computed in time** (pre-declared as secondary): H1 without the 2 tasks from the rules period (on or after 2026-10-04); the showing-required check with/without; per-subcategory tables; the model-played renter runs; v2 held-out with the final config. They are not reported.
+
+### What was voided or rejected, and why (all outcome-independent)
+
+| what | why | kept as |
+|---|---|---|
+| 22-task runs at the first freeze `a8457e1` (4 runs, a few rollouts of seed 1) | that freeze used a partial cut of v3; the complete 46-task set was frozen at 06:30 (`5645063`) before any result was looked at (Amendment 8) | `gym/results/_superseded-22task-a8457e1-*` (not analyzed) |
+| Claude Code frontier runs, 2 attempts × 2 repeats | the subscription rejected the sessions ("RateLimited … five_hour"): 46/46, 46/46, 46/46 and 29/46 rollouts | `gym/results/_void-ratelimit-*`, `_void-ratelimit2-*` (not analyzed) |
+| first Lightning reader predictions on the H2 rows | every request got HTTP 401 (no API key passed), so no row reached the model; rerun with the key | `reader/results/_void-401/` |
+| `final` seed 2, first attempt | stopped mid-run at 07:06 to run the remaining seeds in parallel within the 16-rollout cap (time-based); restarted from scratch | overwritten (not analyzed) |
+| `final` seed 5; baseline and router seed 5 | the stopping rule (seed 5 of `final` not complete at 08:13) | baseline/router seed 5 in `gym/results/`, not analyzed |
+
+Every analyzed run: commit `c81cb21`, `dirty_frozen_paths: false`, 0 reruns, 0 mid-rollout drops, 0 still-failed, not void, task file sha256 = frozen. `stats.check_plan` reports no input problems.
+
+### Caveats that apply to every number above
+
+- **Owner sign-offs missing at freeze**, recorded in the manifest: realism review 7.1 and κ scorer grading 7.3 were **not done** (owner time); label check 7.2, playbook/45-day-window approval 7.4, protocol sign-off 7.5 and the cut-off N12 were not given. So v3 is "synthetic, realism not confirmed", and pass rates are **scorer-defined** (no human agreement check).
+- The task gold comes from the fine-tuned reader's reading of the real messages. The owner-gold audit (`data/published/twins/owner_gold_audit.json`) measures how well it agrees with the owner.
+- Prompt v4 was written from the owner's rules (`docs/spec/concierge.md`), which date from inside the held-out window (L-6). H1 is "informed by the held-out window's rules", not by its threads.
+- The frontier comparison uses 1 repeat on 36 tasks, at list-price cost, with no temperature control. H4's harness is the same loop as `final`.
+- H3's failure is large and unambiguous; the router is off in the final system.
+
+### Reproduce
+
+```bash
+git checkout c81cb21          # the freeze commit; runs used exactly this tree
+# runs (gym/confirmatory_v3.json "launch"; frontier per gym/confirmatory_v3_a9.json)
+gym/.venv/bin/python gym/run_seeds.py --variant base --tasks-file gym/tasks/v3/heldout.jsonl --seeds 1,2,3,4,5 --prefix v3-heldout-baseline --workers 5
+OC='{"prompt_version":"v4","tool_descriptions":"concierge","guard_stand_down":true}'
+gym/.venv/bin/python gym/run_seeds.py --variant guard+prompt3+style+rhist+readermodel --operator-config "$OC" --tasks-file gym/tasks/v3/heldout.jsonl --seeds 1,2,3,4,5 --prefix v3-heldout-final --workers 5
+gym/.venv/bin/python gym/run_seeds.py --variant guard+prompt3+style+rhist+readermodel+router --operator-config "$OC" --tasks-file gym/tasks/v3/heldout.jsonl --seeds 1,2,3,4,5 --prefix v3-heldout-final-router --workers 5
+FRONTIER_BUDGET_USD=9.70 gym/.venv/bin/python gym/ablate.py --run-name _ --tasks-file gym/tasks/v3/heldout.jsonl --ids $(paste -sd, gym/results/frontier_subset_a9.txt) \
+  --variants guard+prompt3+style+rhist+readermodel --api anthropic --model claude-opus-5-5 --prefix v3-heldout-frontier-zen- --seed-tag=-s1 --workers 4 --retry-errors 3 --operator-config "$OC"
+# reader H2 (90 rows; and the 61 real-twin rows)
+for R in data/published/owner_gold_combined.jsonl data/published/twins/owner_gold.jsonl; do
+  gym/.venv/bin/python reader/eval.py --backend endpoint --api-key-env READER_API_KEY --label finetuned-twin --rows-file $R
+  gym/.venv/bin/python reader/eval.py --backend endpoint --base-url http://127.0.0.1:8000/v1 --model nemotron-3.5-lightning --api-key-env OPERATOR_API_KEY --no-thinking --concurrency 8 --label lightning-twin --rows-file $R
+  gym/.venv/bin/python reader/eval.py --backend claude_cli --model claude-opus-5-5 --concurrency 2 --label frontier-twin --rows-file $R
+done
+# analysis (no model calls)
+gym/.venv/bin/python gym/h2_combined.py --plan gym/confirmatory_v3_a9.json --seeds 1,2,3,4 --md --json gym/results/v3-confirmatory.json
+gym/.venv/bin/python gym/stats.py --md --strict --config baseline=v3-heldout-baseline-s1,...-s4 --config final=v3-heldout-final-s1,...-s4 \
+  --config router=v3-heldout-final-router-s1,...-s4 --config opus-zen=v3-heldout-frontier-zen-guard+prompt3+style+rhist+readermodel-s1
+```
+
+Commits: protocol Amendments 6 to 9 `13b7156`, `9477d3e`, `66926e8`, `3202869`; freeze `a8457e1` (superseded) and re-freeze `c81cb21`; analysis code `37ac06e`.
+
+---
+
+
 ## v2 results (approved task set)
 
 **Secondary and exploratory, not confirmatory** (see the disclosures right below and `docs/eval-protocol.md` Amendment 1). The confirmatory set is v3 held-out, run once with configs and δ fixed in advance. Task set v2 (`gym/tasks/v2/heldout.jsonl`, 33 held-out tasks, approved by the owner as decision D23) fixes flaws found in an audit of v1 (`docs/task-review.md`, `docs/task-v2-changes.md`). Everything under "v1 results" further down used the flawed v1 tasks and is superseded. v1 and v2 numbers are not comparable with each other.
@@ -222,6 +321,48 @@ FRONTIER_BUDGET_USD=4.5 FRONTIER_USAGE_LOG=gym/results/frontier-usage.jsonl gym/
 ```
 
 Not done (budget): a second operator seed for Opus, and the full 1,419-row reader set.
+
+### Frontier reference through the local Claude Code CLI (2026-10-18)
+
+The Zen key has $2.38 left, so the frontier reference was re-plumbed onto the owner's own Claude Code install (owner-approved). Still comparison-only: nothing in the running system loads it, and it only ever sees synthetic task files and the synthetic reader test.
+
+- **Model and versions.** `claude-opus-5-5` (every response and every `modelUsage` entry reports exactly that id; no other model is called because `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`). Claude Code CLI **2.1.302**, auth = the CLI's subscription login (`apiKeySource: none`; `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL` are stripped from the child environment). Operator: Claude Agent SDK for Python **0.2.163** (released 2026-09-30), in `gym/.venv-frontier`, every dependency resolved with `--exclude-newer 2026-10-03`. Effort `high` (operator), `medium` (reader, the model default, as before).
+- **Cost.** No per-call fee (subscription). The `notional_cost_usd` fields are Claude Code's own list-price estimate, recorded for context, not money spent.
+- **Limits.** At most 3 concurrent sessions; on a rate limit: back off 60/120/240 s, then a process-wide breaker fails the rest of the run fast (no loops on errors). A run with a tripped breaker is incomplete and reported as such.
+
+**Reader** (`reader/eval.py --backend claude_cli`): `claude -p --system-prompt <the same reader prompt> --tools "" --setting-sources "" --strict-mcp-config --no-session-persistence --output-format json`, the same user message on stdin, the answer parsed and validated by the same `prompt.parse_output` / scorer.
+
+Same seeded, stratified 400 rows as the Zen run above (`--sample 400 --seed 0`; the sampled ids are identical). Run 2026-10-18, 0 errors, breaker never tripped, 489 s wall at concurrency 3.
+
+| System (same 400 rows) | Exact match | JSON valid | Lease | Move-in | Phone | Occupants | Reason | Intent F1 (micro) | Language | Vague-date trap | p50 latency |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **Ours: Qwen3-0.6B + SFT** | **0.813** | 1.000 | 0.998 | 0.978 | 0.998 | 1.000 | 0.885 | 0.939 | 1.000 | 0.042 | 0.58 s (local) |
+| Claude Opus 5.5 via Claude Code CLI (reference) | 0.720 | 1.000 | 0.915 | 0.955 | 1.000 | 0.983 | 0.898 | 0.931 | 1.000 | 0.000 | 3.45 s |
+| Claude Opus 5.5 via Zen (earlier run, for comparison) | 0.738 | 1.000 | 0.915 | 0.965 | 1.000 | 0.980 | 0.895 | 0.939 | 1.000 | 0.000 | 3.3 s |
+
+Per-row exact match, fine-tuned vs Claude Code Opus: 59 rows only ours got fully right, 22 only Opus did; exact McNemar p = 4.8e-5 (uncorrected; on the synthetic test sample, so it is the v1-era secondary result in H2b's terms, not the twin reader test). The two Opus runs agree on 96.8% of rows; the 0.018 gap is sampling noise between runs of the same model, not a path effect we can separate. Metrics: `reader/results/frontier-cc-opus-5-5.test.sample400.metrics.json`.
+
+**Operator** (`RunConfig(api="claude_code")`, `operator/rentus_operator/claude_code.py`): native tool use. Our sandbox tools (the same schemas and descriptions from `toolbox.tool_schemas`) are registered as in-process Agent SDK tools; each handler calls the loop's own `_Runner.execute`, so every call goes through the same verifier, style pre-check and loop guard, then `rentus_tools.call` via the Gym `RolloutSession`, and is scored by the same `verify.py`. Same system prompt (v3 + reader rules), same opening message, same tasks.
+
+Harness differences, all of them:
+1. **Who runs the loop.** Claude Code's agent loop decides when to call the next model turn, not `loop.run`. The model sees our tools under Claude Code's MCP names (`mcp__rentus__send_message`); the transcripts strip the prefix.
+2. **System prompt wrapper.** `system_prompt` replaces Claude Code's default prompt, but the CLI still adds a small wrapper of its own (about 850 tokens measured on an empty prompt). Built-in tools, settings, CLAUDE.md, hooks and plugins are all off, and the session runs in an empty temp dir.
+3. **Argument validation.** Claude Code validates tool input against the JSON schema before our handler runs. A schema-invalid call gets Claude Code's error text instead of our verifier's repair or feedback; schema-valid calls get the verifier exactly as Lightning does.
+4. **Parallel tool calls.** Handlers execute synchronously, so several tool calls in one turn run one after another in order, as in the loop.
+5. **Renter replies** are delivered exactly as before: inside the `send_message` result (`data.replies`) from the scripted counterpart.
+6. **Renter guard and verifier self-check.** When the model ends on plain text, the same checks run, and their feedback text goes back as a new user turn in the same session (the loop appends the same text as a user message). Same round limits (3 guard bounces, 1 self-check bounce).
+7. **Step limit.** Model calls are counted per API response (Claude Code splits one response into several messages; they are grouped by message id). Call `max_steps + 1` is interrupted and its tool calls are refused without running, which matches the loop stopping before that call. `max_turns` is also set as a backstop.
+8. **Sampling.** No temperature or seed control (as with the Zen run). Thinking is Claude Code's adaptive default; thinking text is not always returned to us, so transcripts may lack it. Prompt caching is Claude Code's.
+9. **Errors.** A rollout that never got a model response is `model_error` (eligible for the protocol's rerun rule); one that fails after ≥ 1 response is `mid_rollout_error` and is scored as it stands.
+
+OPERATOR_RESULTS_PLACEHOLDER
+
+```bash
+# final reference run (one command; refuses if the fine-tuned reader is down, unless ALLOW_READER_FALLBACK=1)
+scripts/frontier_ref.sh gym/tasks/v3/heldout.jsonl 1        # FREEZE_COMMIT=<sha> adds the frozen-paths check
+gym/.venv-frontier/bin/python reader/eval.py --backend claude_cli --model claude-opus-5-5 \
+    --label frontier-cc-opus-5-5 --sample 400 --seed 0 --concurrency 3          # or --rows-file <twin reader test>
+```
 
 ## Not measured yet / open
 

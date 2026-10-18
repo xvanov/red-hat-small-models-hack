@@ -112,28 +112,34 @@ Every number below comes from a committed file. Values in `{{...}}` are filled b
 
 ### Confirmatory: v3 held-out (46 leasing tasks, twins of real threads, pre-registered)
 
-Model: Lightning BF16 on vLLM, temperature 0.2. Analyzed: {{V3_SEEDS}}. Pass rate = share of tasks where every check passed (95% Wilson); mean reward = share of checks passed (95% bootstrap over tasks); pass^k = passes in every run.
+Model: Lightning BF16 on vLLM, temperature 0.2. Analyzed: 4 operator seeds per Lightning config (seeds 1 to 4) and 1 frontier repeat. Pass rate = share of tasks where every check passed (95% Wilson); mean reward = share of checks passed (95% bootstrap over tasks); pass^k = passes in every run.
 
 | config | pass rate (95% CI) | mean reward (95% CI) | pass in every run | Lightning calls / task |
 |---|---|---|---|---|
-| Baseline (prompt v1, verbose tools, rule-based reader) | {{V3_BASELINE_PASS}} | {{V3_BASELINE_REWARD}} | {{V3_BASELINE_PASSALL}} | {{V3_BASELINE_CALLS}} |
-| **Final** (prompt v4, concierge tools, renter guard + stand-down, style pre-check, reasoning history, fine-tuned reader) | {{V3_FINAL_PASS}} | {{V3_FINAL_REWARD}} | {{V3_FINAL_PASSALL}} | {{V3_FINAL_CALLS}} |
-| Final + router | {{V3_ROUTER_PASS}} | {{V3_ROUTER_REWARD}} | {{V3_ROUTER_PASSALL}} | {{V3_ROUTER_CALLS}} |
-| Reference: Claude Opus 5.5, same harness and reader | {{V3_FRONTIER_PASS}} | {{V3_FRONTIER_REWARD}} | {{V3_FRONTIER_PASSALL}} | {{V3_FRONTIER_CALLS}} |
+| Baseline (prompt v1, verbose tools, rule-based reader) | 4.2/46 = 9.2% (4 to 21%) | 0.726 (0.695 to 0.758) | 2.2% | 9.5 |
+| **Final** (prompt v4, concierge tools, renter guard + stand-down, style pre-check, reasoning history, fine-tuned reader) | 26.8/46 = 58.2% (44 to 71%) | 0.930 (0.909 to 0.949) | 28.3% | 16.0 |
+| Final + router | 6.0/46 = 13.0% (6 to 26%) | 0.702 (0.663 to 0.743) | 4.3% | 2.8 |
+| Reference: Claude Opus 5.5, same harness and reader | 22.0/36 = 61.1% (45 to 75%) | 0.906 (0.857 to 0.950) | n/a (1 run) | 14.0 |
 
 Floors on the same 46 tasks (`gym/results/v3-floors.json`): do-nothing 0.612, greet-only **0.841**, escalate-all 0.624, mark-lost 0.630 mean reward, and all four pass 0 tasks. A greeting alone earns 0.84, so read reward next to pass rate, never alone.
 
 **Pre-registered hypotheses** (one-sided, Holm over a fixed family of 5 at familywise α = 0.025; an untested hypothesis stays in the family with p = 1):
 
-- **H1, final beats baseline:** {{H1_RESULT}}. Secondary: two-sided 95% paired CI {{H1_CI}}; Δ pass rate {{H1_DPASS}}.
-- **H2a, the 0.6B reader beats Lightning at reading renter messages** (90 owner-labeled messages, blind owner gold, exact match with reason scored on status): {{H2A_RESULT}}.
-- **H2b, the 0.6B reader beats Claude Opus 5.5** (same rows): {{H2B_RESULT}}.
-- **H3, the router cuts Lightning calls without losing more than 0.05 reward:** (i) {{H3I_RESULT}}; (ii) {{H3II_RESULT}}. Decision: {{H3_DECISION}}.
-- **H4, the local system is within 0.05 reward of Claude Opus 5.5 on the same harness:** {{H4_RESULT}}. Secondary: two-sided 95% paired CI {{H4_CI}}. A non-rejection means "not shown", not "worse".
+- **H1, final beats baseline:** Δ mean reward +0.204 (final − baseline; 4 vs 4 runs, 46 tasks), one-sided lower bound +0.170; p < 0.001, Holm p < 0.001: **supported**. Secondary: two-sided 95% paired CI +0.204 (+0.171 to +0.236); Δ pass rate +48.9 points (35 tasks better, 1 worse).
+- **H2a, the 0.6B reader beats Lightning at reading renter messages** (90 owner-labeled messages, blind owner gold, exact match with reason scored on status): 0.522 vs 0.267, Δ +0.256 (95% CI +0.093 to +0.405), 90 rows / 29 threads, one-sided lower bound +0.093; p = 0.002, Holm p = 0.009: **supported**.
+- **H2b, the 0.6B reader beats Claude Opus 5.5** (same rows): 0.522 vs 0.667, Δ -0.144 (95% CI -0.260 to -0.026), 90 rows / 29 threads, one-sided lower bound -0.260; p = 0.994, Holm p = 1.000: **not supported**.
+- **H3, the router cuts Lightning calls without losing more than 0.05 reward:** (i) -13.20 Lightning calls per task (router − final), one-sided upper bound -11.04, p < 0.001; (ii) Δ mean reward -0.227 (router − final, margin −0.05), one-sided lower bound -0.271, p = 1.000. Decision: p = 1.000, Holm p = 1.000: **not supported** (p = the larger of the two parts).
+- **H4, the local system is within 0.05 reward of Claude Opus 5.5 on the same harness:** Δ mean reward +0.014 (final − frontier, margin −0.05; 4 vs 1 runs, 36 tasks), one-sided lower bound -0.040; p = 0.011, Holm p = 0.033: **not supported**. Secondary: two-sided 95% paired CI +0.014 (-0.035 to +0.068). A non-rejection means "not shown", not "worse".
 
-{{HOLM_TABLE}}
+| hypothesis | tested | p (one-sided) | Holm p | α at rank | decision |
+|---|---|---|---|---|---|
+| H1 | yes | <0.001 | <0.001 | 0.0050 | supported |
+| H2a | yes | 0.002 | 0.009 | 0.0063 | supported |
+| H2b | yes | 0.994 | 1.000 | 0.0125 | not supported |
+| H4 | yes | 0.011 | 0.033 | 0.0083 | not supported |
+| H3 | yes | 1.000 | 1.000 | 0.0250 | not supported |
 
-Secondary H2 (uncorrected, pre-declared): real-twin rows only, reader vs Lightning {{H2A_REAL61}}; reader vs Opus {{H2B_REAL61}}. Informative rows only (a gate field is not "absent"): vs Lightning {{H2A_INFORMATIVE}}; vs Opus {{H2B_INFORMATIVE}}. Exact match on all 90: fine-tuned {{READER_EM_FINETUNED}}, Lightning {{READER_EM_LIGHTNING}}, Opus {{READER_EM_FRONTIER}}.
+Secondary H2 (uncorrected, pre-declared): real-twin rows only, reader vs Lightning 0.508 vs 0.311, Δ +0.197 (95% CI -0.020 to +0.365), 61 rows / 22 threads, p = 0.046 (uncorrected, secondary); reader vs Opus 0.508 vs 0.574, Δ -0.066 (95% CI -0.152 to +0.029), 61 rows / 22 threads, p = 0.932 (uncorrected, secondary). Informative rows only (a gate field is not "absent"): vs Lightning 0.524 vs 0.048, Δ +0.476 (95% CI +0.182 to +0.800), 21 rows / 8 threads, p = 0.015 (uncorrected, secondary); vs Opus 0.524 vs 0.905, Δ -0.381 (95% CI -0.625 to -0.133), 21 rows / 8 threads, p = 1.000 (uncorrected, secondary). Exact match on all 90: fine-tuned 0.522, Lightning 0.267, Opus 0.667.
 
 Scorer validation (owner grades 40 random transcripts blind, protocol A5): {{KAPPA_RESULT}}.
 

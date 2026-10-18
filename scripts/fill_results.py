@@ -36,7 +36,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 GYM = REPO / "gym"
 TARGETS = ["README.md", "docs/submission.md", "docs/demo-script.md"]
-PLAN = GYM / "confirmatory_v3.json"
+PLAN = GYM / "confirmatory_v3_a9.json" if (GYM / "confirmatory_v3_a9.json").exists() else GYM / "confirmatory_v3.json"   # Amendment 9: frontier = Zen Opus run
 CONF_JSON = GYM / "results" / "v3-confirmatory.json"
 KAPPA_JSON = GYM / "results" / "v3-kappa.json"
 BENCH = REPO / "serving" / "results" / "serve_bench.jsonl"
