@@ -129,3 +129,26 @@ def test_model_played_renter_uses_gold_reason():
     gold = cp["twin_script"]["gold_facts"]["reason"]["value"]
     r = LLMRenter(cp, TASKS["twin_full"], client=object())
     assert r.truth["reason"] == gold
+
+
+def test_canonical_lease_pair_is_one_question_like_the_tool():
+    task = {"id": "x", "checks": [{"type": "style", "rule": "one_question"}, {"type": "style", "rule": "max_two_sentences"}]}
+    for text in ("How long do you want to stay? Is a one year lease okay with you?",
+                 "¿Cuánto tiempo quieres quedarte? ¿Te funciona un contrato de un año?"):
+        res = verify(task, [send(0, "t", text)], {})
+        assert res["pass"], res["checks"]
+    assert not verify(task, [send(0, "t", "When can you move in? How many people?")], {})["checks"][0]["pass"]
+
+
+def test_task_operator_config_and_reference_player():
+    import run_eval
+    concierge = [json.loads(l) for l in open(HERE / "tasks" / "concierge" / "train.jsonl")]
+    oc = run_eval.task_operator_config(concierge[0])
+    assert oc.get("prompt_version") == "v4"
+    try:
+        run_eval.task_operator_config({"id": "t", "operator_config": {"promt_version": "v4"}})
+        raise AssertionError("typo must fail")
+    except SystemExit:
+        pass
+    res = run_eval.run_reference(concierge[:3], HERE / "results")
+    assert all(r["player"] == "reference" for r in res)

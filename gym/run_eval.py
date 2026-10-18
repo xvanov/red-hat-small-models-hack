@@ -210,6 +210,36 @@ def operator_backend(s: RolloutSession):
     )
 
 
+def task_operator_config(task: dict) -> dict:
+    """A task's own `operator_config` (e.g. concierge tasks: prompt v4, tool_descriptions=concierge) overrides the run's
+    RunConfig for that task. Unknown keys are an error, so a typo never silently runs the wrong config."""
+    from dataclasses import fields
+    from rentus_operator.config import RunConfig
+    oc = dict(task.get("operator_config") or {})
+    bad = set(oc) - {f.name for f in fields(RunConfig)}
+    if bad:
+        raise SystemExit(f"task {task.get('id')}: unknown operator_config keys {sorted(bad)}")
+    return oc
+
+
+def run_reference(tasks, run_dir: Path) -> list[dict]:
+    """Privileged reference players through the same entry point (NOT a model): tasks with `reference` steps
+    (gym/tasks/concierge/reference.py) are replayed through the real tools and scored by the real scorer."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("concierge_reference", HERE / "tasks" / "concierge" / "reference.py")
+    ref = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ref)
+    out = []
+    for t in tasks:
+        if not t.get("reference"):
+            raise SystemExit(f"--player reference: task {t['id']} has no reference steps")
+        t0 = time.time()
+        r = ref.play(t)
+        out.append({**r, "subcategory": t.get("subcategory"), "status": "reference", "steps": 0, "error": None,
+                    "final_text": "", "seconds": round(time.time() - t0, 2), "player": "reference"})
+    return out
+
+
 def run_local_task(task: dict, cfg, run_dir: Path) -> dict:
     from rentus_operator import run
     from rentus_operator.loop import make_client
@@ -221,7 +251,7 @@ def run_local_task(task: dict, cfg, run_dir: Path) -> dict:
         client = SeededClient(client, OPERATOR_SEED)
     run_id = f"{task['id']}-{uuid.uuid4().hex[:6]}"
     status, final_text, steps, err, messages, decisions = "error", "", 0, None, [], None
-    tcfg = cfg.with_(max_steps=min(cfg.max_steps, task.get("max_turns", 30)))
+    tcfg = cfg.with_(max_steps=min(cfg.max_steps, task.get("max_turns", 30)), **task_operator_config(task))
     try:
         if getattr(cfg, "router", False) and isinstance(goal, dict) and goal.get("thread_id"):
             # router on: event-driven; each renter message is routed, Lightning's turn ends on its send_message
@@ -242,6 +272,7 @@ def run_local_task(task: dict, cfg, run_dir: Path) -> dict:
          **({"router_decisions": decisions} if decisions is not None else {})},
         default=str, ensure_ascii=False, indent=1))
     out = {**r, "subcategory": task.get("subcategory"), "status": status, "steps": steps, "error": err,
+           **({"operator_config": task_operator_config(task)} if task.get("operator_config") else {}),
            "final_text": final_text[:2000], "seconds": round(time.time() - t0, 2),
            "reply_latency_s": reply_latencies(s, t0)}
     if decisions is not None:
@@ -443,11 +474,35 @@ def git_head() -> str | None:
         return None
 
 
+def evaluate_reference(args, cfg) -> dict:
+    tasks = load_tasks(args.split, args.ids.split(",") if args.ids else None, args.limit,
+                       getattr(args, "tasks_version", "v1"), getattr(args, "tasks_file", None))
+    run_dir = RESULTS / args.run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    t0 = time.time()
+    results = run_reference(tasks, run_dir)
+    with open(run_dir / "per_task.jsonl", "w") as f:
+        for r in results:
+            f.write(json.dumps(r, ensure_ascii=False, default=str) + "\n")
+    meta = {"run_name": args.run_name, "player": "reference (privileged, not a model)",
+            "tasks_file": getattr(args, "tasks_file", None), "git": git_head(), "provenance": provenance(TASKS_PATH),
+            "started": datetime.fromtimestamp(t0, timezone.utc).isoformat(timespec="seconds"),
+            "seconds": round(time.time() - t0, 1)}
+    summary = summarize(results, meta)
+    (run_dir / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
+    print(json.dumps({k: summary[k] for k in ("run_name", "tasks", "pass_rate", "mean_reward")}, indent=1))
+    return summary
+
+
 def evaluate(args, cfg=None) -> dict:
     global OPERATOR_SEED
     load_env_file()
     OPERATOR_SEED = getattr(args, "seed", None)
     cfg = cfg or make_config(args)
+    if getattr(args, "operator_config", None):   # per-run override, e.g. '{"prompt_version": "v4", "tool_descriptions": "concierge"}'
+        cfg = cfg.with_(**json.loads(args.operator_config))
+    if getattr(args, "player", "model") == "reference":
+        return evaluate_reference(args, cfg)
     stub = args.stub
     if stub:
         cfg = cfg.with_(base_url=start_stub() if args.via == "local" else cfg.base_url, model="stub")
@@ -568,6 +623,11 @@ def build_parser():
     ap.add_argument("--ids", default=None, help="comma-separated task ids")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--keep", action="store_true", help="do not wipe an existing results dir")
+    ap.add_argument("--operator-config", default=None,
+                    help='JSON RunConfig overrides for the whole run, e.g. \'{"prompt_version": "v4"}\'; a task\'s own '
+                         '"operator_config" still wins for that task')
+    ap.add_argument("--player", default="model", choices=["model", "reference"],
+                    help="reference = replay each task's privileged `reference` steps (gym/tasks/concierge/reference.py)")
     return ap
 
 

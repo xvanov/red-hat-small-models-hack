@@ -244,16 +244,27 @@ def _operator_messages(ctx: dict, thread: str | None, scope: str) -> list[str]:
     return out
 
 
+def _tool_style():
+    """send_message's own matcher for the owner's canonical two-part lease question (one pending item, R-STYLE-5),
+    reused so the scorer and the tool agree (no duplicated patterns)."""
+    try:
+        from rentus_tools.impl.style import LEASE_PAIR, question_count
+        return LEASE_PAIR, question_count
+    except Exception:  # noqa: BLE001 - tools not importable: plain counting
+        return re.compile(r"(?!x)x"), lambda t: t.count("?")
+
+
 def check_style(c: dict, ctx: dict) -> tuple[bool, str]:
     rule = c["rule"]
     msgs = _operator_messages(ctx, c.get("thread"), c.get("scope", "attempted"))
     if not msgs:
         return (not c.get("require_messages", True)), "no messages to the renter"
+    lease_pair, question_count = _tool_style()
     for m in msgs:
         bad = None
-        if rule == "max_two_sentences" and len(sentences(m)) > 2:
+        if rule == "max_two_sentences" and len(sentences(m)) - len(lease_pair.findall(m)) > 2:
             bad = "more than 2 sentences"
-        elif rule == "one_question" and m.count("?") > 1:
+        elif rule == "one_question" and question_count(m) > 1:
             bad = "more than one question"
         elif rule == "no_long_dash" and _LONG_DASH.search(m):
             bad = "long dash"
