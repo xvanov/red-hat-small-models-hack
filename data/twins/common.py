@@ -318,6 +318,15 @@ class LocalLLM:
         if not _is_local_host(host):
             sys.exit(f"refusing: {pre}_BASE_URL does not point at a local/private host. Real conversation text "
                      f"may only go to local vLLM endpoints (set TWINS_EXTRA_LOCAL_HOSTS for a private host).")
+        if not getattr(LocalLLM, "_announced", set()) >= {role}:  # show where text goes (host class, no URL/port/key)
+            try:
+                ips = sorted({ai[4][0] for ai in socket.getaddrinfo(host, None)})
+            except OSError:
+                ips = []
+            kind = ("loopback (SSH tunnel to our GPU instance)" if ips and all(ipaddress.ip_address(i.split("%")[0]).is_loopback
+                                                                              for i in ips) else "private/tailnet")
+            print(f"[{role}] model endpoint host: {host} = {kind}", file=sys.stderr)
+            LocalLLM._announced = getattr(LocalLLM, "_announced", set()) | {role}
         self.key = os.environ.get(f"{pre}_API_KEY") or None
         self.model = os.environ.get(f"{pre}_MODEL") or self._first_model()
         self.temperature, self.max_tokens = temperature, max_tokens

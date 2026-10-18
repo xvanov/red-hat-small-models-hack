@@ -283,8 +283,9 @@ def compare(lab: dict, gold: dict) -> list[str]:
 
 
 def gold_of(s: dict, pl: dict) -> dict:
-    """Gold for a twin renter message = the reader's labels of the real message, carried over with the twin's own
-    values (new date, fictional phone). reason is scored on status only (value null)."""
+    """Gold for a twin renter message = its TRUTH SHEET: exactly the values the twin writer was instructed to express
+    (statuses and intents from the reader's reading of the real message, with the twin's own new date and fictional
+    phone). Checked against the twin's text by to_tasks.consistency(). reason is scored on status only."""
     g = s["_gold"]
     o = {}
     for f in FIELDS:
@@ -388,6 +389,7 @@ def make_twin(th: dict, pool, salt, gen: LocalLLM, show_original: bool) -> dict:
         "phone": pl["phone"], "channel": th["channel"], "language": th["language"],
         "language_switch": th["language_switch"], "start": pl["ts"][0], "turns": out_turns,
         "outcome": th.get("outcome"), "final_stage": th.get("final_stage"), "features": th.get("features"),
+        "rules_period": bool(th.get("rules_period")),
         "verified": texts is not None, "problems": probs, "language_mismatch_turns": lang_off,
         "generator_saw_original": show_original,
     }

@@ -311,6 +311,7 @@ def load_anon_selected(raw_dir: Path, selection: dict, salt: str, scrub_counts: 
                 "split": sel["split"], "language": Counter(rl).most_common(1)[0][0], "languages": sorted(set(rl)),
                 "language_switch": any(x != y for x, y in zip(rl, rl[1:])), "start": ep[0]["ts"],
                 "episode": [a, b], "thread_turns": len(turns), "turns": ep,
+                "rules_period": bool(sel.get("rules_period")),
                 "rental": {"kept": True, "by": "selection", "category": cat}})
     return out
 

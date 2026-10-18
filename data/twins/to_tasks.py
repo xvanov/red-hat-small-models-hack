@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import re
 import sys
 from collections import Counter
 from datetime import date
@@ -238,6 +239,46 @@ def to_task(twin: dict, n: int, rooms: list[dict]) -> dict:
     }
 
 
+MONTHS = [("january", "jan", "enero"), ("february", "feb", "febrero"), ("march", "mar", "marzo"), ("april", "apr", "abril"),
+          ("may", "may", "mayo"), ("june", "jun", "junio"), ("july", "jul", "julio"), ("august", "aug", "agosto"),
+          ("september", "sep", "septiembre"), ("october", "oct", "octubre"), ("november", "nov", "noviembre"),
+          ("december", "dec", "diciembre")]
+
+
+def date_in_text(text: str, iso: str) -> bool:
+    d = date.fromisoformat(iso)
+    t = text.lower()
+    names = "|".join(MONTHS[d.month - 1])
+    day = rf"0?{d.day}(st|nd|rd|th)?"
+    return bool(re.search(rf"\b({names})\.?\s+{day}\b|\b{d.day}\s+de\s+({names})\b|\b0?{d.month}/0?{d.day}\b", t))
+
+
+def consistency(twin: dict) -> list[str]:
+    """Gold-in-text check (drop rule fixed before the run, README): a leasing twin is DROPPED when any renter
+    message's truth sheet says
+      * phone answered/exception but the message does not contain the assigned fictional number's 10 digits, or
+        phone absent/no/vague but the message contains a full 10-digit number;
+      * move-in answered/exception with a date but the message does not express that month and day.
+    Other fields and intents are only flagged (rule check, meta.flags)."""
+    out = []
+    want = re.sub(r"\D", "", twin["phone"])[-10:]
+    for t in twin["turns"]:
+        g = t.get("gold")
+        if not g or t.get("media"):
+            continue
+        digits = re.sub(r"\D", "", t["text"])
+        has_full = bool(re.search(r"(?<!\d)(?:\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}(?!\d)", t["text"]))
+        if g["phone"]["status"] in ("answered", "exception"):
+            if want not in digits:
+                out.append("phone_missing")
+        elif has_full:
+            out.append("phone_unexpected")
+        if g["move_in"]["status"] in ("answered", "exception") and g["move_in"].get("date"):
+            if not date_in_text(t["text"], g["move_in"]["date"]):
+                out.append("move_in_date_missing")
+    return out
+
+
 def key_behaviors(twin: dict, sub: str, ends_silent: bool) -> list[dict]:
     """The behaviours a model-played renter must reproduce, with the turn where each happens."""
     out = []
@@ -309,7 +350,10 @@ def reader_rows(twin: dict, task_id: str) -> list[dict]:
                      "input": {"today": t["ts"][:10], "context": to_context(twin["turns"][:k])[-8:], "message": t["text"]},
                      "output": t["gold"],
                      "meta": {"twin_id": twin["twin_id"], "turn": t["i"], "difficulty": t.get("difficulty"),
-                              "task_id": task_id, "gold_source": "reader labels of the real message, carried over",
+                              "task_id": task_id,
+                              "gold_source": "truth sheet: values the twin writer was instructed to express (statuses "
+                                             "from the reader's reading of the real message; twin's own date/phone); "
+                                             "gold-in-text checked",
                               "unscorable": t.get("unscorable") or [], "reason_scored_on": "status",
                               "flags": t.get("flags") or {},
                               "flagged": bool((t.get("flags") or {}).get("rule_vs_gold_on_twin"))}})
@@ -383,14 +427,22 @@ def main():
     pcheck = people_check(P) if P.split else None
     rooms = json.loads(INVENTORY.read_text())["rooms"]
     tasks, otasks, rrows, pub, excluded = [], [], [], [], 0
+    cons = Counter()
     for tw in twins:
         tw.setdefault("category", "leasing")
         if tw["category"] == "leasing":
+            bad = consistency(tw)
+            if bad:
+                cons["dropped"] += 1
+                cons.update(set(bad))
+                continue
+            cons["passed"] += 1
             gate = final_gate(tw)
             if move_in_unscorable(tw) and set(gate) <= {"move_in"}:
                 excluded += 1  # protocol 2.2: move-in was the only gate item and its date is destroyed
                 continue
             task = to_task(tw, len(tasks) + 1, rooms)
+            task["tags"] = ["rules_period_ge_2026_10_04"] if tw.get("rules_period") else []
             task["split"], task["id"] = split, task["id"].replace("-heldout-", f"-{split}-")
             tasks.append(task)
             rrows += reader_rows(tw, task["id"])
@@ -406,6 +458,8 @@ def main():
              "ops_tasks_experimental": len(otasks),
              "ops_by_category": dict(Counter(t["category"] for t in otasks)),
              "excluded_move_in_only_unscorable": excluded,
+             "gold_in_text_consistency": dict(cons),
+             "tasks_tagged_rules_period_ge_2026_10_04": sum(bool(t.get("tags")) for t in tasks),
              "reader_rows_flagged_rule_vs_gold": sum(r["meta"]["flagged"] for r in rrows),
              "reader_rows_move_in_unscorable": sum("move_in" in r["meta"]["unscorable"] for r in rrows),
              "reader_row_selection": "every twin renter message with text (attachment-only excluded); none dropped "
@@ -418,6 +472,19 @@ def main():
              "reader_difficulty": dict(Counter(r["meta"]["difficulty"] for r in rrows)),
              "tasks_file": str(P.tasks_out.relative_to(REPO))}
     write_json(P.published / "tasks_stats.json", stats)
+    if P.split == "heldout":  # freeze (eval-protocol 2.5 / 6.1): hashes of the published held-out files
+        import hashlib
+        sj = REPO / "data" / "twins" / "splits.json"
+        pub_s = json.loads(sj.read_text()) if sj.exists() else {}
+        files = [P.tasks_out, P.tasks_out.with_name(P.tasks_out.stem + "_ops.jsonl"), P.published / "reader_test.jsonl",
+                 P.published / "twins.jsonl"]
+        pub_s["frozen_sha256"] = {str(f.relative_to(REPO)): hashlib.sha256(f.read_bytes()).hexdigest() for f in files}
+        pub_s["people_check"] = {**pcheck, "rule": "no counterpart person id of a held-out thread appears in a dev thread "
+                                                   "(and, by split.py, in any earlier conversation of the export)"}
+        pub_s["heldout_tasks"] = {"leasing": len(tasks), "ops_experimental": len(otasks), "reader_rows": len(rrows),
+                                  "gold_in_text_consistency": dict(cons),
+                                  "tagged_rules_period_ge_2026_10_04": sum(bool(t.get("tags")) for t in tasks)}
+        write_json(sj, pub_s)
     print(json.dumps(stats, indent=1))
 
 

@@ -51,6 +51,38 @@ tenancy_start: for leasing_then_tenancy, the number of the first line that is ab
 Return JSON only: {"category": "...", "tenancy_start": <line number or null>}"""
 
 
+def split_rule(start: dict[str, str], people: dict[str, set[str]], partners: set[str], split_date: str) -> dict[str, str]:
+    """Pure protocol-2.2 rule over EVERY conversation: 'heldout' (starts on/after split_date and no counterpart
+    person appears in any earlier-starting conversation), 'dev' (starts before), 'dropped' (window conversation
+    sharing a person with an earlier one)."""
+    early = set()
+    for c, s0 in start.items():
+        if s0 < split_date:
+            early |= people.get(c, set()) - partners
+    out = {}
+    for c, s0 in start.items():
+        if s0 < split_date:
+            out[c] = "dev"
+        else:
+            out[c] = "dropped" if (people.get(c, set()) - partners) & early else "heldout"
+    return out
+
+
+def verify_split(selected: dict[str, str], start, people, partners, split_date) -> dict:
+    """Independent re-check of the selected split on the data: every held-out conversation starts in the window and
+    shares no counterpart with any conversation that starts earlier; every dev conversation starts earlier."""
+    early = {c for c, s0 in start.items() if s0 < split_date}
+    v = 0
+    for c, sp in selected.items():
+        cp = people.get(c, set()) - partners
+        if sp == "heldout":
+            v += start[c] < split_date or any(cp & (people.get(e, set()) - partners) for e in early)
+        elif sp == "dev":
+            v += start[c] >= split_date
+    return {"heldout_checked": sum(x == "heldout" for x in selected.values()),
+            "dev_checked": sum(x == "dev" for x in selected.values()), "violations": int(v)}
+
+
 def sha(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()
 
@@ -86,7 +118,7 @@ def main():
     start = {c: m[0]["ts"][:10] for c, m in every.items() if m}
     for c, ms in every.items():
         conv_people[c] |= {m["sender"] for m in ms if m["sender"] != "me"}
-    early_people = set().union(*(conv_people[c] for c, s in start.items() if s < a.split_date))
+    rule = split_rule(start, conv_people, partners, a.split_date)
 
     def counterparts(c):
         return conv_people[c] - partners
@@ -111,7 +143,7 @@ def main():
         if russian(c):
             reasons["russian"] += 1
             continue
-        if late and counterparts(c) & early_people:
+        if late and rule[c] == "dropped":
             reasons["window thread shares a person with an earlier thread (dropped from both)"] += 1
             continue
         candidates[c] = "heldout" if late else "dev"
@@ -145,7 +177,8 @@ def main():
                 continue
         else:
             cat, ts = ex, None
-        threads[c] = {"split": split, "category": cat, "dataset": dataset[c], "start": start[c], "tenancy_start": ts}
+        threads[c] = {"split": split, "category": cat, "dataset": dataset[c], "start": start[c], "tenancy_start": ts,
+                      "rules_period": start[c] >= "2026-10-04"}
     write_json(P.root / "selection.json", {"split_date": a.split_date, "threads": threads,
                                            "excluded": dict(reasons)})
     held_ids = sorted(c for c, t in threads.items() if t["split"] == "heldout")
@@ -163,10 +196,15 @@ def main():
         "conversations_by_split_and_category": counts,
         "excluded": dict(reasons),
         "heldout_classifier_vs_exploration": dict(agree),
+        "split_rule_check_real_data": verify_split({c: t["split"] for c, t in threads.items()}, start, conv_people,
+                                                   partners, a.split_date),
+        "split_rule_unit_test": "test_twins.py::test_split_rule (invented person on two channels across the date)",
+        "heldout_conversations_starting_on_or_after_2026_10_04": sum(t["rules_period"] for t in threads.values()
+                                                                     if t["split"] == "heldout"),
     })
     write_json(SPLITS_JSON, pub)
     print(json.dumps({k: pub[k] for k in ("heldout_conversations", "conversations_by_split_and_category", "excluded",
-                                         "heldout_classifier_vs_exploration")}, indent=1))
+                                         "heldout_classifier_vs_exploration", "split_rule_check_real_data")}, indent=1))
 
 
 if __name__ == "__main__":

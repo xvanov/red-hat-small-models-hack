@@ -20,6 +20,68 @@ data/twins/run.sh --limit 20     # dry run on 20 threads
 data/twins/run.sh                # everything
 ```
 
+## The owner's anonymized export (the real run, 2026-10-18)
+
+The owner's phone messages arrive as an anonymized export (`~/rentus-private-data/raw/anonymized-YYYY-MM-DD/`:
+`{tenants,contractors}/messages.jsonl` + `people.csv`; `landlords/` is ignored). This path replaces the
+inquiry-only flow above:
+
+```bash
+RAW=~/rentus-private-data/raw/anonymized-2026-10-18
+PY=data/twins/.venv/bin/python
+$PY data/twins/split.py --raw $RAW            # relevance + protocol split -> work/twins/selection.json, data/twins/splits.json
+$PY data/twins/ingest.py --anon $RAW          # episodes per split -> work/twins/{heldout,dev}/threads.jsonl
+for S in heldout dev; do
+  $PY data/twins/label.py  --split $S --labeler reader
+  $PY data/twins/twin.py   --split $S
+  $PY data/twins/filter.py --split $S
+  $PY data/twins/to_tasks.py --split $S
+done
+$PY data/twins/review_sheets.py               # owner sheets, private: work/label-spotcheck.md, work/realism-review.md
+```
+
+- **Loader** (`ingest.load_anon_selected`): owner = sender `me` plus `people.csv` rows with role `partner` (they speak
+  for the operator side, e.g. lead hand-offs); contractor threads get the role `vendor`; channel `sms`; tap-back
+  reactions ("Liked …", "Le gustó …") are dropped; attachment-only messages are kept as `[photo]` / `[video]` /
+  `[file]`; each message keeps its `people.csv` person id (private work files only) so the people rule can be checked.
+  Whole threads are kept (cap 600); a twin mirrors one **episode** of at most 40 messages (leasing from the start;
+  tenant ops from the first ops message; a leasing thread that becomes a tenancy yields one of each). The rental
+  keyword filter is skipped: relevance comes from the selection.
+- **Relevance** (`split.py`): leasing, tenant ops, and contractor repairs at rental houses only. Dev = the
+  exploration's recommended lists (`work/explore-*`); held-out candidates are classified by Lightning (reasoning on),
+  contractor threads by the exploration's manual read. Only threads with one counterpart person; Russian excluded.
+- **Split** (eval-protocol 2.2): held-out = conversations starting on/after 2026-05-01 none of whose counterpart
+  person ids appear in an earlier conversation (all datasets); window conversations that share a person are dropped
+  from both splits. `data/twins/splits.json` records the sha256 of the held-out id list, counts, and (after
+  `to_tasks.py`) the people check and the frozen task hashes. `to_tasks.py --split heldout` asserts that no held-out
+  person id appears in a dev thread.
+- **Damaged dates**: a counterpart message where the anonymizer replaced a day with a street word ("<Month>
+  <StreetWord>") or put `[state]` next to a date is flagged; its move-in is unscorable (reader rows carry
+  `meta.unscorable`, tasks drop the move-in check, and a thread whose only gate item is such a move-in is excluded).
+- **Labels**: message labels from the fine-tuned **reader** (`--labeler reader`); thread labels (owner acts, outcomes;
+  for ops/contractor episodes also counterpart acts and topic) from **Lightning with reasoning on**; a regex
+  **rule cross-check** on every message and leasing-thread outcome. Agreement rates go to `label_agreement.json`
+  and the stats card.
+- **Twins are kept as written.** One draft per episode (retried only for broken structure); no rewriting until a
+  model reads the twin "correctly", because that would keep only text the labeler finds easy. The privacy filter's
+  rewrites are accepted on the privacy tests alone.
+- **Twin reader test selection rule**: every twin renter message with text from a held-out leasing twin becomes a
+  row (attachment-only messages excluded); no row is dropped for label disagreement. Gold = the reader's labels of
+  the real message carried over with the twin's own values (new date, fictional phone); `reason` is scored on
+  status only. Rows where the rule check disagrees with the gold are flagged (`meta.flagged`, `meta.flags`), and the
+  owner's spot-check (protocol 7.2) is the arbiter of label quality.
+- **Task gold = the truth sheet** written at generation time: the exact values the twin writer was told to express
+  (statuses/intents come from the reader's reading of the real message, values are the twin's own). Reader and
+  Lightning labels are diagnostics only. Disclosed tilt: which values a twin carries was shaped by the reader.
+- **Gold-in-text consistency (drop rule fixed before the run)**: a leasing twin is dropped when any renter message's
+  truth sheet says phone answered/exception but the text lacks the assigned fictional number, or phone is not given
+  but the text has a full 10-digit number, or move-in answered/exception with a date the text does not express
+  (month + day). Other fields and intents are flagged only. Counts: `tasks_stats.json` and `splits.json`.
+- **Rules-period tag**: tasks from held-out threads that start on/after 2026-10-04 carry
+  `tags: ["rules_period_ge_2026_10_04"]` so H1 can be re-run without them (sensitivity).
+- **Ops / contractor twins** become experimental tasks in `gym/tasks/v3/<split>_ops.jsonl` (generic checks only), never
+  pooled into H1. `gym/tasks/v3/heldout.jsonl` holds leasing tasks only.
+
 ## Setup
 
 ```bash
@@ -47,7 +109,7 @@ Every step is idempotent (model replies are cached in `work/cache/`, randomness 
 ## Privacy guarantees
 
 1. **Real text never enters the repo.** Input and every intermediate holding real text live in `~/rentus-private-data/` (mode 700). `Paths` refuses a private dir inside the repo.
-2. **Real text never leaves the machine.** The only model client (`common.LocalLLM`) refuses any endpoint that is not loopback, private (RFC 1918) or tailnet (100.64/10). The embedding model runs on CPU here. No hosted API is reachable from this code.
+2. **Private data never leaves infrastructure we control** — this machine and our rented GPU instance (over an encrypted SSH tunnel); it is never sent to a third-party model API and never committed. The only model client (`common.LocalLLM`) refuses any endpoint that is not loopback, private (RFC 1918) or tailnet (100.64/10); the vLLM endpoints are reached through the SSH tunnel on localhost. The embedding model runs on CPU here.
 3. **Two scrubs before any model sees a message**: the owner's own anonymization, then the regex scrub in `ingest.py`.
 4. **The twin writer is blind by default**: it gets labels, style hints and a persona, not the real words.
 5. **Every published line is checked against every real line** (8-gram, embedding, exact, PII) and `filter.py` asserts the published set passes. Phrases that 3+ different real threads share ("is it still available?") are treated as common and not protected, because they identify no one.

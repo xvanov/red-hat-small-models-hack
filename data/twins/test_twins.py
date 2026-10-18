@@ -88,6 +88,21 @@ def test_anon_export_rules():
     assert eps == [("leasing", 0, ingest.EPISODE_TURNS)]
 
 
+def test_split_rule():
+    """Protocol 2.2 people rule: an invented person who writes on two channels (an SMS thread before the split date
+    and a contractor-style thread after it) makes the later thread 'dropped', never held-out; a new person after the
+    date is held-out; partners never count as shared people."""
+    import split
+    start = {"A": "2026-03-02", "B": "2026-06-10", "C": "2026-07-01", "D": "2026-08-01", "E": "2026-04-30"}
+    people = {"A": {"P1", "PART"}, "B": {"P1"}, "C": {"P2", "PART"}, "D": {"P3"}, "E": {"P4"}}
+    r = split.split_rule(start, people, {"PART"}, "2026-05-01")
+    assert r == {"A": "dev", "B": "dropped", "C": "heldout", "D": "heldout", "E": "dev"}, r
+    chk = split.verify_split({"A": "dev", "C": "heldout", "D": "heldout"}, start, people, {"PART"}, "2026-05-01")
+    assert chk["violations"] == 0
+    bad = split.verify_split({"B": "heldout"}, start, people, {"PART"}, "2026-05-01")
+    assert bad["violations"] == 1
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
