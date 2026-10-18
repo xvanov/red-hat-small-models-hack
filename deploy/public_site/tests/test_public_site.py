@@ -61,3 +61,21 @@ def test_page_headers_and_no_secrets(client):
 def test_rate_limit(client):
     codes = [client.get("/api/results").status_code for _ in range(site.RATE_N + 3)]
     assert 429 in codes
+
+
+def test_console_button_only_when_set(client, monkeypatch):
+    monkeypatch.delenv("PUBLIC_CONSOLE_LINK", raising=False)
+    r = client.get("/")
+    assert "{{" not in r.text and "hero-cta" not in r.text
+    assert r.headers["cache-control"].startswith("no-store")
+    monkeypatch.setenv("PUBLIC_CONSOLE_LINK", "https://console.rentus.homes")
+    r = client.get("/")
+    assert 'href="https://console.rentus.homes"' in r.text and "{{" not in r.text
+    monkeypatch.setenv("PUBLIC_CONSOLE_LINK", "javascript:alert(1)")
+    assert "hero-cta" not in client.get("/").text
+
+
+def test_no_raw_placeholder_ever():
+    # A template newer than the code (unknown placeholders) must not leak "{{...}}".
+    out = site.render_page(site.TEMPLATE + '<a href="{{SOMETHING_NEW}}">x</a> {{OTHER}}')
+    assert "{{" not in out and "}}" not in out

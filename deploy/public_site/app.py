@@ -64,16 +64,26 @@ def _demo_email() -> str | None:
     return v if re.fullmatch(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", v) else None
 
 
-def render_page() -> str:
-    tpl = (HERE / "static" / "index.html").read_text()
+# Read once at import, together with the code that fills it. Reading it per request let a
+# newer template (with new placeholders) be served by an older running process, which left
+# a raw {{CONSOLE_LINK}} in an href (Oct 18). Restart the app to pick up template edits.
+TEMPLATE = (HERE / "static" / "index.html").read_text()
+_PLACEHOLDER = re.compile(r"\{\{[A-Z_]+\}\}")
+
+
+def _console_button() -> str:
+    link = os.environ.get("PUBLIC_CONSOLE_LINK", "").strip()
+    if not re.fullmatch(r"https://[a-z0-9.-]+\.rentus\.homes/?", link):
+        return ""
+    return ('<p class="hero-cta"><a class="btn btn-ghost" href="' + html.escape(link, quote=True)
+            + '" target="_blank" rel="noopener noreferrer">Open the live console (read-only) \u2197</a></p>')
+
+
+def render_page(template: str | None = None) -> str:
+    tpl = TEMPLATE if template is None else template
     sms = _read_twilio_number()
     email = _demo_email()
-    console_link = os.environ.get("PUBLIC_CONSOLE_LINK", "").strip()
-    if not re.fullmatch(r"https://[a-z0-9.-]+\.rentus\.homes/?", console_link):
-        console_link = ""
     subs = {
-        "{{CONSOLE_LINK}}": console_link or "#",
-        "{{CONSOLE_HIDDEN}}": "" if console_link else "hidden",
         "{{MESSENGER_URL}}": MESSENGER_URL,
         "{{SMS_HREF}}": f"sms:{sms}?&body=Hi%2C%20is%20the%20room%20on%20Appling%20Way%20still%20available%3F" if sms else "#",
         "{{SMS_PRETTY}}": _pretty(sms) if sms else "coming soon",
@@ -84,7 +94,9 @@ def render_page() -> str:
     }
     for k, v in subs.items():
         tpl = tpl.replace(k, html.escape(v, quote=True))
-    return tpl
+    tpl = tpl.replace("{{CONSOLE_BUTTON}}", _console_button())  # pre-built, escaped HTML (or nothing)
+    # Never emit a raw placeholder: an unknown one becomes empty (so a button is simply absent).
+    return _PLACEHOLDER.sub("", tpl)
 
 
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; "
@@ -190,7 +202,7 @@ def online(request: Request):
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return HTMLResponse(render_page(), headers={"Cache-Control": "no-cache, no-transform"})  # no-transform: stop Cloudflare email obfuscation (its script is CSP-blocked)
+    return HTMLResponse(render_page(), headers={"Cache-Control": "no-store, no-transform"})  # no-transform: stop Cloudflare email obfuscation (its script is CSP-blocked)
 
 
 _STATIC = {"app.js": "text/javascript", "app.css": "text/css", "favicon.svg": "image/svg+xml"}
