@@ -53,3 +53,10 @@ def test_listing_tools_refuse_house_numbers(world):
     call_err(world, "update_listing", {"listing_id": lid, "fields": {"body": f"At {addr}."}}, "POLICY_BLOCKED")
     world.get("listings", lid)["body"] = f"At {addr}."   # edited behind the tools' back
     call_err(world, "publish_listing", {"listing_id": lid, "channel": "marketplace"}, "POLICY_BLOCKED")
+
+
+def test_offering_another_room_may_quote_its_price(world):
+    other = world.get("rooms", "R005")
+    street = public_street(other["address"])
+    call_ok(world, "send_message", {"thread_id": "T001", "text": f"The room on {street} is ${other['rent']} a month."})
+    call_err(world, "send_message", {"thread_id": "T001", "text": f"Another room is ${other['rent']} a month."}, "POLICY_BLOCKED")

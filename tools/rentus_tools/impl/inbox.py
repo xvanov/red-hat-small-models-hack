@@ -11,6 +11,7 @@ from ._util import dollar_figures, need
 from .listings import allowed_figures
 from .reader import read_reply_fallback
 from .guards import booking_claims, has_confirmed_showing, language_mismatch
+from .demand import room_available as room_available_for_offer
 from .demand_guards import first_person_hint, house_numbers, owner_names, public_street, third_person_refs
 from .style import lease_terms, style_violations
 
@@ -133,6 +134,12 @@ def send_message(world, thread_id: str, text: str, attachments: list[str] | None
                 allowed.add(float(l["price"]))
             where = "any room or listing"
         bad = [f for f in figs if f not in allowed]
+        if bad:  # offering another room (concierge): figures of a room whose street the same message names
+            for r in world.rooms:
+                st = public_street(r.get("address", ""))
+                if st and st.lower() in text.lower() and room_available_for_offer(world, r):
+                    allowed |= allowed_figures(r)
+            bad = [f for f in figs if f not in allowed]
         if bad:
             raise ToolError("POLICY_BLOCKED",
                             f"message quotes {', '.join(f'${b:g}' for b in bad)}, which is not in the record for {where}",
