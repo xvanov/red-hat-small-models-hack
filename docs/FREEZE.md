@@ -10,7 +10,7 @@ python3 scripts/freeze.py --check      # exit 0 = freezable, 1 = something below
 
 ## 1. Owner sign-offs needed
 
-Each one is a line in `docs/DECISIONS.md` containing `FREEZE-SIGNOFF <id>` (for example `| D32 | Oct 18 07:40 | FREEZE-SIGNOFF realism-7.1: 8/20 identified, mean realism 3.9, pass | ... | Owner |`). `scripts/freeze.py` looks for these exact ids.
+Each one is a line in `docs/DECISIONS.md` containing `FREEZE-SIGNOFF <id>` (for example `| D<n> | Oct 18 07:40 | FREEZE-SIGNOFF realism-7.1: 8/20 identified, mean realism 3.9, pass | ... | Owner |`). `scripts/freeze.py` looks for these exact ids.
 
 | id | what the owner confirms | needed before | if it is not done by the cut-off |
 |---|---|---|---|
