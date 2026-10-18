@@ -620,7 +620,16 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
             es = demo.is_spanish(inbound["text"])
             hold = ("Gracias por tu mensaje, te respondo en breve." if es else
                     "Thanks for your message, I'll get back to you shortly.")
+            with store.locked():
+                th_ = store.get_thread(thread_id) or {}
+            if th_.get("demo") and not th_.get("disclosed"):  # a first reply always carries the AI disclosure
+                hold = demo.disclosure("es" if es else "en") + " " + hold
             r_ = outbound.deliver(store, thread_id, hold, origin="operator")
+            if th_.get("demo") and r_.get("status") == "sent":
+                with store.locked():
+                    th_ = store.get_thread(thread_id)
+                    th_["disclosed"] = th_.get("disclosed") or now_iso()
+                    store.save_thread(th_)
             delivered = {"ts": now_iso(), "actor": "tool", "name": "holding_reply", "ok": r_.get("ok", False),
                          "summary": "the turn produced no reply to a question: sent a holding line (" +
                                     str(r_.get("status")) + ")"}

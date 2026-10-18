@@ -1048,3 +1048,13 @@ def test_stranger_emergency_gets_safety_first_and_alerts_owner(env):
 def test_emergency_regex_has_no_smoker_false_positive():
     assert not daemon.EMERGENCY_RE.search("I'm quiet, I don't smoke, I cook a lot")
     assert daemon.EMERGENCY_RE.search("I smell gas in the kitchen") and daemon.EMERGENCY_RE.search("toilet is overflowing")
+
+
+def test_holding_reply_carries_disclosure_on_first_contact(open_env):
+    from datetime import datetime, timezone
+    _push_at(open_env["tf"], STRANGER, "Hi! 12 month lease is fine, move in Nov 1, is it available?", "SM-h1",
+             datetime.now(timezone.utc).isoformat())
+    daemon.poll_all(open_env["store"])
+    tid = api.list_threads()[0]["thread_id"]
+    daemon.run_turn(open_env["store"], tid, runner=lambda w, i, h: _Res([]))
+    assert open_env["tf"].sent[0][1].startswith("Hi, you're chatting with Rentus Homes' AI assistant. Thanks for")
