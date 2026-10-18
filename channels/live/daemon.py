@@ -54,7 +54,7 @@ class LiveSendAdapter:
 
     def send_message(self, world, thread, text, attachments):
         from rentus_tools.errors import ToolError
-        res = outbound.deliver(self.store, thread["thread_id"], text, origin="operator")
+        res = outbound.deliver(self.store, thread.get("live_id") or thread["thread_id"], text, origin="operator")
         if res["status"] == "sent":
             return {"status": "sent", "screenshot": None, "external_message_id": res.get("provider_id")}
         if res["status"] == "awaiting_approval":
@@ -142,6 +142,11 @@ def _now_ny() -> str:
     return datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None).isoformat(timespec="seconds")
 
 
+def world_tid(thread_id: str) -> str:
+    """The id the model sees: no colons (the model drops a 'messenger:' prefix), unique per live thread."""
+    return "t_" + thread_id.replace(":", "_")
+
+
 def _new_world(t: dict):
     import rentus_tools as rt
     from channels.pilot_post import ROOM
@@ -149,8 +154,13 @@ def _new_world(t: dict):
     w.rooms[:] = [copy.deepcopy(ROOM)]
     w.listings[:] = []
     w.threads[:] = []
-    w.threads.append({"thread_id": t["thread_id"], "channel": registry.world_channel(t["channel"]),
+    wch = registry.world_channel(t["channel"])
+    wid = world_tid(t["thread_id"])
+    w.threads.append({"thread_id": wid, "live_id": t["thread_id"], "channel": wch,
                       "renter_name": t.get("renter_name") or "", "room_id": ROOM["room_id"], "messages": []})
+    ch = w.channels.setdefault(wch, {"posts": [], "threads": []})
+    if isinstance(ch, dict) and wid not in ch.setdefault("threads", []):
+        ch["threads"].append(wid)
     w._normalize()
     return w
 
@@ -233,7 +243,8 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
     w = rt.World.from_dict(world_d) if world_d else _new_world(t)
     w.mode = "live"
     w.clock["now"] = _now_ny()
-    wt = next(x for x in w.threads if x["thread_id"] == thread_id)
+    wt = next(x for x in w.threads if x.get("live_id") == thread_id or x["thread_id"] == thread_id)
+    wid = wt["thread_id"]
     if t.get("renter_name"):
         wt["renter_name"] = t["renter_name"]
     for o in owner_pending:  # the owner's manual replies, so the operator sees them
@@ -241,7 +252,7 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
     for m in new_in:
         wt["messages"].append({"id": m["id"], "from": "renter", "text": m["text"], "attachments": [], "ts": w.clock["now"]})
     esc0, rep0 = len(w.escalations), len(w.owner_reports)
-    inbound = {"thread_id": thread_id, "channel": registry.world_channel(t["channel"]),
+    inbound = {"thread_id": wid, "channel": registry.world_channel(t["channel"]),
                "renter_name": t.get("renter_name") or "a renter", "text": "\n".join(m["text"] for m in new_in)}
     err = None
     res = None
@@ -278,7 +289,7 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
         t["pending_turn"] = any(m["direction"] == "in" and m["id"] not in set(t["world_synced"]) for m in t["messages"])
         t["trace"].extend(trace_from_events(res.events))
         t["trace"] = t["trace"][-400:]
-        gate, stage = gate_and_stage(w, thread_id)
+        gate, stage = gate_and_stage(w, wid)
         t["gate"] = gate
         if stage:
             t["stage"] = stage

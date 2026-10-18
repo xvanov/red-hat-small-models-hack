@@ -197,8 +197,10 @@ def test_operator_turn_sends_for_real_and_escalates(env):
 
     def runner(w, inbound, history):
         assert w.mode == "live" and inbound["text"] == "Hi, is the room still available?"
-        e1 = rt.call(w, "send_message", {"thread_id": tid, "text": "Yes, it is available Nov 1. When are you looking to move in?"})
-        e2 = rt.call(w, "escalate_to_owner", {"reason": "asks about pets", "ref_id": tid, "draft": "Let me check on pets."})
+        wid = inbound["thread_id"]
+        assert ":" not in wid
+        e1 = rt.call(w, "send_message", {"thread_id": wid, "text": "Yes, it is available Nov 1. When are you looking to move in?"})
+        e2 = rt.call(w, "escalate_to_owner", {"reason": "asks about pets", "ref_id": wid, "draft": "Let me check on pets."})
         return _Res([{"type": "tool_result", "data": {"tool": "send_message", "result": e1}},
                      {"type": "tool_result", "data": {"tool": "escalate_to_owner", "result": e2}}])
 
@@ -218,7 +220,7 @@ def test_operator_turn_sends_for_real_and_escalates(env):
     seen = {}
 
     def runner2(w, inbound, history):
-        seen["n"] = len(next(x for x in w.threads if x["thread_id"] == tid)["messages"])
+        seen["n"] = len(next(x for x in w.threads if x["thread_id"] == inbound["thread_id"])["messages"])
         seen["history"] = history
         return _Res([])
 
@@ -279,8 +281,8 @@ def test_personal_channel_unlisted_drafts_only(env, monkeypatch, drafts):
         tid = threads[0]["thread_id"]
 
         def runner(w, inbound, history):
-            assert next(x for x in w.threads if x["thread_id"] == tid)["channel"] == "marketplace"
-            rt.call(w, "send_message", {"thread_id": tid, "text": "Yes, it is available Nov 1. When would you move in?"})
+            assert next(x for x in w.threads if x["thread_id"] == inbound["thread_id"])["channel"] == "marketplace"
+            rt.call(w, "send_message", {"thread_id": inbound["thread_id"], "text": "Yes, it is available Nov 1. When would you move in?"})
             return _Res([])
 
         daemon.run_turn(env["store"], tid, runner=runner)
