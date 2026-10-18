@@ -43,19 +43,52 @@ def resolve_photos(photos: list, *, allow_samples: bool) -> list[str]:
     return out
 
 
-def _min_stay(months: int | None) -> str:
-    m = months or 12
+def _min_stay(months) -> str | None:
+    """Roomies' minimum-stay option for the room's confirmed lease minimum; None (left unset) when unknown."""
+    try:
+        m = int(months)
+    except (TypeError, ValueError):
+        return None
+    if m < 1:
+        return None
     for opt in (12, 6, 3, 1):
         if m >= opt:
             return f"{opt} months" if opt > 1 else "1 month"
-    return "1 month"
+    return None
+
+
+def known(room: dict, key: str):
+    """The room record's value for `key` only when it is an owner-confirmed fact: present, not null, not
+    'unconfirmed'/'unknown', and not named in the record's `unconfirmed` list. Otherwise None."""
+    if key in (room.get("unconfirmed") or []):
+        return None
+    v = room.get(key)
+    if v is None or (isinstance(v, str) and v.strip().lower() in ("", "unconfirmed", "unknown", "tbd", "n/a")):
+        return None
+    return v
+
+
+def _housing_type(room: dict) -> str | None:
+    ht = known(room, "housing_type")
+    if ht:
+        return ht
+    t = str(known(room, "type") or "").lower()
+    for word in ("house", "apartment", "townhouse", "condo", "duplex"):
+        if word in t:
+            return word
+    return None
 
 
 def prepare(platform: str, listing: dict, *, target: str) -> dict:
+    """Flat values for a platform's flow. Only owner-confirmed room facts are filled: an unknown fact is None,
+    and the engine skips a step whose value is None (a required one fails loudly instead of guessing).
+    Checkboxes for unknown facts stay unchecked (nothing is claimed)."""
     room = listing.get("room") or {}
     price = listing.get("price") or room.get("rent")
-    private_bath = bool(room.get("private_bath"))
-    pets = str(room.get("pets") or "").lower()
+    pb = known(room, "private_bath")
+    private_bath = bool(pb)
+    pets = str(known(room, "pets") or "").lower()
+    lease = known(room, "lease_min_months")
     v = {
         "title": listing.get("title"),
         "headline": listing.get("title"),
@@ -67,24 +100,26 @@ def prepare(platform: str, listing: dict, *, target: str) -> dict:
         "address": room.get("address_public") or room.get("area"),
         "area": room.get("area") or room.get("address_public"),
         "postal": room.get("zip"),
-        "available_date": room.get("available_from"),
+        "available_date": known(room, "available_from"),
         "private_bath": private_bath,
-        "private_bath_text": "private bath" if private_bath else "no private bath",
-        "furnished": bool(room.get("furnished")),
-        "bedrooms": 1,
-        "bathrooms": 1,
+        "private_bath_text": None if pb is None else ("private bath" if pb else "no private bath"),
+        "furnished": bool(known(room, "furnished")),
+        "bedrooms": 1,  # a single-room listing
+        "bathrooms": 1 if pb else None,
         "home_type": "Room only",
-        "min_stay": _min_stay(room.get("lease_min_months")),
+        "min_stay": _min_stay(lease),  # never a lease length the room record does not have
+        "lease_min_months": lease,
         "category": "rooms & shares",
-        # craigslist's required drop-downs (exact option text). laundry/parking come from the room record when
-        # it has them; otherwise these defaults are filled and the owner checks them on the screenshot.
+        # craigslist drop-downs (exact option text): filled only from explicit room-record fields
+        # (laundry, parking, housing_type or a type naming the building). Unknown -> None -> the step is skipped and the drop-down stays unset.
         "private_room_text": "private room" if room.get("type", "private_room") != "shared_room" else "room not private",
         "rent_period_text": "month",
-        "housing_type_text": room.get("housing_type") or "house",
-        "laundry_text": room.get("laundry") or "laundry on site",
-        "parking_text": room.get("parking") or "off-street parking",
+        "housing_type_text": _housing_type(room),
+        "laundry_text": known(room, "laundry"),
+        "parking_text": known(room, "parking"),
         "room_name": room.get("room_id") or listing.get("title"),
-        "room_size": room.get("size") or "Medium",
+        # mock forms require a size; the real sites get one only from the record
+        "room_size": known(room, "size") or ("Medium" if target == "mock" else None),
         "cat_friendly": "cat" in pets or pets in ("yes", "true", "allowed"),
         "dog_friendly": "dog" in pets or pets in ("yes", "true", "allowed"),
         "email": listing.get("contact_email") or os.environ.get("CHANNELS_CONTACT_EMAIL")

@@ -7,8 +7,8 @@ saved as drafts.
 
 ## 5-minute checklist
 
-Run everything from the repo root (`~/red-hat-small-models-hack`). Each `channels.login` line opens a
-browser window: log in (pass any "verify you are human" check), then **close the window**.
+On a machine without a screen (this one), use **Headless login** below instead. Run everything from the
+repo root (`~/red-hat-small-models-hack`). Each `channels.login` line opens a browser window: log in (pass any "verify you are human" check), then **close the window**.
 
 | # | Platform | Command | What it unlocks |
 |---|---|---|---|
@@ -32,15 +32,53 @@ channels/.venv/bin/python -m channels.publish padsplit   --target live --listing
 {"listing_id": "L-appling", "title": "Private room with its own bath, Appling Way", "body": "...", "price": 750,
  "room": {"room_id": "appling-way-a", "area": "Durham", "zip": "27703", "address_public": "Appling Way, Durham, NC",
           "type": "private_room", "private_bath": true, "furnished": true, "available_from": "2026-11-01",
-          "laundry": "w/d in unit", "parking": "off-street parking"},
+          "laundry": "w/d in unit", "parking": "off-street parking", "lease_min_months": 6},
  "photos": ["/path/to/photo1.jpg", "/path/to/photo2.jpg"]}
 ```
 
 You click the final Publish/Post button yourself if you want it live. The adapter refuses `submit` on
 live targets, and a guard refuses any click on a button that reads like publish, submit or send.
 
+Only facts in the room record are filled. Laundry, parking, housing type, room size, furnished, pets and
+minimum stay stay unset (or unchecked) unless the record has them and does not list them under
+`unconfirmed`; the screenshot shows what was filled.
+
 If a session expires, the adapter returns `LOGIN_REQUIRED` with the exact login command in its `hint`
 (`details.reason` is `login_page`, `bot_challenge` or `redirected`).
+
+## Headless login (no screen: this machine)
+
+This machine has no display, so `channels.login <site>` (which opens a browser window) refuses and points
+here. Instead you copy your logged-in session from your laptop's browser. You need the **Cookie-Editor**
+browser extension (Chrome or Firefox). Never paste cookies into a chat: they are a live login.
+
+For each site:
+
+1. On your laptop, open the URL below **logged in** (log in there first if needed, pass any "verify you are
+   human" check).
+2. Click Cookie-Editor > **Export** > **JSON** (copies the site's cookies to the clipboard).
+3. In a laptop terminal: `ssh k@100.64.38.18 'cat > ~/<site>-cookies.json'`, paste, press Enter, then Ctrl-D.
+4. On this machine, from `~/red-hat-small-models-hack`, run the import command. It keeps only that site's
+   cookies, loads them into the adapter's profile (`channels/.profiles/<site>/`), deletes the file, and
+   checks the session. It prints counts and `logged_in: true/false`, never a cookie value.
+
+| Site | Open on the laptop, logged in | Import command |
+|---|---|---|
+| Facebook (Marketplace **and** Messenger, one export) | https://www.facebook.com/marketplace/create/rental | `channels/.venv/bin/python -m channels.login import-cookies marketplace ~/marketplace-cookies.json` |
+| Roomies | https://www.roomies.com/rooms/new | `channels/.venv/bin/python -m channels.login import-cookies roomies ~/roomies-cookies.json` |
+| PadSplit (host) | https://www.padsplit.com/host | `channels/.venv/bin/python -m channels.login import-cookies padsplit ~/padsplit-cookies.json` |
+| craigslist | https://accounts.craigslist.org/login/home | `channels/.venv/bin/python -m channels.login import-cookies craigslist ~/craigslist-cookies.json` |
+
+- The Facebook export must include `c_user` and `xs` (it does when you are logged in on www.facebook.com);
+  the import refuses otherwise. The same import also logs in `channels/.profiles/messenger_web/`, so you
+  do not need `python -m channels.messenger_web import-cookies` separately (`--no-messenger` skips it; if
+  the Messenger worker is running it keeps its own session and the output says so).
+- Check any site later: `channels/.venv/bin/python -m channels.login check <site>` (yes/no only).
+- Roomies is behind Cloudflare. Its clearance cookie is tied to the browser and network that earned it, so
+  an imported session can still meet the bot check here; `check roomies` then says `bot_challenge`.
+- "profile in use by process N": an adapter or check is still running on that profile. Stop it, retry.
+  A lock left by a crashed browser is cleared automatically.
+- `--keep` keeps the file after import; `-` instead of a file name reads the export from stdin.
 
 ## What already works without logging in (checked 2026-10-18, 03:50 ET)
 
