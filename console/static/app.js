@@ -5,6 +5,7 @@
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const md = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>");
 const pct = (x, d = 0) => (x == null || isNaN(x) ? "–" : (x * 100).toFixed(d) + "%");
 const fix = (x, d = 2) => (x == null || isNaN(x) ? "–" : Number(x).toFixed(d));
 async function j(url) {
@@ -607,7 +608,7 @@ function renderChat() {
       summary: s.err || argSummary(s.args) }));
     return `<div class="turn-owner">${esc(t.owner)}</div>
       <div class="turn-op"><div class="av">${I.bot}</div><div class="body">
-        ${t.reply ? `<div class="text">${esc(t.reply)}</div>` : ""}
+        ${t.reply ? `<div class="text">${md(t.reply)}</div>` : ""}
         ${!t.done ? `<div class="working"><span class="spinner"></span>${t.steps.length ? esc(lastStepLabel(t)) : "Thinking…"}</div>` : ""}
         ${t.steps.length ? `<button class="steps-toggle" data-i="${i}">${t.open ? "Hide" : "Show"} ${tools} tool call${tools === 1 ? "" : "s"}${t.stats?.seconds ? ` · ${Math.round(t.stats.seconds)}s` : ""}${issues ? ` <span class="chip err">${issues} caught</span>` : ""}${recov ? ` <span class="chip ok">${recov} recovered</span>` : ""}</button>` : ""}
         ${t.open ? `<div class="steps">${renderTrace(trace, "all")}</div>` : ""}
@@ -671,8 +672,10 @@ function renderSide() {
       ${l.body ? `<div class="desc">${esc(l.body)}</div>` : ""}
     </div>${chans.length ? `<div class="card-body rows" style="border-top:1px solid var(--line)">${chans.map(([ch, p]) => {
       p = typeof p === "object" && p ? p : { status: String(p) };
-      const [cls, label] = POST_STATUS[p.status] || ["", p.status || "–"];
-      const link = p.url ? `<a class="btn sm" href="${esc(p.url)}" target="_blank" rel="noopener">${p.status === "ready_to_submit" ? "Publish" : "View"}</a>`
+      let [cls, label] = POST_STATUS[p.status] || ["", p.status || "–"];
+      const sandbox = /\.local\b|sandbox/.test(p.url || "");
+      if (sandbox) label += " · sandbox";
+      const link = p.url && !sandbox ? `<a class="btn sm" href="${esc(p.url)}" target="_blank" rel="noopener">${p.status === "ready_to_submit" ? "Publish" : "View"}</a>`
         : p.screenshot ? `<a class="btn sm" href="/api/file?path=${encodeURIComponent(p.screenshot)}" target="_blank">${p.status === "ready_to_submit" ? "Review &amp; publish" : "Screenshot"}</a>` : "";
       return `<div>${chIcon(ch)}${esc(chName(ch))}<span class="r"><span class="chip ${cls}">${esc(label)}</span>${link}</span></div>`;
     }).join("")}</div>` : ""}</div>`);
