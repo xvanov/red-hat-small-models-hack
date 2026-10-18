@@ -37,7 +37,7 @@ Scenarios (`gym/tasks/*.jsonl`) run through the gym's own `RolloutSession`, so s
 
 ## Demo run (one click, for the video)
 
-**▶ Demo run** starts a fresh free-play run on a demo world (sandbox inventory, three plumbers for the Appling Way zip, one of whom never answers, $400 limit) and `console/demo.py` plays the owner and the world while the live operator does everything else:
+**▶ Demo run** starts a fresh free-play run on a demo world (sandbox inventory, three plumbers for the Appling Way zip, $400 limit; at the plumber step the director injects a timeout on the first `request_quote` call, so one plumber never answers whichever the model asks first) and `console/demo.py` plays the owner and the world while the live operator does everything else:
 
 1. owner: "Appling Way room free Nov 1, $750 ..." → listing written, compliance-checked, posted to 3 lanes
 2. María (Spanish, vague date first) and Devon (asks if the rent is negotiable) write in at the same time

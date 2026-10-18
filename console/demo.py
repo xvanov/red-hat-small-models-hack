@@ -21,7 +21,9 @@ LISTING_GOAL = "Appling Way room free Nov 1, $750, private bath. Post it on Mark
 OPS_GOAL = ("Jordan, the tenant at Appling Way (room R100, zip 27703), says the kitchen sink is leaking under the "
             "cabinet. Get a plumber booked and keep her posted. Her thread is t_tenant_jordan.")
 
-# A demo world: the sandbox inventory plus three plumbers for the Appling Way zip, one of whom never answers.
+# A demo world: the sandbox inventory plus three plumbers for the Appling Way zip. All three answer; the first
+# quote request of the run times out by an injected fault (OPS_FAULT), so exactly one plumber "never answers"
+# whichever one the model asks first.
 DEMO_PATCH = {
     "clock": {"now": "2026-10-17T10:00:00"},
     "policy": {"spend_limit_usd": 400},
@@ -29,11 +31,14 @@ DEMO_PATCH = {
         {"vendor_id": "V01", "name": "Bull City Pipe Works", "trade": "plumber", "phone": "+19195551100",
          "rating": 4.6, "service_area": ["27703"], "eta_days": 1, "responds": True, "quote_range": [310, 310]},
         {"vendor_id": "V02", "name": "Triangle Pipe Pros", "trade": "plumber", "phone": "+19195551101",
-         "rating": 4.8, "service_area": ["27703"], "eta_days": 1, "responds": False, "quote_range": [220, 220]},
+         "rating": 4.8, "service_area": ["27703"], "eta_days": 1, "responds": True, "quote_range": [220, 220]},
         {"vendor_id": "V03", "name": "Eno River Plumbing", "trade": "plumber", "phone": "+19195551102",
          "rating": 4.5, "service_area": ["27703"], "eta_days": 2, "responds": True, "quote_range": [185, 185]},
     ]},
 }
+
+# Contract section 5 fault: the first request_quote call times out, then the fault is used up.
+OPS_FAULT = {"tool": "request_quote", "kind": "timeout", "times": 1}
 
 TENANT = {"id": "tenant:jordan", "name": "Jordan (tenant)", "channel": "sms", "language": "en",
           "thread_id": "t_tenant_jordan", "kind": "tenant", "room_of_interest": "R100",
@@ -143,6 +148,8 @@ class Director:
             self._pause(10)
 
             self._go("ops")
+            self.run.inject_fault(dict(OPS_FAULT))
+            self.note("fault_injected", OPS_FAULT, actor="owner")
             self.run.add_thread(TENANT)
             self.run.owner_say(OPS_GOAL)
             self._pause(2)
