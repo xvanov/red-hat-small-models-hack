@@ -433,7 +433,7 @@ def needs_answer(text: str) -> bool:
     return "?" in t or len(t) > 15
 
 
-def flush(store: Store, thread_id: str, channel: str, renter_text: str) -> dict | None:
+def flush(store: Store, thread_id: str, channel: str, renter_text: str, gate: dict | None = None) -> dict | None:
     """Deliver this turn's buffered operator messages as one composed reply. Returns a trace entry."""
     if ADAPTER is None:
         return None
@@ -445,7 +445,7 @@ def flush(store: Store, thread_id: str, channel: str, renter_text: str) -> dict 
         return None
     with store.locked():
         tt = store.get_thread(thread_id) or {}
-    filled = {k if k != "people" else "occupants" for k, v in (tt.get("gate") or {}).items() if v == "exact"}
+    filled = {k if k != "people" else "occupants" for k, v in (gate or tt.get("gate") or {}).items() if v == "exact"}
     first = not any(m["direction"] == "out" and m.get("status") == "sent" for m in tt.get("messages", []))
     parts = compose.compose(texts, channel, renter_text, filled=filled if tt.get("role", "prospect") == "prospect"
                             else None, first=first)
@@ -565,7 +565,7 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
             ADAPTER.take_buffer(thread_id)
         return _fail_turn(store, thread_id, "model_error: " + str(getattr(res, "final_text", "") or "")[:160])
     try:
-        delivered = flush(store, thread_id, t["channel"], inbound["text"])
+        delivered = flush(store, thread_id, t["channel"], inbound["text"], gate_and_stage(w, wid)[0])
         if delivered is None and needs_answer(inbound["text"]) and getattr(res, "status", "") in ("max_steps", "done",
                                                                                                   "done_unverified"):
             es = demo.is_spanish(inbound["text"])

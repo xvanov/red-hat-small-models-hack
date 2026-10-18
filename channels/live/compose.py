@@ -82,7 +82,7 @@ LINK_REF = re.compile(r"\b(link|lease|it)\b.{0,40}\b(is |are )?(included|attache
 
 # sentences that talk about the machinery (prompt, model, tools, the "gate" checklist) never reach a renter
 INTERNAL = re.compile(r"system prompt|my (instructions|prompt)|language model|nemotron|\bLLM\b|tool call|\bgate\b|"
-                      r"datos de la puerta|\bthread\b|\bregister\b", re.I)
+                      r"datos de la puerta|\bthread\b|\bregister\b|does not count|doesn't count|no cuenta", re.I)
 
 
 PHONE_RE = re.compile(r"\+?\d[\d\s().-]{6,}\d")
