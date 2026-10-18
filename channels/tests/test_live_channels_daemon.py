@@ -1043,3 +1043,8 @@ def test_stranger_emergency_gets_safety_first_and_alerts_owner(env):
     sent = env["tf"].sent[0][1]
     assert sent.startswith("Please turn off the water") and "alerted" in sent and "?" not in sent
     assert any(a["reason"].startswith("EMERGENCY") for a in api.list_approvals())
+
+
+def test_emergency_regex_has_no_smoker_false_positive():
+    assert not daemon.EMERGENCY_RE.search("I'm quiet, I don't smoke, I cook a lot")
+    assert daemon.EMERGENCY_RE.search("I smell gas in the kitchen") and daemon.EMERGENCY_RE.search("toilet is overflowing")

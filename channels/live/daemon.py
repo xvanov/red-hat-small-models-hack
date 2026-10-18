@@ -367,6 +367,21 @@ GATE_LABEL = {"lease": "lease", "move_in": "move-in date", "phone": "phone", "re
               "occupants": "number of people"}
 
 
+def prerecord(w, wid: str) -> None:
+    """Record what the renter's latest message already answers BEFORE the model runs (the reader, then
+    upsert_renter), so a first message with every gate item is never re-asked. Best effort."""
+    try:
+        import rentus_tools as rt
+        r = rt.call(w, "read_reply", {"thread_id": wid})
+        data = (r.get("data") or {}) if r.get("ok") else {}
+        gate = {k: v for k, v in data.items() if k in ("lease", "move_in", "phone", "occupants", "reason")
+                and isinstance(v, dict) and v.get("status") in ("answered", "exception")}
+        if gate:
+            rt.call(w, "upsert_renter", {"thread_id": wid, "fields": {"gate": gate}})
+    except Exception:
+        pass
+
+
 def gate_note(w, wid: str) -> str:
     """Per-turn status for the model, appended after the renter's words: which gate items the register already
     has (never ask them again) and which one to ask next."""
@@ -436,8 +451,9 @@ def needs_answer(text: str) -> bool:
 
 
 EMERGENCY_RE = re.compile(r"overflow|flood|water (is )?(coming|pouring|leaking) (through|from) the ceiling|"
-                          r"through the (kitchen )?ceiling|burst pipe|gas (smell|leak)|smell(s)? gas|\bfire\b|smoke|"
-                          r"sparks?|carbon monoxide|co alarm|inundaci|fuga de gas|incendio", re.I)
+                          r"through the (kitchen )?ceiling|burst pipe|gas (smell|leak)|smell(s|ing)? (gas|smoke)|"
+                          r"on fire|there'?s (a )?fire|(a )?fire in|smoke (alarm|is coming|everywhere)|sparks? (from|coming)|"
+                          r"carbon monoxide|co alarm|inundaci|fuga de gas|incendio", re.I)
 
 
 def flush(store: Store, thread_id: str, channel: str, renter_text: str, gate: dict | None = None) -> dict | None:
@@ -572,6 +588,8 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
         esc0, rep0 = len(w.escalations), len(w.owner_reports)
         inbound = {"thread_id": wid, "channel": registry.world_channel(t["channel"]),
                    "renter_name": t.get("renter_name") or "a renter", "text": "\n".join(m["text"] for m in new_in)}
+        if runner is None and t.get("role", "prospect") == "prospect":
+            prerecord(w, wid)
         status_note = gate_note(w, wid) if t.get("role", "prospect") == "prospect" else ""
         model_inbound = dict(inbound, text=inbound["text"] + status_note) if status_note else inbound
         if ADAPTER is not None:
