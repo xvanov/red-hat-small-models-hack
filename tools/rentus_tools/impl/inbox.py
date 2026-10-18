@@ -11,6 +11,7 @@ from ._util import dollar_figures, need
 from .listings import allowed_figures
 from .reader import read_reply_fallback
 from .guards import booking_claims, has_confirmed_showing, language_mismatch
+from .demand_guards import first_person_hint, owner_names, third_person_refs
 from .style import lease_terms, style_violations
 
 # A renter asking for less than a year, in words the regex reader's shorter_lease intent can miss
@@ -105,6 +106,11 @@ def send_message(world, thread_id: str, text: str, attachments: list[str] | None
                              "'I've penciled in Saturday at 11 AM and will confirm it shortly' "
                              "('te propongo el sábado a las 11, te lo confirmo en breve')",
                         details={"rules": ["showing_not_confirmed"], "claims": claims})
+    # First person (concierge spec R-VOICE-1): messages go out as the owner, never about "the owner".
+    third = third_person_refs(text, owner_names(world))
+    if third:
+        raise ToolError("POLICY_BLOCKED", "message refers to the owner in the third person: " + ", ".join(map(repr, third)),
+                        hint=first_person_hint(text), details={"rules": ["first_person"], "rewrite": True, "phrases": third})
     room, listing = thread_room(world, t)
     figs = dollar_figures(text)
     if figs:

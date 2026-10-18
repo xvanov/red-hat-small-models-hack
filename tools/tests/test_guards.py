@@ -68,7 +68,7 @@ def test_send_message_blocks_claim_without_confirmed_event(world):
     _with_showing(world, "proposed")  # proposed is still not confirmed
     call_err(world, "send_message", {"thread_id": "T001", "text": "See you Saturday at 11."}, "POLICY_BLOCKED")
     call_ok(world, "send_message", {"thread_id": "T001",
-                                    "text": "I proposed Saturday at 11 AM, pending the owner's confirmation."})
+                                    "text": "I proposed Saturday at 11 AM, pending my confirmation."})
 
 
 def test_send_message_allows_claim_after_owner_confirms(world):
@@ -83,7 +83,7 @@ def test_confirmed_event_for_another_renter_does_not_count(world):
 
 
 def test_send_message_allows_precise_non_claims(world):
-    for text in ("Please confirm your phone number.", "I'll confirm with the owner and get back to you."):
+    for text in ("Please confirm your phone number.", "I'll confirm the details and get back to you."):
         call_ok(world, "send_message", {"thread_id": "T001", "text": text})
 
 
