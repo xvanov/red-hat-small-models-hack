@@ -32,7 +32,7 @@ Needs the local vLLM endpoints from `.env`: `OPERATOR_BASE_URL` (Nemotron 3.5 Li
 
 ## Steps
 
-Every step is idempotent (model replies are cached in `work/cache/`, randomness is seeded per thread) and takes `--fixture`, `--limit N` and `--workers N`.
+Every step is idempotent (model replies are cached in `work/cache/`, randomness is seeded per thread) and takes `--fixture`, `--limit N`, `--sample N` and `--concurrency N`.
 
 | Step | Does | Writes |
 |---|---|---|
