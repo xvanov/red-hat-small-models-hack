@@ -88,12 +88,21 @@ def _publish(listing: dict, channel: str, target: str, base_url: str | None, sub
         r = Runner(page, spec, path, platform=channel, target=target,
                    repairer=_repairer(repair, proposer, changelog_path))
         page.goto(r.url("start_url", base), wait_until="domcontentloaded")
+        if target == "live":  # single-page apps redirect to their sign-in page after the first paint
+            try:
+                page.wait_for_load_state("networkidle", timeout=int(spec.get("settle_ms", 6000)))
+            except Exception:
+                pass
         r.check_login()
         res = r.run_flow(values, submit=submit)
         data: dict[str, Any] = {"post_id": res.get("post_id"), "url": res.get("url") or page.url,
                                 "status": res["status"], "screenshot": res["screenshot"], "channel": channel,
                                 "target": target, "filled": r.filled, "repairs": r.repairs}
-        if res["status"] == "ready_to_submit":
+        if res.get("stage"):
+            data.update(stage=res["stage"], needs=res.get("needs"), hint=res.get("hint"))
+            data["note"] = (f"filled everything reachable without an account and stopped at {res['stage']}; "
+                            f"needs {res.get('needs')}. Nothing was posted.")
+        elif res["status"] == "ready_to_submit":
             data["note"] = "form filled; stopped before the final button. Nothing was posted."
         return data
 

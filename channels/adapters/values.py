@@ -76,6 +76,13 @@ def prepare(platform: str, listing: dict, *, target: str) -> dict:
         "home_type": "Room only",
         "min_stay": _min_stay(room.get("lease_min_months")),
         "category": "rooms & shares",
+        # craigslist's required drop-downs (exact option text). laundry/parking come from the room record when
+        # it has them; otherwise these defaults are filled and the owner checks them on the screenshot.
+        "private_room_text": "private room" if room.get("type", "private_room") != "shared_room" else "room not private",
+        "rent_period_text": "month",
+        "housing_type_text": room.get("housing_type") or "house",
+        "laundry_text": room.get("laundry") or "laundry on site",
+        "parking_text": room.get("parking") or "off-street parking",
         "room_name": room.get("room_id") or listing.get("title"),
         "room_size": room.get("size") or "Medium",
         "cat_friendly": "cat" in pets or pets in ("yes", "true", "allowed"),

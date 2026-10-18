@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -189,7 +190,31 @@ class Runner:
     def url(self, key: str, base_url: str) -> str:
         return self.spec[key].replace("{base}", base_url.rstrip("/"))
 
+    def login_hint(self) -> str:
+        return f"owner runs: channels/.venv/bin/python -m channels.login {self.platform}"
+
     def check_login(self) -> None:
+        """Raise LOGIN_REQUIRED on a login page, or (live) on a bot challenge page such as Cloudflare's
+        "Just a moment...": a headed login in the owner's profile clears both."""
+        bot = self.spec.get("bot_wall_title")
+        if bot and self.target == "live":
+            try:
+                title = self.page.title()
+            except Exception:
+                title = ""
+            if re.search(bot, title or "", re.I):
+                raise AdapterError(
+                    "LOGIN_REQUIRED", f"{self.platform} shows a bot check ('{title}') instead of the page",
+                    hint=self.login_hint() + "  (pass the check once in that window, log in, close it)",
+                    details={"reason": "bot_challenge", "url": self.page.url,
+                             "screenshot": screenshot(self.page, self.platform, self.target, "-login")})
+        want = self.spec.get("expect_url_contains")
+        if want and self.target == "live" and want not in (self.page.url or ""):
+            raise AdapterError(
+                "LOGIN_REQUIRED", f"{self.platform} redirected away from the form (to {self.page.url}); not logged in",
+                hint=self.login_hint(),
+                details={"reason": "redirected", "url": self.page.url,
+                         "screenshot": screenshot(self.page, self.platform, self.target, "-login")})
         sel = self.spec.get("login_wall")
         if not sel:
             return
@@ -197,9 +222,10 @@ class Runner:
             if self.page.locator(sel).filter(visible=True).count() > 0:
                 raise AdapterError(
                     "LOGIN_REQUIRED", f"{self.platform} shows a login page",
-                    hint=(f"owner runs: channels/.venv/bin/python -m channels.login {self.platform}"
-                          if self.target == "live" else "mock login wall is on: switch it off at the mock control panel"),
-                    details={"screenshot": screenshot(self.page, self.platform, self.target, "-login")})
+                    hint=(self.login_hint() if self.target == "live"
+                          else "mock login wall is on: switch it off at the mock control panel"),
+                    details={"reason": "login_page", "url": self.page.url,
+                             "screenshot": screenshot(self.page, self.platform, self.target, "-login")})
         except AdapterError:
             raise
         except Exception:
@@ -239,6 +265,26 @@ class Runner:
             return None
         return None
 
+    FORBIDDEN_CLICK = r"\b(publish|post (it|now|listing|ad)|submit|place (ad|listing)|go live|make (it )?live|send)\b"
+
+    def guard_click(self, key: str, loc) -> None:
+        """Live safety net: never click anything that reads like the final button, whatever the selector
+        file or a repair says. The final button is only ever located by a stop_before step."""
+        if self.target != "live":
+            return
+        pat = self.spec.get("forbidden_click", self.FORBIDDEN_CLICK)
+        try:
+            label = " ".join(x for x in (loc.inner_text(timeout=1000) or "",
+                                         loc.get_attribute("value") or "", loc.get_attribute("aria-label") or "") if x)
+        except Exception:
+            label = ""
+        url_pat = self.spec.get("forbidden_click_url")
+        if re.search(pat, label, re.I) or (url_pat and re.search(url_pat, self.page.url)):
+            raise AdapterError("POLICY_BLOCKED",
+                               f"{self.platform}: refused to click '{key}' ('{label.strip()[:60]}') on a live site",
+                               hint="the final button is the owner's click; the adapter stops before it",
+                               details={"screenshot": screenshot(self.page, self.platform, self.target, "-blocked")})
+
     def _click_and_verify(self, key: str, loc, step: dict) -> None:
         """Click; if the selector was repaired just now, the page must visibly progress, else the
         repair is reverted and the repair loop runs again with that selector excluded."""
@@ -248,8 +294,14 @@ class Runner:
         for _attempt in range(3):
             entry = self.last_repair
             before = fingerprint(self.page)
+            self.guard_click(key, loc)
             loc.click()
             self.page.wait_for_timeout(int(step.get("wait_ms", 150)))
+            try:
+                self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout_ms)
+            except Exception:
+                pass
+            self.check_login()
             msg = self._validation_error()
             if msg:
                 raise AdapterError("INVALID_ARGS", f"{self.platform} rejected the form: {msg}",
@@ -271,6 +323,20 @@ class Runner:
         for step in self.spec["flow"]:
             do, key = step["do"], step.get("el")
             vkey = step.get("value")
+            if step.get("url_contains") and step["url_contains"] not in self.page.url:
+                continue
+            if do == "stop_if_empty":
+                # e.g. craigslist without an account: no contact email to continue with. Everything up to
+                # here is filled; stop, screenshot, and tell the owner what unlocks the rest.
+                el = self.spec["elements"][key]
+                loc = try_selector(self.page, el["selector"], el, 800)
+                have = values.get(vkey) not in (None, "") or (loc is not None and (loc.input_value() or "").strip())
+                if have:
+                    continue
+                result.update(status="ready_to_submit", stage=step.get("stage", key),
+                              screenshot=screenshot(self.page, self.platform, self.target, "-partial"),
+                              needs=step.get("needs", f"'{vkey}'"), hint=self.login_hint())
+                return result
             if vkey is not None and values.get(vkey) in (None, "", []) and do != "check":
                 if step.get("optional", True) and not step.get("required"):
                     continue
@@ -301,6 +367,8 @@ class Runner:
             val = values.get(vkey) if vkey else None
             if do == "fill":
                 loc.fill(str(val))
+                if step.get("press"):
+                    loc.press(step["press"])
             elif do == "fill_if_empty":
                 if not (loc.input_value() or "").strip():
                     loc.fill(str(val))
@@ -311,7 +379,8 @@ class Runner:
                     loc.select_option(value=str(val), timeout=2000)
             elif do == "choose":
                 loc.click()
-                self.page.get_by_role("option", name=str(val), exact=False).first.click(timeout=self.timeout_ms)
+                self.page.get_by_role("option", name=str(val), exact=bool(step.get("exact"))).first.click(
+                    timeout=self.timeout_ms)
             elif do == "check":
                 loc.set_checked(bool(val) if vkey else True)
             elif do == "upload":
