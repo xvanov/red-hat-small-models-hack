@@ -19,7 +19,7 @@ import traceback
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from . import config, outbound, providers, registry
+from . import compose, config, outbound, providers, registry
 from .store import CHANNEL_WORLD, Store, now_iso
 
 REPO = config.REPO
@@ -44,10 +44,21 @@ MAX_TURN_ATTEMPTS = 3
 # ====================================================================== adapter (send_message -> real send)
 
 class LiveSendAdapter:
-    """rentus_tools LiveAdapter for the live sms / email / facebook_page threads of this daemon."""
+    """rentus_tools LiveAdapter for the live threads of this daemon.
+
+    During a daemon turn (begin_turn .. take_buffer) send_message calls are buffered and delivered at turn end as
+    one composed reply (compose.py). Outside a turn they are delivered immediately."""
 
     def __init__(self, store: Store):
         self.store = store
+        self.buffer: dict[str, list[str]] | None = None
+
+    def begin_turn(self) -> None:
+        self.buffer = {}
+
+    def take_buffer(self) -> dict[str, list[str]]:
+        b, self.buffer = self.buffer or {}, None
+        return b
 
     def publish_listing(self, world, listing, channel):
         from rentus_tools.errors import ToolError
@@ -55,7 +66,12 @@ class LiveSendAdapter:
 
     def send_message(self, world, thread, text, attachments):
         from rentus_tools.errors import ToolError
-        res = outbound.deliver(self.store, thread.get("live_id") or thread["thread_id"], text, origin="operator")
+        live_id = thread.get("live_id") or thread["thread_id"]
+        if self.buffer is not None:
+            self.buffer.setdefault(live_id, []).append(text)
+            return {"status": "sent", "screenshot": None,
+                    "note": "queued: this turn's messages go out together as one reply when the turn ends"}
+        res = outbound.deliver(self.store, live_id, text, origin="operator")
         if res["status"] == "sent":
             return {"status": "sent", "screenshot": None, "external_message_id": res.get("provider_id")}
         if res["status"] == "awaiting_approval":
@@ -64,9 +80,14 @@ class LiveSendAdapter:
         raise ToolError("UPSTREAM_ERROR", f"send failed: {res.get('error')}", retryable=False)
 
 
+ADAPTER: LiveSendAdapter | None = None
+
+
 def register_adapters(store: Store) -> LiveSendAdapter:
     from rentus_tools import live
+    global ADAPTER
     a = LiveSendAdapter(store)
+    ADAPTER = a
     registry.load_from_env()
     for ch in set(CHANNEL_WORLD.values()) | {spec.world_channel for spec in registry.EXTRA.values()}:
         live.register(ch, a)
@@ -243,6 +264,38 @@ def readable(text: str, n: int = 280) -> str:
     return s if len(s) <= n else s[:n - 1] + "…"
 
 
+def with_live_note(history, cfg, w):
+    """The live-channel note (compose.LIVE_NOTE) appended to the operator's system prompt. No operator hook
+    exists for extra instructions, so the daemon builds the first system message itself (the same load_prompt
+    the loop would call) and passes it as history; older threads get the note added to their system message."""
+    from rentus_operator import toolbox
+    from rentus_operator.config import load_prompt
+    if history:
+        h = list(history)
+        if h and h[0].get("role") == "system" and compose.LIVE_NOTE not in (h[0].get("content") or ""):
+            h[0] = {**h[0], "content": (h[0].get("content") or "") + "\n\n" + compose.LIVE_NOTE}
+        return h
+    pol = toolbox.state(w).get("policy") or {}
+    facts = {"today": toolbox.today(w), "spend_limit_usd": pol.get("spend_limit_usd"),
+             "showing_hours": pol.get("showing_hours")}
+    return [{"role": "system", "content": load_prompt(cfg, facts) + "\n\n" + compose.LIVE_NOTE}]
+
+
+def flush(store: Store, thread_id: str, channel: str, renter_text: str) -> dict | None:
+    """Deliver this turn's buffered operator messages as one composed reply. Returns a trace entry."""
+    if ADAPTER is None:
+        return None
+    texts = ADAPTER.take_buffer().get(thread_id, [])
+    if not texts:
+        return None
+    parts = compose.compose(texts, channel, renter_text)
+    results = [outbound.deliver(store, thread_id, p, origin="operator") for p in parts]
+    ok = all(r.get("status") in ("sent", "awaiting_approval") for r in results)
+    return {"ts": now_iso(), "actor": "tool", "name": "deliver_reply", "ok": ok,
+            "summary": f"{len(texts)} operator message(s) sent as {len(parts)} {channel} message(s): "
+                       + ", ".join(r.get("status", "?") for r in results)}
+
+
 def _pid_alive(pid) -> bool:
     try:
         os.kill(int(pid), 0)
@@ -304,10 +357,13 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
         esc0, rep0 = len(w.escalations), len(w.owner_reports)
         inbound = {"thread_id": wid, "channel": registry.world_channel(t["channel"]),
                    "renter_name": t.get("renter_name") or "a renter", "text": "\n".join(m["text"] for m in new_in)}
+        if ADAPTER is not None:
+            ADAPTER.begin_turn()
         if runner is None:
             from rentus_operator import toolbox
             from rentus_operator.loop import run
             cfg = _config()
+            history = with_live_note(history, cfg, w)
             be = toolbox.backend("real")
             run_id = f"live_{thread_id.replace(':', '_')}_{int(time.time())}"
             sink = toolbox.make_sink(be, run_id, path=store.root / "events" / f"{run_id}.jsonl")
@@ -315,13 +371,20 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
         else:
             res = runner(w, inbound, history)
     except Exception as e:
+        if ADAPTER is not None:
+            ADAPTER.take_buffer()  # nothing from a failed turn goes out; the retry rebuilds it
         return _fail_turn(store, thread_id, f"{type(e).__name__}: {str(e)[:200]}")
     if getattr(res, "status", None) == "model_error":
+        if ADAPTER is not None:
+            ADAPTER.take_buffer()
         return _fail_turn(store, thread_id, "model_error: " + str(getattr(res, "final_text", "") or "")[:160])
+    delivered = flush(store, thread_id, t["channel"], inbound["text"])
     with store.locked():
         t = store.get_thread(thread_id)
         t["busy"], t["busy_since"], t["turn_owner"] = False, None, None
         t["turn_attempts"] = 0
+        if delivered:
+            t["trace"].append(delivered)
         t["world"] = w.to_dict()
         t["history"] = res.messages
         t["world_synced"] = sorted(synced | {m["id"] for m in new_in})

@@ -209,7 +209,7 @@ def test_operator_turn_sends_for_real_and_escalates(env):
     assert env["tf"].sent == [(OWNER_PHONE, "Yes, it is available Nov 1. When are you looking to move in?")]
     t = api.get_thread(tid)
     assert [m["direction"] for m in t["messages"]] == ["in", "out"] and t["messages"][1]["status"] == "sent"
-    assert t["needs_owner"] and {x["name"] for x in t["trace"]} == {"send_message", "escalate_to_owner"}
+    assert t["needs_owner"] and {x["name"] for x in t["trace"]} == {"send_message", "escalate_to_owner", "deliver_reply"}
     aps = api.list_approvals()
     assert aps[0]["draft_text"] == "Let me check on pets."
     assert api.decide(aps[0]["id"], "deny")["ok"]
@@ -433,3 +433,62 @@ def test_c_one_readable_report_per_thread(env):
     assert len(reps) == 1
     assert "t_sms" not in reps[0]["reason"] and "renter:" not in reps[0]["reason"]
     assert "Asked for move-in date." in reps[0]["reason"]
+
+
+# ---------------------------------------------------------------- round 3: one reply per turn, answer first
+
+BURST = ["It's a bedroom in a house on Appling Way in Durham, with a private bathroom and its own entrance.",
+         "Rent is $750 a month.", "It's available from November 1, and the lease is 1 year.",
+         "How long do you want to stay? Is a one year lease okay with you?",
+         "Is a one year lease okay with you?"]
+
+
+def test_compose_dedupes_keeps_last_question_and_answers_first():
+    from channels.live import compose
+    parts = compose.compose(BURST, "sms", "Hello, how much is the rent?")
+    text = " ".join(parts)
+    assert text.startswith("Rent is $750 a month.")
+    assert text.count("?") == 1 and text.endswith("Is a one year lease okay with you?")
+    assert len(parts) == 1 and len(parts[0]) <= compose.SMS_MAX
+    assert compose.compose(["Hi there.", "hi there!"], "sms") == ["Hi there."]
+
+
+def test_compose_splits_long_sms_in_two_and_email_is_one():
+    from channels.live import compose
+    long = [f"Fact number {i} about the room is quite a long sentence to read." for i in range(8)] + ["Okay?"]
+    sms = compose.compose(long, "sms")
+    assert len(sms) == 2 and sms[1].endswith("Okay?")
+    assert len(compose.compose(long, "email")) == 1
+    assert len(compose.compose(long, "messenger")) <= 2
+
+
+def test_burst_of_sends_goes_out_as_one_sms(env):
+    import rentus_tools as rt
+    daemon.register_adapters(env["store"])
+    env["tf"].push(OWNER_PHONE, "Hello, how much is the rent?", "SM-60")
+    daemon.poll_all(env["store"])
+    tid = api.list_threads()[0]["thread_id"]
+
+    def runner(w, inbound, h):
+        for text in BURST[1:4]:
+            assert rt.call(w, "send_message", {"thread_id": inbound["thread_id"], "text": text})["ok"]
+        return _Res([])
+
+    daemon.run_turn(env["store"], tid, runner=runner)
+    assert len(env["tf"].sent) == 1
+    sent = env["tf"].sent[0][1]
+    assert sent.startswith("Rent is $750 a month.") and sent.count("?") == 1
+    outs = [m for m in api.get_thread(tid)["messages"] if m["direction"] == "out"]
+    assert len(outs) == 1 and outs[0]["status"] == "sent"
+
+
+def test_live_note_is_added_to_the_system_prompt(env):
+    from channels.live import compose
+    from rentus_operator.config import RunConfig
+    w = daemon._new_world({"thread_id": "sms:0001:abc", "channel": "sms", "renter_name": ""})
+    h = daemon.with_live_note(None, RunConfig(**daemon.FINAL_CONFIG), w)
+    assert h[0]["role"] == "system" and h[0]["content"].endswith(compose.LIVE_NOTE)
+    old = [{"role": "system", "content": "old prompt"}, {"role": "user", "content": "x"}]
+    h2 = daemon.with_live_note(old, None, w)
+    assert compose.LIVE_NOTE in h2[0]["content"] and h2[1] == old[1]
+    assert daemon.with_live_note(h2, None, w)[0]["content"].count(compose.LIVE_NOTE) == 1
