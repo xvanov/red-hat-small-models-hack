@@ -22,10 +22,39 @@ from . import config
 from .store import Store, now_iso, short_hash
 
 DISCLOSURE = "You're chatting with Rentus Homes' AI assistant (demo). Reply STOP to end."
+OPEN_DISCLOSURE = "Hi, you're chatting with Rentus Homes' AI assistant."
+
+
+def open_mode() -> bool:
+    """LIVE_PUBLIC_MODE=open (owner decision): everyone who writes to the 888 line, the Page or the public email
+    address is enrolled as a prospect, no keyword."""
+    return (config.env("LIVE_PUBLIC_MODE", "") or "").strip().lower() == "open"
+
+
+def keyword_mode() -> bool:
+    return (config.env("LIVE_PUBLIC_DEMO", "0") or "0").strip() == "1"
 
 
 def enabled() -> bool:
-    return (config.env("LIVE_PUBLIC_DEMO", "0") or "0").strip() == "1"
+    return open_mode() or keyword_mode()
+
+
+def disclosure() -> str:
+    return OPEN_DISCLOSURE if open_mode() else DISCLOSURE
+
+
+def is_automated(channel: str, contact: str, meta: dict | None = None) -> bool:
+    """Bot-loop guard: SMS short codes / non-NANP senders, email auto-replies, lists, no-reply addresses."""
+    meta = meta or {}
+    if channel == "sms":
+        return not re.fullmatch(r"\+1\d{10}", config.normalize_phone(contact) or "")
+    if channel == "email":
+        c = (contact or "").lower()
+        if re.search(r"(^|[._+-])(no-?reply|do-?not-?reply|mailer-daemon|postmaster|bounce[s]?|notifications?)"
+                     r"([._+-]|@)", c):
+            return True
+        return bool(meta.get("automated"))
+    return False
 
 
 def code() -> str:
@@ -38,8 +67,9 @@ def has_code(text: str) -> bool:
 
 
 def max_per_day() -> int:
+    d = "30" if open_mode() else "20"
     try:
-        return int(config.env("LIVE_DEMO_MAX_PER_DAY", "20") or 20)
+        return int(config.env("LIVE_DEMO_MAX_PER_DAY", d) or d)
     except ValueError:
         return 20
 
@@ -58,6 +88,18 @@ def load(store: Store) -> dict:
     return d
 
 
+def open_since(store: Store) -> str | None:
+    """When open mode was first seen on (messages older than this are never answered: no backlog). Caller holds
+    the lock."""
+    if not open_mode():
+        return None
+    d = load(store)
+    if not d.get("open_since"):
+        d["open_since"] = now_iso()
+        save(store, d)
+    return d["open_since"]
+
+
 def save(store: Store, d: dict) -> None:
     store._write(_path(store), d)
 
@@ -70,13 +112,27 @@ def is_enrolled(store: Store, channel: str, contact: str) -> bool:
     return enabled() and _key(channel, contact) in load(store)["enrolled"].get(channel, {})
 
 
-def admit(store: Store, channel: str, contact: str, text: str) -> bool:
-    """Decide for an unlisted sender (caller holds the store lock). True = demo contact, process the message."""
-    if not enabled():
+def admit(store: Store, channel: str, contact: str, text: str, *, ts: str | None = None,
+          meta: dict | None = None) -> bool:
+    """Decide for an unlisted sender (caller holds the store lock). True = public contact, process the message."""
+    if not enabled() or is_automated(channel, contact, meta):
         return False
+    if open_mode():
+        since = open_since(store)
+        if ts and since:
+            from datetime import datetime
+            try:
+                if datetime.fromisoformat(ts.replace("Z", "+00:00")) < datetime.fromisoformat(since):
+                    return False  # backlog from before open mode: never answered
+            except ValueError:
+                pass
     d = load(store)
     k = _key(channel, contact)
     if k in d["enrolled"].get(channel, {}):
+        return True
+    if open_mode():
+        d["enrolled"].setdefault(channel, {})[k] = now_iso()
+        save(store, d)
         return True
     h = short_hash(k)
     if h in d["ineligible"].get(channel, []):

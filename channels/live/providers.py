@@ -264,10 +264,14 @@ class ResendGmailEmail:
             return None
         subj = str(msg.get("Subject", ""))
         refs = str(msg.get("References", "")).split()
+        auto = str(msg.get("Auto-Submitted", "no")).strip().lower()
+        automated = (auto not in ("", "no") or any(msg.get(h) for h in ("List-Id", "List-Unsubscribe", "X-Autoreply",
+                                                                         "X-Autorespond"))
+                     or str(msg.get("Precedence", "")).strip().lower() in ("bulk", "junk", "list", "auto_reply"))
         return {"channel": "email", "contact": addr, "text": strip_quoted(body_text(msg)),
                 "ext_id": mid, "ts": ts.isoformat() if ts else None, "line": self.cfg.from_addr,
                 "line_last4": None, "renter_name": (getaddresses(msg.get_all("From", []))[0][0] or None),
-                "meta": {"subject": subj, "message_id": mid, "references": refs,
+                "meta": {"subject": subj, "message_id": mid, "references": refs, "automated": automated,
                          "in_reply_to": str(msg.get("In-Reply-To", "")).strip()}}
 
     def gmail_thread_ids(self, header: str, value: str) -> list[str]:
@@ -315,6 +319,7 @@ class Messenger:
         self.http = http or httpx
         self._creds = creds
         self._page_name = None
+        self._conv_seen: dict = {}
 
     def creds(self) -> tuple[str, str]:
         if self._creds is None:
@@ -386,12 +391,15 @@ class Messenger:
             psid = next((p.get("id") for p in parts if p.get("id") in allow.psids), None)
             if not psid and include_unlisted:
                 psid = next((p.get("id") for p in parts if p.get("id") != page_id), None)
+                if psid and self._conv_seen.get(conv["id"]) == conv.get("updated_time"):
+                    continue  # unchanged since the last poll: no Graph call (rate limits)
             if not psid:
                 continue  # not allowlisted: no message text is fetched
             name = next((p.get("name") for p in parts if p.get("id") == psid), None)
             code, body = self._req("GET", conv["id"], params={"fields": "messages.limit(10){id,created_time,from,message}"})
             if code != 200:
                 continue
+            self._conv_seen[conv["id"]] = conv.get("updated_time")
             for m in (body.get("messages") or {}).get("data", []):
                 if (m.get("from") or {}).get("id") != psid or m.get("id") in seen or not (m.get("message") or "").strip():
                     continue

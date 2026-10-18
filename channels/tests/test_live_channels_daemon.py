@@ -691,3 +691,56 @@ def test_demo_stop_ends_it(demo_env):
     demo_env["tf"].push(STRANGER, "hello again", "SM-s3")
     _tick(demo_env)
     assert len(demo_env["tf"].sent) == 1 and api.list_threads()[0]["opted_out"]
+
+
+# ---------------------------------------------------------------- public OPEN mode (owner decision: no keyword)
+
+@pytest.fixture
+def open_env(demo_env, monkeypatch):
+    monkeypatch.setenv("LIVE_PUBLIC_DEMO", "0")
+    monkeypatch.setenv("LIVE_PUBLIC_MODE", "open")
+    return demo_env
+
+
+def _push_at(fake, frm, text, sid, ts):
+    fake.push(frm, text, sid)
+    fake.inbox[-1]["ts"] = ts
+
+
+def test_open_mode_enrolls_anyone_and_discloses(open_env):
+    from datetime import datetime, timezone
+    _push_at(open_env["tf"], STRANGER, "how much is the room?", "SM-o1", datetime.now(timezone.utc).isoformat())
+    _tick(open_env)
+    s = api.list_threads()[0]
+    assert s["demo"] and s["role"] == "prospect"
+    assert open_env["tf"].sent[0][1].startswith("Hi, you're chatting with Rentus Homes' AI assistant. Rent is $750")
+    assert demo.max_per_day() == 30
+
+
+def test_open_mode_skips_backlog_short_codes_and_bots(open_env):
+    from datetime import datetime, timedelta, timezone
+    old = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    with open_env["store"].locked():
+        demo.open_since(open_env["store"])  # open mode switched on now
+    _push_at(open_env["tf"], STRANGER, "old message", "SM-o2", old)
+    _push_at(open_env["tf"], "72345", "Your code is 1234", "SM-o3", datetime.now(timezone.utc).isoformat())
+    _tick(open_env)
+    assert api.list_threads() == [] and open_env["tf"].sent == []
+    assert demo.is_automated("email", "no-reply@zillow.com") and demo.is_automated("email", "MAILER-DAEMON@x.com")
+    assert demo.is_automated("email", "jane@example.com", {"automated": True})
+    assert not demo.is_automated("email", "jane@example.com") and not demo.is_automated("sms", "+19195550199")
+
+
+def test_open_mode_global_cap_default(open_env, monkeypatch):
+    monkeypatch.delenv("LIVE_MAX_PER_HOUR")
+    monkeypatch.setattr(config, "_repo_env", lambda: {})
+    assert config.max_per_hour() == 150
+
+
+def test_open_mode_owner_contacts_keep_their_role(open_env, monkeypatch):
+    from datetime import datetime, timezone
+    monkeypatch.setenv("LIVE_ROLE_SMS", "tenant")
+    _push_at(open_env["tf"], OWNER_PHONE, "sink leaking", "SM-o4", datetime.now(timezone.utc).isoformat())
+    daemon.poll_all(open_env["store"])
+    s = api.list_threads()[0]
+    assert s["role"] == "tenant" and not s["demo"]

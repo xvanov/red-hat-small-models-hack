@@ -141,7 +141,8 @@ def poll_all(store: Store, provs: dict | None = None, allow: config.Allowlist | 
             is_demo = False
             if not listed and demo_on and it["channel"] in ("sms", "email", "messenger"):
                 with store.locked():
-                    is_demo = demo.admit(store, it["channel"], it["contact"], it["text"])
+                    is_demo = demo.admit(store, it["channel"], it["contact"], it["text"], ts=it.get("ts"),
+                                         meta=it.get("meta"))
             if not listed and not is_demo and not (spec and spec.drafts_for_unlisted()):
                 continue  # never stored, never passed to a model
             with store.locked():
@@ -329,7 +330,7 @@ def flush(store: Store, thread_id: str, channel: str, renter_text: str) -> dict 
     with store.locked():
         tt = store.get_thread(thread_id) or {}
     if tt.get("demo") and not tt.get("disclosed") and parts:
-        parts[0] = demo.DISCLOSURE + ("\n\n" if channel == "email" else " ") + parts[0]
+        parts[0] = demo.disclosure() + ("\n\n" if channel == "email" else " ") + parts[0]
     results = [outbound.deliver(store, thread_id, p, origin="operator") for p in parts]
     ok = all(r.get("status") in ("sent", "awaiting_approval") for r in results)
     if tt.get("demo") and any(r.get("status") == "sent" for r in results):
@@ -540,9 +541,11 @@ def main(once: bool = False) -> int:
             if changed:
                 store.save_thread(t)
     register_adapters(store)
+    with store.locked():
+        since = demo.open_since(store)  # open mode: messages from before this moment are never answered
     allow = config.Allowlist.load()
     print(time.strftime("%H:%M:%S"), f"live daemon pid={os.getpid()}: dir={store.root} allowlist={allow.size()} "
-          f"send_enabled={config.send_enabled()} lines={[str(l) for l in config.sms_lines()]}", flush=True)
+          f"send_enabled={config.send_enabled()} public={'open since ' + since if since else ('keyword' if demo.keyword_mode() else 'off')} lines={[str(l) for l in config.sms_lines()]}", flush=True)
     while True:
         try:
             r = tick(store)

@@ -179,8 +179,10 @@ def send_enabled() -> bool:
 
 def max_per_hour() -> int:
     try:
+        open_on = (env("LIVE_PUBLIC_MODE", "") or "").strip().lower() == "open"
         demo_on = (env("LIVE_PUBLIC_DEMO", "0") or "0").strip() == "1"
-        return int(env("LIVE_MAX_PER_HOUR", "120" if demo_on else "30") or (120 if demo_on else 30))
+        d = 150 if open_on else 120 if demo_on else 30
+        return int(env("LIVE_MAX_PER_HOUR", str(d)) or d)
     except ValueError:
         return 30
 
