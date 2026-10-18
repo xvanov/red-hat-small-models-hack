@@ -27,6 +27,27 @@ _LOCK = threading.Lock()
 PLATFORMS = ("marketplace", "roomies", "craigslist", "padsplit")
 
 
+def listing_channels() -> list[str]:
+    """Where the Assistant may post (CONSOLE_LISTING_CHANNELS). Platforms left out are refused at the tool and hidden on the card."""
+    raw = os.environ.get("CONSOLE_LISTING_CHANNELS") or "facebook_page,craigslist,roomies,padsplit"
+    return [c.strip() for c in raw.split(",") if c.strip()]
+
+
+class DisabledChannel:
+    """Live adapter for a platform the owner switched off: publish is refused before any browser opens."""
+
+    def __init__(self, channel: str):
+        self.channel = channel
+
+    def publish_listing(self, world, listing, channel):
+        from rentus_tools.errors import ToolError
+        raise ToolError("POLICY_BLOCKED", f"the owner turned off posting to {channel}",
+                        hint="skip this channel; post only to the others")
+
+    def send_message(self, world, thread, text, attachments):
+        return {"status": "ready_to_submit", "screenshot": None, "note": "draft only"}
+
+
 def register() -> dict:
     """Register the live adapters once per process. Returns {"ok", "info"|"error"}."""
     with _LOCK:
@@ -37,6 +58,11 @@ def register() -> dict:
             try:
                 from rentus_tools import live
                 _REG["info"] = {k: str(v) for k, v in (live.register_live("live", photo_dir=photo_dir()) or {}).items()}
+                on = set(listing_channels())
+                for ch in PLATFORMS:
+                    if ch not in on:
+                        live.register(ch, DisabledChannel(ch))
+                _REG["info"]["listing_channels"] = ",".join(sorted(on))
             except Exception as e:
                 _REG["error"] = f"{type(e).__name__}: {e}"
         return {"ok": _REG["error"] is None, "info": _REG["info"], "error": _REG["error"]}
@@ -110,7 +136,10 @@ def posts(listings: list[dict], events: list[dict], fb: dict) -> list[dict]:
         lid = l.get("listing_id")
         rows = []
         chans = list(dict.fromkeys(list((l.get("channels") or {}).keys()) + [c for (x, c) in failed if x == lid]))
+        on = set(listing_channels())
         for ch in chans:
+            if ch not in on:  # switched off by the owner: not shown
+                continue
             entry = (l.get("channels") or {}).get(ch)
             if entry:
                 entry = entry if isinstance(entry, dict) else {"status": str(entry)}
@@ -147,11 +176,12 @@ def posts(listings: list[dict], events: list[dict], fb: dict) -> list[dict]:
                 else:
                     rows.append({"channel": ch, "state": "failed", "label": "Failed", "detail": err.get("message") or code})
         f = fb.get(lid) or {}
-        rows.insert(0, {"channel": "facebook_page", "state": f.get("state") or "not_prepared",
-                        "label": {"draft": "Draft on Page, not visible yet", "published": "Published",
-                                  "failed": "Not published"}.get(f.get("state"), "Ready to publish"),
-                        "detail": f.get("error"), "url": f.get("permalink"), "post_id": f.get("post_id"),
-                        "preview": post_text(l), "photos": [_rel(p) for p in room_photos()[:4]]})
+        if "facebook_page" in on:
+            rows.insert(0, {"channel": "facebook_page", "state": f.get("state") or "not_prepared",
+                            "label": {"draft": "Draft on Page, not visible yet", "published": "Published",
+                                      "failed": "Not published"}.get(f.get("state"), "Ready to publish"),
+                            "detail": f.get("error"), "url": f.get("permalink"), "post_id": f.get("post_id"),
+                            "preview": post_text(l), "photos": [_rel(p) for p in room_photos()[:4]]})
         out.append({"listing_id": lid, "title": l.get("title"), "body": l.get("body"), "price": l.get("price"),
                     "status": l.get("status"), "channels": rows})
     return out
