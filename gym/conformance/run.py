@@ -128,6 +128,8 @@ def main():
     ap.add_argument("--items", default=None, help="comma-separated item ids, e.g. C14,C23")
     ap.add_argument("--stages", default=None)
     ap.add_argument("--retry-errors", type=int, default=2, help="rerun scenarios that never reached the model")
+    ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                    help="extra RunConfig override on top of the variant, e.g. --set prompt_version=v4 --set tool_descriptions=concierge")
     ap.add_argument("--base-url", default=None)
     ap.add_argument("--model", default=None)
     a = ap.parse_args()
@@ -163,6 +165,12 @@ def main():
         if a.model:
             pa.model = a.model
         cfg, backend = ablate.variant_config(pa, a.variant)
+        for kv in a.set:
+            k, v = kv.split("=", 1)
+            v = {"true": True, "false": False}.get(v.lower(), v)
+            if isinstance(v, str) and v.replace(".", "", 1).isdigit():
+                v = float(v) if "." in v else int(v)
+            cfg = cfg.with_(**{k: v})
         models = run_eval.probe_models(cfg.base_url, cfg.api_key) or []
         if not a.model and models and cfg.model not in models:
             cfg = cfg.with_(model=models[0])
@@ -180,7 +188,7 @@ def main():
     run_dir.mkdir(parents=True)
 
     t0 = time.time()
-    print(f"conformance: {len(items)} items, {len(tasks)} scenarios, mode={mode}" + (f", config={cfg.label()}" if cfg else ""))
+    print(f"conformance: {len(items)} items, {len(tasks)} scenarios, mode={mode}" + (f", config={cfg.label()}" if cfg else ""), flush=True)
     results: dict[str, dict] = {}
 
     def go(t):
@@ -220,7 +228,7 @@ def main():
     with open(run_dir / "per_scenario.jsonl", "w") as f:
         for s in needed:
             f.write(json.dumps(results[s], ensure_ascii=False, default=str) + "\n")
-    summary = {"name": name, "mode": mode, "variant": None if a.reference else a.variant,
+    summary = {"name": name, "mode": mode, "variant": None if a.reference else a.variant, "overrides": a.set,
                "config_label": cfg.label() if cfg else "reference player (privileged, not a model)", "config": cfg_d,
                "model": cfg.model if cfg else None, "base_url_set": bool(cfg and cfg.base_url),
                "git": git_head(), "started": datetime.fromtimestamp(t0, timezone.utc).isoformat(timespec="seconds"),
