@@ -504,7 +504,7 @@ def search_external_rooms(world, renter_id: str):
         if ok:
             hits.append({**x, "score": score, "reasons": reasons})
     hits.sort(key=lambda h: (-h["score"], h["ext_id"]))
-    days = int(world.policy.get("sourcing_days", 3))
+    days = int(world.policy.get("sourcing_days") or world.policy.get("sourcing_window_days", 7))   # D29: 7 days
     now = world.clock["now"]
     due = _plus_hours(now, 24 * days)
     d["sourcing"] = {"opened_at": now, "due_at": due, "results": [h["ext_id"] for h in hits[:5]], "outcome": None}

@@ -19,9 +19,10 @@ def _hours(world):
     return h.get("days", list(range(7))), time(sh, sm), time(eh, em), int(h.get("slot_minutes", 30))
 
 
-def _busy(world, room_id: str):
+def _busy(world, room_id: str | None = None):
+    # D29: never two showings at the same time, for ANY room (the owner shows them all himself).
     return [(datetime.fromisoformat(e["start"]), datetime.fromisoformat(e["end"])) for e in world.calendar
-            if e.get("status") in ("proposed", "confirmed") and e.get("room_id") == room_id]
+            if e.get("status") in ("proposed", "confirmed") and (e.get("room_id") or e.get("renter_id"))]
 
 
 def _blocks(world, room_id: str):
@@ -79,7 +80,7 @@ def propose_showing(world, renter_id: str, room_id: str, start: str):
     if s.weekday() not in days or s.time() < t0 or e.time() > t1 or e.date() != s.date():
         raise ToolError("CONFLICT", f"{start} is outside showing hours", hint="use find_showing_slots")
     if not _free(s, e, _busy(world, room_id)):
-        raise ToolError("CONFLICT", f"{start} overlaps another showing for {room_id}", hint="use find_showing_slots")
+        raise ToolError("CONFLICT", f"{start} overlaps another showing (no two showings at once)", hint="use find_showing_slots")
     for ev in world.calendar:
         if ev.get("renter_id") == renter_id and ev.get("room_id") == room_id and ev.get("status") in ("proposed", "confirmed"):
             raise ToolError("CONFLICT", f"{renter_id} already has a {ev['status']} showing {ev['event_id']} for {room_id}")

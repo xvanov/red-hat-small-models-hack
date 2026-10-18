@@ -456,6 +456,7 @@ def test_find_vendors_and_create_job_descriptions_explain_zip():
 
 
 def test_ops_quote_and_book_flow(world):
+    world.policy["spend_limit_usd"] = 500   # the booking mechanism under a positive limit (D29 default is 0)
     job = call_ok(world, "create_job", {"property": "R001", "issue": "kitchen sink leaking", "severity": "medium"})["job"]
     q1 = call_ok(world, "request_quote", {"vendor_id": "V02", "job_id": job["job_id"], "description": "leak under sink"})["quote"]
     lo, hi = world.get("vendors", "V02")["quote_range"]
@@ -472,6 +473,7 @@ def test_ops_quote_and_book_flow(world):
 
 
 def test_book_vendor_budget_exceeded(world):
+    world.policy["spend_limit_usd"] = 500
     job = call_ok(world, "create_job", {"property": "R001", "issue": "water heater replacement", "severity": "high"})["job"]
     q = call_ok(world, "request_quote", {"vendor_id": "V04", "job_id": job["job_id"], "description": "replace heater"})["quote"]
     assert q["amount"] > world.policy["spend_limit_usd"]

@@ -123,7 +123,7 @@ def test_capture_no_fit_points_to_sourcing():
     assert s["status"] == "sourcing" and s["leads"]
     assert [l["ext_id"] for l in s["leads"]] == ["X09", "X02"]  # exact area first, adjacent Cary second
     row = w.get("register", out["renter_id"])
-    assert row["demand"]["sourcing"]["due_at"].startswith("2026-10-20")
+    assert row["demand"]["sourcing"]["due_at"].startswith("2026-10-24")   # D29: 7-day sourcing window
     assert row["demand"]["followup"]["kind"] == "sourcing_due"
 
 

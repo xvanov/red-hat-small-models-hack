@@ -31,14 +31,24 @@ ID_KEYS = {
     "rooms": "room_id", "listings": "listing_id", "threads": "thread_id", "register": "renter_id",
     "calendar": "event_id", "vendors": "vendor_id", "quotes": "quote_id", "jobs": "job_id",
     "escalations": "esc_id", "messages": "id", "owner_reports": "report_id",
+    "tenants": "tenant_id", "approvals": "approval_id",
 }
 
 DEFAULT_POLICY = {
-    "spend_limit_usd": 500,
-    "showing_hours": {"days": [0, 1, 2, 3, 4, 5, 6], "start": "10:00", "end": "18:00", "slot_minutes": 30},
+    # Owner decisions D29 (docs/playbooks/owner-decisions.md): every expenditure needs the owner's
+    # approval (escalate with quotes side by side); showings any free slot 8 AM to 8 PM every day,
+    # never two at once; 7-day sourcing window; 2 money follow-ups, then the owner; 5-day grace.
+    "spend_limit_usd": 0,
+    "showing_hours": {"days": [0, 1, 2, 3, 4, 5, 6], "start": "08:00", "end": "20:00", "slot_minutes": 30},
     "lease_min_months_public": 12,
     "lease_floor_months": 6,
     "source_of_income_protected": False,
+    "sourcing_window_days": 7,
+    "money_followups_before_owner": 2,
+    "grace_days": 5,
+    "languages": {"handled": ["en", "es"], "draft_for_owner": ["ru"]},
+    "payment_plan_bounds": {"split_max_payments": 2, "arrears_max_months": 3},
+    "promise_bounds": {},
 }
 
 
@@ -73,6 +83,8 @@ class World:
     jobs: list = field(default_factory=list)
     escalations: list = field(default_factory=list)
     owner_reports: list = field(default_factory=list)
+    tenants: list = field(default_factory=list)      # tenancy: lease, ledger, late-rent ladder, plan
+    approvals: list = field(default_factory=list)    # owner pre-approvals and owner-set bounds
     policy: dict = field(default_factory=lambda: copy.deepcopy(DEFAULT_POLICY))
     clock: dict = field(default_factory=lambda: {"now": "2026-10-17T09:00:00"})
     faults: list = field(default_factory=list)
@@ -208,7 +220,7 @@ def load(inventory: str | Path | dict | None = None, patch: dict | None = None, 
         base["clock"] = {"now": f"{inv['generated']}T09:00:00"}
     # an inventory that already is a saved World passes straight through
     for k in ("listings", "channels", "threads", "register", "calendar", "quotes", "jobs", "escalations",
-              "owner_reports", "policy", "clock", "faults", "mode", "counters", "meta"):
+              "owner_reports", "tenants", "approvals", "policy", "clock", "faults", "mode", "counters", "meta"):
         if k in inv:
             base[k] = inv[k]
     state = merge(base, patch or {})
