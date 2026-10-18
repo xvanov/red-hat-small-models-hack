@@ -50,6 +50,9 @@ E.164 (`exception` with the caveat box), declined -> `no`; occupants 1-5+ -> `an
 part-time guest box); reason given/declined -> `answered`/`no`, value null (scored on status only); language
 `other` is stored as `"other"` (the schema has en/es only). Skip saves `skipped: true, output: null`.
 
+Move-in exact date: a month dropdown (names), a day number and a year prefilled from the item's conversation
+date (it follows "next time that date comes after the conversation date" until edited); the date is shown in words.
+
 Tests: `node <script>` with Playwright against a server started with `LABELER_OUT=<copy dir>` (never the real
 `out/`), e.g. `LABELER_OUT=/tmp/x labeler/.venv/bin/python labeler/server.py --source fixture --port 8191`.
 

@@ -48,7 +48,7 @@ const snap = fs.readFileSync(dir + '/owner_labels.fixture.jsonl', 'utf8').trim()
 ok(snap.length === 29 && snap.find(r => r.id === 'twin-ead3cc19fb-04').output.language === 'es', 'snapshot = latest per item (29 rows, item 3 es)');
 // a never-saved field set: every field hydrated for an item with phone + date
 await p.goto(base + '/#i=12'); await p.waitForSelector('.msgcard'); await wait();
-ok(await p.locator('#mi_date').inputValue() === '2027-01-09' && (await p.locator('#ph_val').inputValue()) === '704 555 0142', 'date and phone hydrated on item 12');
+ok((await p.locator('#mi_words').textContent()).trim() === 'January 9, 2027' && (await p.locator('#ph_val').inputValue()) === '704 555 0142', 'date and phone hydrated on item 12');
 // audit page
 await p.goto(base + '/audit'); await p.waitForSelector('.item');
 const nItems = await p.locator('.item').count(); ok(nItems >= 3, `audit lists ${nItems} items`);
