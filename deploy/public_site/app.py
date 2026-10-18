@@ -185,7 +185,7 @@ def online(request: Request):
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return HTMLResponse(render_page(), headers={"Cache-Control": "no-cache"})
+    return HTMLResponse(render_page(), headers={"Cache-Control": "no-cache, no-transform"})  # no-transform: stop Cloudflare email obfuscation (its script is CSP-blocked)
 
 
 _STATIC = {"app.js": "text/javascript", "app.css": "text/css", "favicon.svg": "image/svg+xml"}

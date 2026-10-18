@@ -20,7 +20,7 @@ Displayed values: the Messenger link, the toll-free SMS number (only `TWILIO_PHO
 
 ```bash
 # app (port 8090 is taken by the labeler, so 8091)
-nohup .venv/bin/python -m uvicorn deploy.public_site.app:app --host 127.0.0.1 --port 8091 > runs/public_site.log 2>&1 &
+PUBLIC_DEMO_EMAIL=info@rentus.homes nohup .venv/bin/python -m uvicorn deploy.public_site.app:app --host 127.0.0.1 --port 8091 > runs/public_site.log 2>&1 &
 
 # named Cloudflare tunnel "rentus-demo" (separate from the rental-mgmt tunnel; its own config)
 nohup cloudflared tunnel --no-autoupdate --config ~/.cloudflared/rentus-demo.yml run rentus-demo > runs/public_site_tunnel.log 2>&1 &
@@ -46,3 +46,5 @@ Fallback without the named tunnel: `cloudflared tunnel --url http://127.0.0.1:80
 ```bash
 .venv/bin/python -m pytest deploy/public_site/tests -q   # 404s, no writes, upstream allow-list, CSP, rate limit
 ```
+
+Note: Cloudflare's Email Obfuscation would rewrite the address into a script-decoded link that the CSP blocks; the page sends `Cache-Control: no-transform` and wraps the email in `<!--email_off-->` so the plain `mailto:` link survives.
