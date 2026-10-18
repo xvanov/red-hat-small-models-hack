@@ -48,6 +48,33 @@ If the key file is missing on a fresh instance: `printf 'VLLM_API_KEY=%s\n' "$OP
 
 Client settings (`.env`): `OPERATOR_BASE_URL=http://localhost:8000/v1`, `OPERATOR_MODEL=nemotron-3.5-lightning`, `OPERATOR_API_KEY` (already in `.env`).
 
+## Rebuild from scratch (`serving/rebuild.sh`)
+
+If `rentus-operator` is deleted (spend cap) it can be recreated with one command from the laptop:
+
+```bash
+serving/rebuild.sh --dry-run   # print every step, touch nothing
+serving/rebuild.sh             # do it for real
+```
+
+It is idempotent: each step checks first and skips what is already done, so re-run it after any failure. Steps (elapsed time is printed after each):
+
+| # | step | expected time |
+|---|---|---|
+| 0 | read `.env`; generate `OPERATOR_API_KEY` if empty (written to `.env`, never shown); `READER_API_KEY` = same value | <1 s |
+| 1 | `brev create rentus-operator --type massedcompute_RTXPro6000` (up to 5 tries, 30/60/90 s apart); `brev start` if it is stopped | 4–5 min (Oct 17: create 11:26, ready 11:30) |
+| 2 | wait for `RUNNING` + ssh | usually 0–1 min after create |
+| 3 | install docker / nvidia-container-toolkit only if missing (the Brev image normally has both) | 0 s, or 3–5 min if installing |
+| 4 | write `~/serving/vllm.env` over ssh stdin (mode 600), copy `start_vllm.sh` and `reader/serve_reader.sh` | ~5 s |
+| 5–6 | start Lightning with the exact `start_vllm.sh` defaults, wait for `:8000/v1/models` | **5–8 min** on a fresh disk: ~9 GB vLLM image pull, ~20 GB NVFP4 weights, then load + CUDA graph capture (~2.5 min on its own) |
+| 7 | reader checkpoint: `READER_SOURCE=auto` uses Hugging Face (`xvanov/rentus-reader-qwen3-0.6b`, 1.2 GB) when the repo is public, else rsyncs `reader/release/rentus-reader` (1.2 GB, limited by home upload speed) | HF: in step 8; rsync: 1–5 min |
+| 8–9 | start `vllm-reader` (0.12 GPU, after Lightning has its 80%), wait for `:8001/v1/models` | 1–2 min (image already cached) |
+| 10 | tunnels `localhost:8000 → :8000` and `localhost:8011 → :8001` | ~10 s |
+| 11 | `watchdog.sh start` | <1 s |
+| 12 | `smoke_test.py --thinking off` (skip with `SKIP_SMOKE=1`) | ~5 s |
+
+Total: about **12–18 minutes** from nothing to a passing smoke test, so starting by 10:30 leaves room before the 11:00 freeze. Billing starts at step 1 ($2.63/hr); note the time in the table at the top. Overrides: `BREV_HOST`, `BREV_TYPE`, `CREATE_TRIES`, `READER_SOURCE=hf|rsync`. Running containers are left alone; to change flags, restart them with `start_vllm.sh` / `serve_reader.sh` as above.
+
 ## Smoke test (`uv run serving/smoke_test.py [--thinking on|off]`)
 
 All three checks pass in both modes (11:37 ET, idle server):
