@@ -43,8 +43,10 @@ def _read_env_file(path: str | Path) -> dict[str, str]:
         k, v = line.split("=", 1)
         k = k.removeprefix("export ").strip()
         v = v.strip()
-        if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
-            v = v[1:-1]
+        if v[:1] in ("'", '"') and v[0] in v[1:]:
+            v = v[1:v.index(v[0], 1)]          # "value"  # comment  -> value
+        elif " #" in v:
+            v = v.split(" #", 1)[0].rstrip()   # value  # comment    -> value
         out[k] = v
     return out
 

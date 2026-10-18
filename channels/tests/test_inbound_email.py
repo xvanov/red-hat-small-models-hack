@@ -135,3 +135,11 @@ def test_imap_aliases_and_no_values_exposed(tmp_path):
     st = config_status(env)
     assert st["user_set"] and st["password_set"] and st["user_var"] == "GMAIL_USER"
     assert "someone" not in str(st) and "abcd" not in str(st)
+
+
+def test_env_file_strips_trailing_comments(tmp_path):
+    from channels.inbound.imap_reader import _read_env_file
+    f = tmp_path / "e.env"
+    f.write_text('A="abcd efgh ijkl mnop"  # app password, regenerated\nB=plain # note\nC=\'x#y\'\nD="q"\n')
+    env = _read_env_file(f)
+    assert env == {"A": "abcd efgh ijkl mnop", "B": "plain", "C": "x#y", "D": "q"}
