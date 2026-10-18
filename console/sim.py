@@ -132,7 +132,7 @@ def fallback_reader(text: str, pending: str | None, today: str) -> dict:
     out = {"lease": dict(absent), "move_in": {"status": "absent", "date": None, "raw": None},
            "phone": dict(absent), "occupants": dict(absent), "reason": dict(absent),
            "intents": [], "language": "es" if re.search(r"[ñáéíóú¿¡]|\bhola\b|\bsí\b|\bcuarto\b", t) else "en"}
-    if re.search(r"\$\s?\d+|lower|discount|deal|take \$|menos|descuento", t):
+    if re.search(r"\$\s?\d+|lower|discount|deal|flexib|negotiab|take \$|menos|descuento", t):
         out["intents"].append("price_negotiation")
     if re.search(r"(\d+) months|month[- ]to[- ]month|can't do a full year|no puedo un año", t):
         out["intents"].append("shorter_lease")
@@ -198,7 +198,7 @@ class SimRun:
     def owner_say(self, text: str):
         self.inbox.put(("owner", text))
 
-    def decide(self, esc_id: str, approve: bool, note: str = ""):
+    def decide(self, esc_id: str, approve: bool, note: str = "", text: str | None = None, source: str = "console"):
         self.inbox.put(("decision", esc_id, approve, note))
 
     def inject_fault(self, fault: dict):

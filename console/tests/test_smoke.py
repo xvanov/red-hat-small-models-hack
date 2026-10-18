@@ -76,8 +76,10 @@ def test_full_loop_with_fault_and_escalation(base):
     assert r.status_code == 200
     rid = r.json()["run_id"]
     assert r.json()["mode"] == "stub"
-    f = httpx.post(base + f"/api/runs/{rid}/faults", json={"kind": "timeout"})
+    f = httpx.post(base + f"/api/runs/{rid}/faults", json={"kind": "timeout", "tool": "send_message"})
     assert f.json()["fault"]["tool"] == "send_message"
+    a = httpx.get(base + "/api/approvals").json()
+    assert a["run_id"] == rid and isinstance(a["items"], list)
 
     def view():
         return httpx.get(base + f"/api/runs/{rid}/view").json()
@@ -160,3 +162,21 @@ def test_operator_stub_mode(tmp_path):
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+def test_evidence_panels_and_phone_view(base):
+    base, _ = base
+    assert "Needs you" in httpx.get(base + "/approve").text
+    t = httpx.get(base + "/api/trust").json()
+    assert t["budget"]["used_b"] <= t["budget"]["limit_b"] == 33.0
+    assert [r["who"] for r in t["roles"]] == ["Operator", "Reader", "Verifier"]
+    rw = httpx.get(base + "/api/realworld").json()
+    assert set(rw) >= {"post", "stats", "thumb"}
+    if rw["stats"]:
+        assert all(isinstance(v, (int, float)) for k, v in rw["stats"].items() if k != "updated_at")
+    sb = httpx.get(base + "/api/scoreboard").json()
+    assert all({"label", "pass_rate", "mean_reward", "tasks"} <= set(r) for r in sb)
+    # the demo needs the real operator package; the forced stub refuses it cleanly
+    assert httpx.post(base + "/api/demo", json={}).status_code == 409
+    assert httpx.post(base + "/api/reset").json()["ok"] is True
+    assert httpx.get(base + "/api/status").json()["active_run"] is None

@@ -45,6 +45,16 @@ fi
 status=$(curl -s -m 5 "http://127.0.0.1:$PORT/api/status" || true)
 if [ -z "$status" ]; then echo "console did not start; see $LOG"; exit 1; fi
 "$PY" -c 'import json,sys; s=json.loads(sys.argv[1]); print("badge:", s["badge"]["label"], "|", s.get("reader", {}).get("label", ""))' "$status"
+
+# Tailnet-only relay so the owner's phone can open /approve (scripts/tailnet_forward.py); never the LAN.
+if [ "$PORT" = 8080 ] && command -v tailscale >/dev/null 2>&1; then
+  if ! pgrep -f "scripts/tailnet_forward.py" >/dev/null; then
+    nohup /usr/bin/python3 "$ROOT/scripts/tailnet_forward.py" >"$ROOT/scripts/.tailnet_forward.log" 2>&1 &
+    sleep 1
+  fi
+  TS_IP=$(tailscale ip -4 2>/dev/null | head -1)
+  [ -n "$TS_IP" ] && echo "  phone:   http://$TS_IP:8080/approve   (tailnet only)"
+fi
 echo
 echo "  console: http://localhost:$PORT"
 echo "  try:     Appling Way room free Nov 1, \$750, private bath"

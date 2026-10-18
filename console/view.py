@@ -71,8 +71,15 @@ def build_view(w: dict) -> dict:
     jobs = w.get("jobs") or []
     policy = w.get("policy") or {}
     spent = sum(float(j.get("cost") or 0) for j in jobs if j.get("status") in ("booked", "done", "completed"))
+    escalations = []
+    for e in w.get("escalations") or []:
+        e = dict(e)
+        ref = e.get("thread_id") or e.get("job_id") or e.get("ref_id") or ""
+        if (e.get("reason") or "").strip() in (ref, e.get("ref_id") or "") and e.get("draft"):
+            e["reason"], e["draft"] = e["draft"], None  # the model put the id in reason
+        escalations.append(e)
     return {"lanes": lanes, "register": register, "listings": listings,
-            "escalations": w.get("escalations") or [], "jobs": jobs, "quotes": w.get("quotes") or [],
+            "escalations": escalations, "jobs": jobs, "quotes": w.get("quotes") or [],
             "vendors": {v.get("vendor_id"): v.get("name") for v in w.get("vendors") or []},
             "calendar": w.get("calendar") or [],
             "spend": {"spent": spent, "limit": policy.get("spend_limit_usd")},

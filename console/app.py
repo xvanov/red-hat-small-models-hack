@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import secrets
+import subprocess
 import time
 from pathlib import Path
 
@@ -16,22 +17,48 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import integration as integ
+from . import panels
+from .demo import DEMO_PATCH, Director
 from .events import Tail, utc_now
-from .operator_run import OperatorRun
+from .operator_run import FINAL_CONFIG_NAME, OperatorRun
 from .sim import SimRun
 from .view import build_view
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 FAULT_KINDS = ["timeout", "page_changed", "rate_limited", "malformed", "login_required", "upstream_error", "not_found"]
-DEFAULT_FAULT_TOOL = {"timeout": "send_message", "page_changed": "send_message", "rate_limited": "send_message",
-                      "malformed": "read_reply", "login_required": "send_message",
+# Where each fault bites by default: site automations break on publish, the reader on read_reply, etc.
+DEFAULT_FAULT_TOOL = {"timeout": "request_quote", "page_changed": "publish_listing", "rate_limited": "send_message",
+                      "malformed": "read_reply", "login_required": "publish_listing",
                       "upstream_error": "send_message", "not_found": "read_reply"}
+FAULT_HELP = {"page_changed": "the site's layout moved under the automation",
+              "malformed": "the tool answers with broken data",
+              "rate_limited": "the channel says slow down",
+              "login_required": "the site logged us out",
+              "timeout": "nobody answers in time",
+              "upstream_error": "the site returns a 502",
+              "not_found": "the record is missing"}
 
 app = FastAPI(title="Rentus Operator console")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 RUNS: dict[str, object] = {}
-STATE = {"active": None}
+STATE = {"active": None, "director": None}
+
+
+def _public_url() -> str:
+    """The tailnet address the owner's phone opens (scripts/tailnet_forward.py relays it to this process)."""
+    if os.environ.get("CONSOLE_PUBLIC_URL"):
+        return os.environ["CONSOLE_PUBLIC_URL"].rstrip("/")
+    try:
+        ip = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=3).stdout.split()
+        if ip:
+            return f"http://{ip[0]}:8080"
+    except Exception:
+        pass
+    return "http://127.0.0.1:8080"
+
+
+PUBLIC_URL = _public_url()
 
 
 def _console_note(run_id: str, type_: str, data: dict, actor: str = "system"):
@@ -71,7 +98,12 @@ def _get_run(run_id: str):
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC / "index.html")
+    return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/approve")
+def approve_page():
+    return FileResponse(STATIC / "approve.html", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/status")
@@ -89,7 +121,10 @@ def status():
     return {"badge": badge, "mode": mode, "packages": pkgs, "active_run": active,
             "run_status": getattr(run, "status", None), "run_mode": getattr(run, "mode", None),
             "speed": getattr(run, "speed", None), "fault_kinds": FAULT_KINDS, "default_fault_tool": DEFAULT_FAULT_TOOL,
-            "reader": reader, "reader_label": reader["label"].removeprefix("reader: ")}
+            "fault_help": FAULT_HELP, "reader": reader, "reader_label": reader["label"].removeprefix("reader: "),
+            "operator_config": getattr(run, "config_name", None) or FINAL_CONFIG_NAME, "public_url": PUBLIC_URL,
+            "approve_url": PUBLIC_URL + "/approve",
+            "demo": STATE["director"].state() if STATE["director"] else None}
 
 
 @app.get("/api/scenarios")
@@ -99,7 +134,17 @@ def scenarios():
 
 @app.get("/api/scoreboard")
 def get_scoreboard():
-    return integ.scoreboard()
+    return panels.scoreboard()
+
+
+@app.get("/api/realworld")
+def get_realworld():
+    return panels.realworld()
+
+
+@app.get("/api/trust")
+def get_trust():
+    return panels.trust()
 
 
 @app.get("/api/runs")
@@ -127,8 +172,7 @@ def start_run(body: dict = Body(default={})):
     run_id = "r_" + time.strftime("%H%M%S") + "_" + secrets.token_hex(2)
     run_dir = integ.RUNS / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    if STATE["active"] and STATE["active"] in RUNS:
-        RUNS[STATE["active"]].stop()
+    _stop_active()
     badge = integ.probe_backend(force=True)
     mode = _mode(badge)
     run = None
@@ -141,6 +185,8 @@ def start_run(body: dict = Body(default={})):
             run = None
     if run is None:
         run = SimRun(run_id, run_dir, goal, scenario, speed)
+    else:
+        run.note = lambda t, data, actor="system": _console_note(run_id, t, data, actor)
     RUNS[run_id] = run
     STATE["active"] = run_id
     if sid:
@@ -148,6 +194,86 @@ def start_run(body: dict = Body(default={})):
                                            "faults": scenario.get("faults") or []})
     run.start()
     return {"run_id": run_id, "mode": run.mode}
+
+
+def _stop_active():
+    if STATE["director"]:
+        STATE["director"].stop()
+        STATE["director"] = None
+    if STATE["active"] and STATE["active"] in RUNS:
+        RUNS[STATE["active"]].stop()
+
+
+@app.post("/api/demo")
+def start_demo(body: dict = Body(default={})):
+    """One-click demo: a fresh free-play run on the demo world, driven by console/demo.py."""
+    speed = float(body.get("speed") or 1.0)
+    auto = body.get("auto_approve_s")
+    _stop_active()
+    badge = integ.probe_backend(force=True)
+    mode = _mode(badge)
+    if mode not in ("operator", "operator-stub"):
+        raise HTTPException(409, "the demo run needs the operator package (rentus_operator); the stub driver can't play it")
+    run_id = "d_" + time.strftime("%H%M%S") + "_" + secrets.token_hex(2)
+    run_dir = integ.RUNS / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    run = OperatorRun(run_id, run_dir, "", None, speed, live=mode == "operator", badge=badge,
+                      world_patch=DEMO_PATCH, seed_renters=False)
+    run.note = lambda t, data, actor="system": _console_note(run_id, t, data, actor)
+    RUNS[run_id] = run
+    STATE["active"] = run_id
+    run.start()
+    d = Director(run, lambda t, data, actor="system": _console_note(run_id, t, data, actor), speed=speed,
+                 auto_approve_s=float(auto) if auto else None, approve_url=PUBLIC_URL + "/approve")
+    STATE["director"] = d
+    d.start()
+    return {"run_id": run_id, "mode": run.mode, "demo": d.state()}
+
+
+@app.post("/api/demo/speed")
+def demo_speed(body: dict = Body(...)):
+    d = STATE["director"]
+    if not d:
+        raise HTTPException(409, "no demo running")
+    d.set_speed(float(body.get("speed") or 1.0))
+    return d.state()
+
+
+@app.post("/api/reset")
+def reset():
+    """Stop whatever is running and clear the page (the run's files stay under runs/)."""
+    _stop_active()
+    STATE["active"] = None
+    return {"ok": True}
+
+
+@app.get("/api/approvals")
+def approvals():
+    """What the owner's phone shows: open escalations (with drafts) first, then recent decisions."""
+    rid = STATE["active"]
+    run = RUNS.get(rid) if rid else None
+    if run is None:
+        return {"run_id": None, "items": [], "status": None}
+    w = run.snapshot()
+    threads = {t.get("thread_id"): t for t in w.get("threads") or []}
+    jobs = {j.get("job_id"): j for j in w.get("jobs") or []}
+    items = []
+    for e in w.get("escalations") or []:
+        ref = e.get("thread_id") or e.get("ref_id") or e.get("job_id")
+        t = threads.get(ref) or {}
+        last = next((m.get("text") for m in reversed(t.get("messages") or []) if m.get("from") == "renter"), None)
+        j = jobs.get(ref) or {}
+        reason, draft = e.get("reason") or "", e.get("draft")
+        if reason.strip() in (ref or "", e.get("ref_id") or "") and draft:  # model put the id in reason
+            reason, draft = draft, None
+        items.append({"esc_id": e.get("esc_id"), "reason": reason, "draft": draft,
+                      "status": e.get("status") or "open", "ref": ref, "decided_via": e.get("decided_via"),
+                      "owner_text": e.get("owner_text"), "who": t.get("renter_name"), "channel": t.get("channel"),
+                      "language": t.get("language"), "last_renter_message": last,
+                      "job": {"property": j.get("property"), "issue": j.get("issue")} if j else None,
+                      "created_at": e.get("created_at")})
+    items = [i for _, i in sorted(enumerate(items), key=lambda p: (p[1]["status"] != "open", -p[0]))]
+    return {"run_id": rid, "status": getattr(run, "status", None), "items": items}
 
 
 @app.get("/api/runs/{run_id}")
@@ -222,7 +348,19 @@ def decide(run_id: str, esc_id: str, body: dict = Body(...)):
     decision = body.get("decision")
     if decision not in ("approve", "deny"):
         raise HTTPException(400, "decision must be approve or deny")
-    _live_run(run_id).decide(esc_id, decision == "approve", body.get("note", ""))
+    run = _live_run(run_id)
+    w = run.snapshot()
+    esc = next((e for e in w.get("escalations") or [] if e.get("esc_id") == esc_id), None)
+    if esc is None:
+        raise HTTPException(404, f"no escalation {esc_id}")
+    if (esc.get("status") or "open") != "open":
+        raise HTTPException(409, f"{esc_id} was already {esc.get('status')}")
+    source = (body.get("source") or "console")[:20]
+    text = (body.get("text") or "").strip() or None
+    run.decide(esc_id, decision == "approve", body.get("note", ""), text=text, source=source)
+    _console_note(run_id, "owner_decision", {"esc_id": esc_id, "decision": decision, "via": source,
+                                             "edited": bool(text and text != (esc.get("draft") or "").strip())},
+                  actor="owner")
     return {"ok": True}
 
 
@@ -232,6 +370,8 @@ def inject_fault(run_id: str, body: dict = Body(...)):
     if kind not in FAULT_KINDS:
         raise HTTPException(400, f"kind must be one of {FAULT_KINDS}")
     fault = {"tool": body.get("tool") or DEFAULT_FAULT_TOOL[kind], "kind": kind, "times": int(body.get("times") or 1)}
+    if isinstance(body.get("match"), dict):
+        fault["match"] = body["match"]
     _live_run(run_id).inject_fault(fault)
     _console_note(run_id, "fault_injected", fault, actor="owner")
     return {"ok": True, "fault": fault}
@@ -241,6 +381,8 @@ def inject_fault(run_id: str, body: dict = Body(...)):
 def set_speed(run_id: str, body: dict = Body(...)):
     speed = float(body.get("speed") or 1.0)
     _live_run(run_id).set_speed(speed)
+    if STATE["director"] and STATE["director"].run.run_id == run_id:
+        STATE["director"].set_speed(speed)
     return {"ok": True, "speed": speed}
 
 

@@ -55,32 +55,38 @@ class Counterpart:
         return None
 
 
-# Used only when no gym scenario is loaded. Synthetic, written here, no real people.
-DEFAULT_COUNTERPARTS: list[dict] = [
-    {"id": "renter:maria", "name": "María", "channel": "marketplace", "language": "es",
-     "script": [
-         {"after": "start", "say": "Hola, ¿sigue disponible el cuarto?"},
-         {"when_asked": "lease", "say": "Sí, un año está bien."},
-         {"when_asked": "move_in", "say": "a fines de mes"},
-         {"when_asked": "move_in", "say": "el 1 de noviembre"},
-         {"when_asked": "occupants", "say": "solo yo"},
-         {"when_asked": "phone", "say": "919 555 0142"},
-         {"when_asked": "reason", "say": "Empiezo un trabajo nuevo en Duke."},
-         {"when_asked": "showing", "say": "Sí, perfecto."},
-     ]},
-    {"id": "renter:devon", "name": "Devon", "channel": "roomies", "language": "en",
-     "script": [
-         {"after": "start", "say": "Hey, is the private bath room still open? Would you take $700?"},
-         {"when_asked": "lease", "say": "Yeah a year works."},
-         {"when_asked": "move_in", "say": "November 1st"},
-         {"when_asked": "occupants", "say": "Just me"},
-         {"when_asked": "phone", "say": "(919) 555-0187"},
-         {"when_asked": "reason", "say": "My current lease is ending."},
-         {"when_asked": "showing", "say": "Works for me."},
-     ]},
-    {"id": "renter:sam", "name": "Sam", "channel": "craigslist", "language": "en",
-     "script": [
-         {"after": "start", "say": "Is this available? I only need it for 3 months."},
-         {"when_asked": "lease", "say": "No, I can't do a full year."},
-     ]},
-]
+# Synthetic renters, written here (no real people). classifier v2 + reusable confirmations keep a scripted
+# renter from going silent when the operator rephrases (docs/task-v2-changes.md).
+MARIA = {"id": "renter:maria", "name": "María", "channel": "marketplace", "language": "es", "classifier": "v2",
+         "script": [
+             {"after": "start", "say": "Hola, empiezo un trabajo nuevo en Duke. ¿Sigue disponible el cuarto con baño privado?"},
+             {"when_asked": "lease", "say": "Sí, un año está bien."},
+             {"when_asked": "move_in", "say": "a principios de noviembre"},
+             {"when_asked": "move_in", "say": "El 1 de noviembre."},
+             {"when_asked": "move_in", "say": "Sí, el 1 de noviembre.", "reuse": True},
+             {"when_asked": "phone", "say": "919 555 0142"},
+             {"when_asked": "reason", "say": "Empiezo un trabajo nuevo en Duke."},
+             {"when_asked": "reason", "say": "Por el trabajo nuevo en Duke.", "reuse": True},
+             {"when_asked": "occupants", "say": "Solo yo."},
+             {"when_asked": "showing", "say": "Sí, perfecto, gracias.", "reuse": True},
+         ]}
+DEVON = {"id": "renter:devon", "name": "Devon", "channel": "roomies", "language": "en", "classifier": "v2",
+         "script": [
+             {"after": "start", "say": "Hey, is the private bath room still open? It would be just me. Is the rent negotiable at all?"},
+             {"when_asked": "lease", "say": "Yeah, a year works for me."},
+             {"when_asked": "move_in", "say": "November 1st."},
+             {"when_asked": "move_in", "say": "Yes, November 1st.", "reuse": True},
+             {"when_asked": "phone", "say": "(919) 555-0187"},
+             {"when_asked": "reason", "say": "My current lease is ending."},
+             {"when_asked": "occupants", "say": "Just me."},
+             {"when_asked": "occupants", "say": "Just me, one person.", "reuse": True},
+             {"when_asked": "showing", "say": "Works for me, thanks.", "reuse": True},
+         ]}
+SAM = {"id": "renter:sam", "name": "Sam", "channel": "craigslist", "language": "en", "classifier": "v2",
+       "script": [
+           {"after": "start", "say": "Is this available? I only need it for 3 months."},
+           {"when_asked": "lease", "say": "No, I can't do a full year, sorry."},
+       ]}
+
+# Free play (no gym scenario): these write in once a listing is live. Synthetic, no real people.
+DEFAULT_COUNTERPARTS: list[dict] = [MARIA, DEVON, SAM]
