@@ -67,24 +67,34 @@ Five hypotheses, one-sided, Holm-corrected at familywise α = 0.025:
 
 | Channel | Status |
 |---|---|
-| Facebook Page | One real post written by the operator, published unedited by the owner (decision D20). Other posts are created unpublished; the console publishes only on the owner's click. |
-| Messenger (Page inbox via Graph, personal inbox via browser) | Two-way for allowlisted contacts. On the personal inbox, chats from anyone else become drafts that only the owner's Approve sends. |
-| SMS (Twilio) and email (Resend out, Gmail IMAP read-only in) | Two-way for allowlisted contacts in `channels/live`, with kill switch, rate cap and STOP opt-out. The older inbound path saves drafts only. An open public mode exists, off by default, with disclosure and caps. |
+| SMS **(888) 891-2046** (Twilio) | **Live, AI replies to anyone** (open mode, decision D39): first reply says it is Rentus Homes' AI assistant; STOP opts out. |
+| **Rentus Homes Facebook Page** on Messenger (Graph) | **Live, AI replies to anyone** who messages the Page (open mode). |
+| Email **info@rentus.homes** (Resend out, read-only inbox in) | **Live, AI replies to anyone** who writes (open mode); automated senders and mail from before the channel was switched on are ignored. |
+| Personal Messenger (browser, for Marketplace inquiries) | **Drafts only**: the operator writes a reply, and nothing is sent until the owner taps Approve. |
+| Facebook Page posts | The operator writes the listing; the console publishes it only on the owner's click. Current Appling Way post: {{FB_POST_URL}} |
 | Google Calendar | Real showing events inside availability blocks (service account, no attendees). |
 | Craigslist, Roomies, PadSplit, Marketplace | Browser automations fill the whole form, upload photos and **stop before the final submit button**. |
 
-**Safety rules enforced in code, not just in the prompt**
+**Safety rules enforced in code, not just in the prompt** (they apply on every live channel)
 - Never states a room fact the owner has not confirmed (post-freeze fix `76341e3`).
 - Never claims "booked" or "published" unless the world state shows it (verifier final self-check).
 - First person as the owner, never "the owner"; at most 2 sentences and one question per message; no house numbers in public text; replies in the renter's language.
 - Fair-housing check before anything is published (24 CFR 100.75 + HUD guidance).
 - Every expense needs owner approval; no discounts promised.
+- Live-channel guards: kill switch (`python -m channels.live stop`), STOP opt-out, at most 30 replies a day per contact and 150 an hour overall, bot and backlog filters ([channels/live/README.md](channels/live/README.md)).
 
 **Recovery**
 - The verifier repairs broken JSON, retries rate limits and timeouts, falls back to the next vendor or channel, blocks repeated calls, and escalates after 3 repeats.
 - Browser automations repair their own selectors when a site's page changes (`channels/repair/`).
 
-**Owner console** ([console/README.md](console/README.md)): one inbox for every live channel, an assistant, the leasing pipeline, a live trace of every tool call and recovery, approvals on the phone at `/approve`, and evidence tabs with the measured results.
+**Owner console** ([console/README.md](console/README.md)), five tabs:
+- **Inbox**: every live conversation (SMS, Page Messenger, email, personal Messenger) with the renter's five qualification items, drafts to approve, and an Activity drawer showing each tool call, reader parse, verifier catch and recovery.
+- **Assistant**: the owner chats with the operator ("Appling Way room free Nov 1, $750, private bath"); it writes the listing, fills the listing sites and holds showings on Google Calendar.
+- **Pipeline**: one row per person, from inquiry to qualifying, showing and application.
+- **Model**: the measured results, read live from the result files.
+- **Data**: the published datasets and model and the open sources behind them.
+
+Approvals also work on the phone at `/approve`. Public page with the try-it links and live results: **https://demo.rentus.homes**.
 
 ---
 
@@ -93,7 +103,7 @@ Five hypotheses, one-sided, Holm-corrected at familywise α = 0.025:
 ```mermaid
 flowchart LR
   owner([Owner: console + phone /approve]) -->|instruction / decision| op
-  people([Renters, tenants, vendors:<br/>scripted in the Gym, or live channels]) -->|inbox| op
+  people([Renters, tenants, vendors:<br/>scripted in the Gym, or live SMS / Messenger / email]) -->|inbox| op
   subgraph GPU["1x RTX PRO 6000 Blackwell 96 GB · vLLM 0.27.1"]
     op["OPERATOR<br/>Nemotron 3.5 Lightning 30B-A3B BF16<br/>talks + calls 41 tools"]
     reader["READER<br/>Qwen3-0.6B + SFT<br/>message → exact JSON"]
@@ -103,7 +113,7 @@ flowchart LR
   tools -->|read_reply| reader
   tools --> channels["channels/: Graph, Twilio, email,<br/>Google Calendar, browser fill-and-stop"]
   tools --> events[(runs/…/events.jsonl)]
-  events --> console["console/: inbox, pipeline, trace, evidence"]
+  events --> console["console/: Inbox, Assistant, Pipeline, Model, Data"]
   gym["NeMo Gym env: same tools,<br/>scripted counterparts, scorer"] -.->|rollouts| op
 ```
 
@@ -151,7 +161,9 @@ scripts/doctor.sh --quick     # tunnels, both model endpoints, every package's t
 scripts/demo.sh               # console at http://localhost:8080
 ```
 
-In the console click **▶ Demo run**, or type `Appling Way room free Nov 1, $750, private bath`. With no GPU, `CONSOLE_FORCE_STUB=1 scripts/demo.sh` runs a rule-based rehearsal and the badge says **stub**.
+Open the **Assistant** tab and type `Appling Way room free Nov 1, $750, private bath`. Live conversations show up in **Inbox** once the channel daemon runs (`.venv/bin/python -m channels.live`, credentials and allowlist in `.env`, see [channels/live/README.md](channels/live/README.md)). With no GPU, `CONSOLE_FORCE_STUB=1 scripts/demo.sh` runs a rule-based stand-in and the badge says **stub**.
+
+Or skip the setup: text **(888) 891-2046**, message the Rentus Homes Facebook Page, or email **info@rentus.homes**, and the operator answers (links on https://demo.rentus.homes).
 
 | Variable | Value |
 |---|---|
@@ -196,9 +208,10 @@ Other open sources: UCI Apartment for Rent (rents), Zillow ZORI (rent growth), I
 - **One owner's business, mostly leasing.** Operations (rent, maintenance, vendors) are covered by synthetic tasks and a 61-item conformance suite (50/61 pass, a development check), not by the realistic held-out set.
 - **Scorer not validated by a human** (κ skipped), and keyword checks can be fooled by paraphrase.
 - **Reliability:** the final config passes 28% of tasks in all 4 runs and 80% in at least one.
-- **Scripted renters** answer by keyword; real-world behavior is only in the live pilot.
+- **Evaluation numbers come from the sandbox Gym, not live traffic.** The live channels are real (SMS, Page Messenger and email answer anyone; personal Messenger is drafts-only), but they carry the post-freeze safety fix and were not scored. Scripted Gym renters answer by keyword.
+- **Craigslist, Roomies and PadSplit stay fill-and-stop:** the browser fills the form and uploads photos, and the owner presses the final submit.
 - **BF16, not NVFP4**, for stability; Lightning's built-in multi-token prediction also crashed under load and is off.
-- **Next:** a router that keeps quality, timed follow-ups (the sandbox has no clock), an operator LoRA trained on Gym rollouts, the owner's κ grading, and more live channels with the owner logged in.
+- **Next:** a router that keeps quality, timed follow-ups (the sandbox has no clock), an operator LoRA trained on Gym rollouts, the owner's κ grading, scoring live conversations, and full posting on the listing sites.
 
 ---
 
@@ -207,6 +220,8 @@ Other open sources: UCI Apartment for Rent (rents), Zillow ZORI (rent growth), I
 **Kalin Ivanov** ([@xvanov](https://github.com/xvanov)), solo: product, architecture and every decision ([docs/DECISIONS.md](docs/DECISIONS.md)), built with Claude Code agents running one workstream each.
 
 - Demo video: {{VIDEO_URL}}
+- Try it live: **https://demo.rentus.homes** · SMS (888) 891-2046 · Rentus Homes Facebook Page on Messenger · info@rentus.homes
 - Fine-tuned reader: [huggingface.co/xvanov/rentus-reader-qwen3-0.6b](https://huggingface.co/xvanov/rentus-reader-qwen3-0.6b)
-- Live listing written by the operator (D20): [Rentus Homes Facebook Page post](https://www.facebook.com/122140650357237994/posts/122140650345237994)
+- Datasets: [xvanov/rentus-reader-messages](https://huggingface.co/datasets/xvanov/rentus-reader-messages) · [xvanov/rentus-leasing-twins](https://huggingface.co/datasets/xvanov/rentus-leasing-twins)
+- Appling Way listing on the Rentus Homes Facebook Page, written by the operator: {{FB_POST_URL}}
 - Results [docs/results.md](docs/results.md) · protocol [docs/eval-protocol.md](docs/eval-protocol.md) · serving [docs/vllm.md](docs/vllm.md) · Gym [gym/README.md](gym/README.md) · reader [reader/README.md](reader/README.md) · submission [docs/submission.md](docs/submission.md)
