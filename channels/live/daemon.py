@@ -1,0 +1,322 @@
+"""The live daemon: poll every channel, and for each allowlisted inbound message run one operator turn.
+
+    .venv/bin/python -m channels.live              # poll forever (LIVE_POLL_SECONDS, default 8)
+    .venv/bin/python -m channels.live --once       # one poll + turns, then exit
+
+Per thread, the operator's World and model history persist in the thread file (runs/live/threads/), so a restart
+continues the conversation. The World is live mode with one room (the real Appling Way listing, as in the D20
+pilot); the operator's send_message on this thread goes to `LiveSendAdapter`, which calls outbound.deliver()
+(allowlist, kill switch, rate cap, then the real provider). Escalations and owner reports become approval items.
+"""
+from __future__ import annotations
+
+import copy
+import os
+import sys
+import time
+import traceback
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from . import config, outbound, providers, registry
+from .store import CHANNEL_WORLD, Store, now_iso
+
+REPO = config.REPO
+for sub in ("operator", "tools"):
+    if str(REPO / sub) not in sys.path:
+        sys.path.insert(0, str(REPO / sub))
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+# The final config (gym/confirmatory_v3.json, Amendment 6): prompt v4 + concierge tool descriptions + guard
+# stand-down, on top of guard+prompt3+style+rhist+readermodel (the reader model comes from READER_BASE_URL).
+FINAL_CONFIG = {"prompt_version": "v4", "tool_descriptions": "concierge", "guard_stand_down": True,
+                "renter_guard": True, "style_precheck": True, "keep_reasoning_in_history": True,
+                "verifier": True, "reader": True}
+GATE_MAP = {"lease": "lease", "move_in": "move_in", "phone": "phone", "reason": "reason", "people": "occupants"}
+STAGE_MAP = {"new": "inquiry", "qualifying": "qualifying", "qualified": "qualified", "showing_proposed": "showing",
+             "showing_confirmed": "showing", "applied": "application", "leased": "application", "not_now": "lost",
+             "lost": "lost"}
+MAX_TURN_ATTEMPTS = 3
+
+
+# ====================================================================== adapter (send_message -> real send)
+
+class LiveSendAdapter:
+    """rentus_tools LiveAdapter for the live sms / email / facebook_page threads of this daemon."""
+
+    def __init__(self, store: Store):
+        self.store = store
+
+    def publish_listing(self, world, listing, channel):
+        from rentus_tools.errors import ToolError
+        raise ToolError("POLICY_BLOCKED", "live conversation channels do not publish listings")
+
+    def send_message(self, world, thread, text, attachments):
+        from rentus_tools.errors import ToolError
+        res = outbound.deliver(self.store, thread["thread_id"], text, origin="operator")
+        if res["status"] == "sent":
+            return {"status": "sent", "screenshot": None, "external_message_id": res.get("provider_id")}
+        if res["status"] == "awaiting_approval":
+            return {"status": "awaiting_approval", "screenshot": None,
+                    "note": "not sent: " + (res.get("error") or "") + "; saved for the owner's approval"}
+        raise ToolError("UPSTREAM_ERROR", f"send failed: {res.get('error')}", retryable=False)
+
+
+def register_adapters(store: Store) -> LiveSendAdapter:
+    from rentus_tools import live
+    a = LiveSendAdapter(store)
+    registry.load_from_env()
+    for ch in set(CHANNEL_WORLD.values()) | {spec.world_channel for spec in registry.EXTRA.values()}:
+        live.register(ch, a)
+    return a
+
+
+# ====================================================================== polling
+
+def poll_all(store: Store, provs: dict | None = None, allow: config.Allowlist | None = None) -> list[str]:
+    """Poll every provider; store allowlisted inbound messages; return thread ids that need a turn."""
+    provs = provs or outbound.get_providers()
+    allow = allow or config.Allowlist.load()
+    st = store.state()
+    since = datetime.fromisoformat(st["started"])
+    seen_all = st.setdefault("seen", {})
+    sources = [(f"sms:{n}", p) for n, p in (provs.get("sms") or {}).items()]
+    sources += [(k, provs[k]) for k in ("email", "messenger") if provs.get(k) is not None]
+    registry.load_from_env()
+    sources += [(name, spec.provider) for name, spec in registry.EXTRA.items()]
+    touched: list[str] = []
+    errors = st.setdefault("errors", {})
+    for key, prov in sources:
+        seen = set(seen_all.get(key, []))
+        try:
+            items = prov.poll(allow, since, seen)
+            errors.pop(key, None)
+        except Exception as e:
+            errors[key] = f"{type(e).__name__}: {str(e)[:150]}"
+            continue
+        for it in items:
+            seen.add(it["ext_id"])
+            listed = allow.allows(it["channel"], it["contact"])
+            spec = registry.EXTRA.get(it["channel"])
+            if not listed and not (spec and spec.drafts_for_unlisted()):
+                continue  # never stored, never passed to a model
+            with store.locked():
+                t = store.ensure_thread(it["channel"], it["contact"], line=it.get("line"),
+                                        line_last4=it.get("line_last4"), renter_name=it.get("renter_name"))
+                t["allowlisted"] = listed  # unlisted (drafts-only channel): every reply waits for the owner
+                if any(m.get("ext_id") == it["ext_id"] for m in t["messages"]):
+                    continue
+                store.add_message(t, "in", it["text"], "received", ext_id=it["ext_id"], ts=it.get("ts"))
+                if it["channel"] == "email":
+                    meta = it.get("meta") or {}
+                    em = t.setdefault("email", {})
+                    if meta.get("subject"):
+                        s = meta["subject"]
+                        while s.lower().startswith(("re:", "fwd:", "fw:")):
+                            s = s.split(":", 1)[1].strip()
+                        em["subject"] = s
+                    em["references"] = (meta.get("references") or []) + [meta.get("message_id")]
+                if it["channel"] == "sms" and providers.is_opt_out(it["text"]):
+                    t["opted_out"] = True
+                    t["trace"].append({"ts": now_iso(), "actor": "tool", "name": "opt_out",
+                                       "summary": "contact texted STOP: no more messages on this thread", "ok": True})
+                else:
+                    t["pending_turn"] = True
+                    t["turn_attempts"] = 0
+                store.save_thread(t)
+                touched.append(t["thread_id"])
+        seen_all[key] = sorted(seen)[-2000:]
+    with store.locked():
+        cur = store.state()
+        cur["seen"] = {**cur.get("seen", {}), **seen_all}
+        cur["errors"] = errors
+        cur["last_poll"] = now_iso()
+        store.save_state(cur)
+    return touched
+
+
+# ====================================================================== one operator turn
+
+def _now_ny() -> str:
+    return datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+def _new_world(t: dict):
+    import rentus_tools as rt
+    from channels.pilot_post import ROOM
+    w = rt.load()
+    w.rooms[:] = [copy.deepcopy(ROOM)]
+    w.listings[:] = []
+    w.threads[:] = []
+    w.threads.append({"thread_id": t["thread_id"], "channel": registry.world_channel(t["channel"]),
+                      "renter_name": t.get("renter_name") or "", "room_id": ROOM["room_id"], "messages": []})
+    w._normalize()
+    return w
+
+
+def _summ(x, n=160) -> str:
+    s = x if isinstance(x, str) else __import__("json").dumps(x, ensure_ascii=False, default=str)
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def trace_from_events(events: list[dict]) -> list[dict]:
+    out = []
+    for e in events:
+        typ, d = e.get("type"), e.get("data") or {}
+        ts = e.get("ts") or now_iso()
+        if typ == "tool_result":
+            env = d.get("result") or {}
+            name = d.get("tool", "")
+            ok = bool(env.get("ok"))
+            summary = _summ(env.get("data") if ok else (env.get("error") or {}).get("message", ""))
+            out.append({"ts": ts, "actor": "reader" if name == "read_reply" else "tool", "name": name,
+                        "summary": summary, "ok": ok})
+        elif typ == "verifier" and d.get("ok") is False:
+            out.append({"ts": ts, "actor": "verifier", "name": d.get("stage", "verifier"),
+                        "summary": _summ(d.get("problems") or d.get("code") or d.get("note") or d), "ok": False})
+        elif typ == "model_message" and d.get("text"):
+            out.append({"ts": ts, "actor": "operator", "name": "model_message", "summary": _summ(d["text"]),
+                        "ok": True})
+    return out
+
+
+def gate_and_stage(w, thread_id: str) -> tuple[dict, str | None]:
+    row = next((r for r in getattr(w, "register", []) if thread_id in (r.get("thread_ids") or [])), None)
+    gate = {}
+    for k, src in GATE_MAP.items():
+        g = ((row or {}).get("gate") or {}).get(src) or {}
+        stt = g.get("status", "absent")
+        gate[k] = "exact" if stt in ("answered", "exception", "no") else "vague" if stt == "vague" else "missing"
+    stage = STAGE_MAP.get((row or {}).get("status")) if row else None
+    return gate, stage
+
+
+_MODEL: dict = {}
+
+
+def _config():
+    from rentus_operator.cli import load_env, probe
+    from rentus_operator.config import RunConfig
+    load_env()
+    try:
+        from dotenv import dotenv_values
+        for k, v in dotenv_values(REPO / ".env").items():
+            if k.startswith("READER_") and v and k not in os.environ:
+                os.environ[k] = v
+    except Exception:
+        pass
+    cfg = RunConfig(**FINAL_CONFIG)
+    if "OPERATOR_MODEL" not in os.environ:
+        if "model" not in _MODEL:
+            models = probe(cfg.base_url, cfg.api_key)
+            if not models:
+                raise RuntimeError("operator endpoint not reachable (OPERATOR_BASE_URL)")
+            _MODEL["model"] = models[0]
+        cfg = cfg.with_(model=_MODEL["model"])
+    return cfg
+
+
+def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
+    """One operator turn on the thread's new inbound messages. `runner(world, inbound, history)` is injectable
+    for tests and must return an object with .messages, .events, .status."""
+    import rentus_tools as rt
+
+    with store.locked():
+        t = store.get_thread(thread_id)
+        if t is None or not t.get("pending_turn"):
+            return {"skipped": True}
+        world_d, history = t.get("world"), t.get("history")
+        owner_pending = list(t.get("owner_pending") or [])
+        synced = set(t.get("world_synced") or [])
+        new_in = [m for m in t["messages"] if m["direction"] == "in" and m["id"] not in synced]
+    w = rt.World.from_dict(world_d) if world_d else _new_world(t)
+    w.mode = "live"
+    w.clock["now"] = _now_ny()
+    wt = next(x for x in w.threads if x["thread_id"] == thread_id)
+    if t.get("renter_name"):
+        wt["renter_name"] = t["renter_name"]
+    for o in owner_pending:  # the owner's manual replies, so the operator sees them
+        wt["messages"].append({"id": o["id"], "from": "operator", "text": o["text"], "attachments": [], "ts": w.clock["now"]})
+    for m in new_in:
+        wt["messages"].append({"id": m["id"], "from": "renter", "text": m["text"], "attachments": [], "ts": w.clock["now"]})
+    esc0, rep0 = len(w.escalations), len(w.owner_reports)
+    inbound = {"thread_id": thread_id, "channel": registry.world_channel(t["channel"]),
+               "renter_name": t.get("renter_name") or "a renter", "text": "\n".join(m["text"] for m in new_in)}
+    err = None
+    res = None
+    try:
+        if runner is None:
+            from rentus_operator import toolbox
+            from rentus_operator.loop import run
+            cfg = _config()
+            be = toolbox.backend("real")
+            run_id = f"live_{thread_id.replace(':', '_')}_{int(time.time())}"
+            sink = toolbox.make_sink(be, run_id, path=store.root / "events" / f"{run_id}.jsonl")
+            res = run(w, inbound, config=cfg, sink=sink, backend=be, run_id=run_id, history=history)
+        else:
+            res = runner(w, inbound, history)
+    except Exception as e:
+        err = f"{type(e).__name__}: {str(e)[:200]}"
+    with store.locked():
+        t = store.get_thread(thread_id)
+        if err:
+            t["turn_attempts"] = int(t.get("turn_attempts", 0)) + 1
+            t["trace"].append({"ts": now_iso(), "actor": "operator", "name": "turn_error", "summary": err, "ok": False})
+            if t["turn_attempts"] >= MAX_TURN_ATTEMPTS:
+                t["pending_turn"] = False
+                t["needs_owner"] = True
+                store.add_approval(thread_id, f"operator could not answer ({err}); please reply by hand", "",
+                                   kind="error")
+            store.save_thread(t)
+            return {"ok": False, "error": err}
+        t["world"] = w.to_dict()
+        t["history"] = res.messages
+        t["world_synced"] = sorted(synced | {m["id"] for m in new_in})
+        done_owner = {o["id"] for o in owner_pending}
+        t["owner_pending"] = [o for o in t.get("owner_pending", []) if o["id"] not in done_owner]
+        t["pending_turn"] = any(m["direction"] == "in" and m["id"] not in set(t["world_synced"]) for m in t["messages"])
+        t["trace"].extend(trace_from_events(res.events))
+        t["trace"] = t["trace"][-400:]
+        gate, stage = gate_and_stage(w, thread_id)
+        t["gate"] = gate
+        if stage:
+            t["stage"] = stage
+        for e in w.escalations[esc0:]:
+            store.add_approval(thread_id, e.get("reason") or "escalation", e.get("draft") or "", kind="escalation")
+            t["needs_owner"] = True
+        for r in w.owner_reports[rep0:]:
+            store.add_approval(thread_id, r.get("summary") or "report", "", kind="report")
+        t["last_turn"] = {"status": res.status, "at": now_iso()}
+        store.save_thread(t)
+    return {"ok": True, "status": res.status}
+
+
+# ====================================================================== loop
+
+def tick(store: Store) -> dict:
+    touched = poll_all(store)
+    turns = []
+    for t in store.all_threads():
+        if t.get("pending_turn"):
+            turns.append({t["thread_id"]: run_turn(store, t["thread_id"])})
+    return {"new": len(touched), "turns": turns}
+
+
+def main(once: bool = False) -> int:
+    store = Store()
+    store.root.mkdir(parents=True, exist_ok=True)
+    register_adapters(store)
+    allow = config.Allowlist.load()
+    print(time.strftime("%H:%M:%S"), f"live daemon: dir={store.root} allowlist={allow.size()} "
+          f"send_enabled={config.send_enabled()} lines={[str(l) for l in config.sms_lines()]}", flush=True)
+    while True:
+        try:
+            r = tick(store)
+            if r["new"] or r["turns"]:
+                print(time.strftime("%H:%M:%S"), r, flush=True)
+        except Exception:
+            print(time.strftime("%H:%M:%S"), traceback.format_exc(limit=3), flush=True)
+        if once:
+            return 0
+        time.sleep(config.poll_seconds())

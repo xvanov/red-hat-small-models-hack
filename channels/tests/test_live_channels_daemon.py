@@ -1,0 +1,294 @@
+"""channels.live with fake providers (no network): allowlist filtering, threading, rate cap, kill switch,
+operator turn routing send_message to the real-send path, approvals, opt-out."""
+from __future__ import annotations
+
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[2]
+for p in (REPO, REPO / "tools", REPO / "operator"):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+from channels.live import api, config, daemon, outbound  # noqa: E402
+from channels.live.store import Store  # noqa: E402
+
+OWNER_PHONE = "+12135550100"
+STRANGER = "+19195550199"
+OWNER_EMAIL = "owner.test@example.com"
+
+
+class FakeLine:
+    def __init__(self, name, number):
+        self.name, self.number = name, number
+        self.last4 = number[-4:]
+
+
+class FakeSms:
+    channel = "sms"
+
+    def __init__(self, name, number):
+        self.line = FakeLine(name, number)
+        self.inbox: list[dict] = []
+        self.sent: list[tuple] = []
+        self.display = number
+
+    def connected(self):
+        return True, "fake"
+
+    def poll(self, allow, since, seen):  # like Twilio: provider filters From=allowlisted
+        return [m for m in self.inbox if m["ext_id"] not in seen and config.normalize_phone(m["contact"]) in allow.phones]
+
+    def push(self, frm, text, sid):
+        self.inbox.append({"channel": "sms", "contact": frm, "text": text, "ext_id": sid,
+                           "ts": datetime.now(timezone.utc).isoformat(), "line": self.line.name,
+                           "line_last4": self.line.last4, "renter_name": None, "meta": {}})
+
+    def send(self, to, text):
+        self.sent.append((to, text))
+        return {"ok": True, "provider_id": f"SM{len(self.sent)}", "status": "queued"}
+
+
+class FakeEmail:
+    channel = "email"
+    display = "info@rentus.homes"
+
+    def __init__(self):
+        self.inbox, self.sent = [], []
+
+    def connected(self):
+        return True, "fake"
+
+    def poll(self, allow, since, seen):
+        return [m for m in self.inbox if m["ext_id"] not in seen]
+
+    def send(self, to, text, *, subject, in_reply_to=None, references=None):
+        self.sent.append({"to": to, "text": text, "subject": subject, "in_reply_to": in_reply_to})
+        return {"ok": True, "provider_id": f"em{len(self.sent)}", "status": "accepted"}
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    monkeypatch.setenv("LIVE_DIR", str(tmp_path / "live"))
+    monkeypatch.setenv("DEMO_TEST_PHONE", OWNER_PHONE)
+    monkeypatch.setenv("DEMO_TEST_EMAIL", OWNER_EMAIL)
+    monkeypatch.setenv("LIVE_ALLOW_PHONES", "")
+    monkeypatch.setenv("LIVE_ALLOW_EMAILS", "")
+    monkeypatch.setenv("LIVE_ALLOW_MESSENGER_PSIDS", "")
+    monkeypatch.setenv("LIVE_SEND_ENABLED", "1")
+    monkeypatch.setenv("LIVE_MAX_PER_HOUR", "30")
+    tf, loc, em = FakeSms("tollfree", "+18885550001"), FakeSms("local", "+19105550002"), FakeEmail()
+    outbound.set_providers({"sms": {"tollfree": tf, "local": loc}, "email": em, "messenger": None})
+    yield {"store": Store(), "tf": tf, "loc": loc, "email": em, "dir": tmp_path / "live"}
+    outbound.set_providers(None)
+
+
+def _all_text(d: Path) -> str:
+    return "\n".join(p.read_text() for p in d.rglob("*") if p.is_file())
+
+
+def test_allowlist_filters_strangers_entirely(env):
+    tf = env["tf"]
+    tf.push(OWNER_PHONE, "Hi, is the room available?", "SM-a")
+    # a stranger's text that a provider might still hand back: dropped before storing
+    tf.inbox.append({"channel": "sms", "contact": STRANGER, "text": "SECRET stranger text", "ext_id": "SM-b",
+                     "ts": None, "line": "tollfree", "line_last4": "0001", "renter_name": None, "meta": {}})
+    allow = config.Allowlist.load()
+    allow.phones.add(STRANGER)  # provider-side filter passes it ...
+    touched = daemon.poll_all(env["store"], allow=config.Allowlist.load())  # ... but the daemon re-checks
+    assert len(touched) == 1
+    threads = api.list_threads()
+    assert len(threads) == 1 and threads[0]["contact_display"].endswith("0100")
+    assert "SECRET stranger text" not in _all_text(env["dir"])
+
+
+def test_threading_per_line_and_contact_and_restart(env):
+    env["tf"].push(OWNER_PHONE, "first", "SM-1")
+    env["tf"].push(OWNER_PHONE, "second", "SM-2")
+    env["loc"].push(OWNER_PHONE, "other line", "SM-3")
+    daemon.poll_all(env["store"])
+    daemon.poll_all(Store())  # restart: same messages are not duplicated
+    ids = sorted(t["thread_id"] for t in api.list_threads())
+    assert ids == sorted([f"sms:0001:{ids[0].split(':')[2]}", f"sms:0002:{ids[0].split(':')[2]}"])
+    t = api.get_thread([i for i in ids if ":0001:" in i][0])
+    assert [m["text"] for m in t["messages"]] == ["first", "second"]
+    assert t["unread"] == 2 and api.get_thread(t["thread_id"])["unread"] == 0
+
+
+def test_email_reply_threads_and_keeps_subject(env):
+    r = api.start_conversation("email", OWNER_EMAIL, "Hi, this is Rentus Homes testing our assistant.")
+    assert r["status"] == "sent"
+    first_subject = env["email"].sent[0]["subject"]
+    assert "[ref " in first_subject
+    env["email"].inbox.append({"channel": "email", "contact": OWNER_EMAIL, "text": "Is the room available?",
+                               "ext_id": "<abc@mail.gmail.com>", "ts": None, "line": "info@rentus.homes",
+                               "line_last4": None, "renter_name": "Owner",
+                               "meta": {"subject": "Re: " + first_subject, "message_id": "<abc@mail.gmail.com>",
+                                        "references": []}})
+    daemon.poll_all(env["store"])
+    assert len(api.list_threads()) == 1
+    api.send_owner_message(r["thread_id"], "Yes it is.")
+    last = env["email"].sent[-1]
+    assert last["subject"] == "Re: " + first_subject and last["in_reply_to"] == "<abc@mail.gmail.com>"
+
+
+def test_start_conversation_refuses_non_allowlisted(env):
+    r = api.start_conversation("sms", STRANGER, "hello")
+    assert r["ok"] is False and env["tf"].sent == []
+
+
+def test_rate_cap(env, monkeypatch):
+    monkeypatch.setenv("LIVE_MAX_PER_HOUR", "2")
+    r = api.start_conversation("sms", OWNER_PHONE, "one")
+    api.send_owner_message(r["thread_id"], "two")
+    third = api.send_owner_message(r["thread_id"], "three")
+    assert len(env["tf"].sent) == 2
+    assert third["status"] == "awaiting_approval" and "rate cap" in third["error"]
+    assert [a["draft_text"] for a in api.list_approvals()] == ["three"]
+
+
+@pytest.mark.parametrize("how", ["env", "file"])
+def test_kill_switch(env, monkeypatch, how):
+    if how == "env":
+        monkeypatch.setenv("LIVE_SEND_ENABLED", "0")
+    else:
+        env["dir"].mkdir(parents=True, exist_ok=True)
+        (env["dir"] / "STOP").touch()
+    r = api.start_conversation("sms", OWNER_PHONE, "hello")
+    assert r["status"] == "awaiting_approval" and env["tf"].sent == []
+    ap = api.list_approvals()[0]
+    d = api.decide(ap["id"], "approve")
+    assert d["ok"] is False and env["tf"].sent == [] and len(api.list_approvals()) == 1
+    if how == "env":
+        monkeypatch.setenv("LIVE_SEND_ENABLED", "1")
+    else:
+        (env["dir"] / "STOP").unlink()
+    d = api.decide(ap["id"], "edit", "hello, edited")
+    assert d["sent"] is True and env["tf"].sent == [(OWNER_PHONE, "hello, edited")]
+    assert api.list_approvals() == []
+    msgs = api.get_thread(r["thread_id"])["messages"]
+    assert [(m["text"], m["status"]) for m in msgs] == [("hello, edited", "sent")]
+
+
+def test_opt_out_stops_sending(env):
+    env["tf"].push(OWNER_PHONE, "STOP", "SM-9")
+    daemon.poll_all(env["store"])
+    tid = api.list_threads()[0]["thread_id"]
+    assert not env["store"].get_thread(tid).get("pending_turn")
+    r = api.send_owner_message(tid, "hello?")
+    assert r["ok"] is False and env["tf"].sent == []
+
+
+class _Res:
+    def __init__(self, events):
+        self.messages, self.events, self.status = [{"role": "user", "content": "x"}], events, "done"
+
+
+def test_operator_turn_sends_for_real_and_escalates(env):
+    import rentus_tools as rt
+
+    daemon.register_adapters(env["store"])
+    env["tf"].push(OWNER_PHONE, "Hi, is the room still available?", "SM-10")
+    daemon.poll_all(env["store"])
+    tid = api.list_threads()[0]["thread_id"]
+
+    def runner(w, inbound, history):
+        assert w.mode == "live" and inbound["text"] == "Hi, is the room still available?"
+        e1 = rt.call(w, "send_message", {"thread_id": tid, "text": "Yes, it is available Nov 1. When are you looking to move in?"})
+        e2 = rt.call(w, "escalate_to_owner", {"reason": "asks about pets", "ref_id": tid, "draft": "Let me check on pets."})
+        return _Res([{"type": "tool_result", "data": {"tool": "send_message", "result": e1}},
+                     {"type": "tool_result", "data": {"tool": "escalate_to_owner", "result": e2}}])
+
+    out = daemon.run_turn(env["store"], tid, runner=runner)
+    assert out["ok"], out
+    assert env["tf"].sent == [(OWNER_PHONE, "Yes, it is available Nov 1. When are you looking to move in?")]
+    t = api.get_thread(tid)
+    assert [m["direction"] for m in t["messages"]] == ["in", "out"] and t["messages"][1]["status"] == "sent"
+    assert t["needs_owner"] and {x["name"] for x in t["trace"]} == {"send_message", "escalate_to_owner"}
+    aps = api.list_approvals()
+    assert aps[0]["draft_text"] == "Let me check on pets."
+    assert api.decide(aps[0]["id"], "deny")["ok"]
+    assert not api.get_thread(tid)["needs_owner"]
+    # the world and history persist: a second inbound message continues the same World thread
+    env["tf"].push(OWNER_PHONE, "Next month", "SM-11")
+    daemon.poll_all(env["store"])
+    seen = {}
+
+    def runner2(w, inbound, history):
+        seen["n"] = len(next(x for x in w.threads if x["thread_id"] == tid)["messages"])
+        seen["history"] = history
+        return _Res([])
+
+    daemon.run_turn(env["store"], tid, runner=runner2)
+    assert seen["n"] == 3 and seen["history"] == [{"role": "user", "content": "x"}]
+
+
+def test_turn_error_retries_then_asks_owner(env):
+    env["tf"].push(OWNER_PHONE, "hello", "SM-20")
+    daemon.poll_all(env["store"])
+    tid = api.list_threads()[0]["thread_id"]
+
+    def boom(w, inbound, history):
+        raise RuntimeError("endpoint down")
+
+    for _ in range(daemon.MAX_TURN_ATTEMPTS):
+        assert daemon.run_turn(env["store"], tid, runner=boom)["ok"] is False
+    t = env["store"].get_thread(tid)
+    assert not t["pending_turn"] and t["needs_owner"]
+    assert api.list_approvals()[0]["reason"].startswith("operator could not answer")
+
+
+class FakePersonal:
+    display = "owner's Messenger"
+
+    def __init__(self):
+        self.inbox, self.sent = [], []
+
+    def connected(self):
+        return True, "fake"
+
+    def poll(self, allow, since, seen):
+        return [m for m in self.inbox if m["ext_id"] not in seen]
+
+    def send(self, contact, text):
+        self.sent.append((contact, text))
+        return {"ok": True, "provider_id": "pm1", "status": "sent"}
+
+
+@pytest.mark.parametrize("drafts", ["0", "1"])
+def test_personal_channel_unlisted_drafts_only(env, monkeypatch, drafts):
+    from channels.live import registry
+    import rentus_tools as rt
+
+    monkeypatch.setenv("LIVE_PERSONAL_DRAFTS", drafts)
+    prov = FakePersonal()
+    registry.register_channel("messenger_personal", prov)
+    try:
+        prov.inbox.append({"channel": "messenger_personal", "contact": "fb-user-77", "text": "Is this available?",
+                           "ext_id": "pm-1", "ts": None, "renter_name": "Dana R", "meta": {}})
+        daemon.register_adapters(env["store"])
+        daemon.poll_all(env["store"])
+        threads = api.list_threads()
+        if drafts == "0":
+            assert threads == [] and "Is this available" not in _all_text(env["dir"])
+            return
+        assert len(threads) == 1 and threads[0]["channel"] == "messenger_personal"
+        tid = threads[0]["thread_id"]
+
+        def runner(w, inbound, history):
+            assert next(x for x in w.threads if x["thread_id"] == tid)["channel"] == "marketplace"
+            rt.call(w, "send_message", {"thread_id": tid, "text": "Yes, it is available Nov 1. When would you move in?"})
+            return _Res([])
+
+        daemon.run_turn(env["store"], tid, runner=runner)
+        assert prov.sent == []
+        msg = api.get_thread(tid)["messages"][-1]
+        assert msg["status"] == "awaiting_approval"
+        ap = api.list_approvals()[0]
+        assert api.decide(ap["id"], "approve")["sent"] is True
+        assert prov.sent == [("fb-user-77", "Yes, it is available Nov 1. When would you move in?")]
+    finally:
+        registry.unregister("messenger_personal")
