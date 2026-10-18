@@ -12,6 +12,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# CHANNELS_IMAP_* from the repo's .env (gitignored); values go into the process env, never printed
+load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
 
 from .email_channel import ingest_files, ingest_lead
 from .imap_reader import ImapConfig, ImapNotConfigured, config_status, fetch_leads
