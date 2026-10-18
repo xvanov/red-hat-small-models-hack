@@ -448,6 +448,10 @@ class ResendGmailEmail:
 
 # ====================================================================== Messenger (Graph)
 
+class RateLimited(RuntimeError):
+    """The provider asked us to slow down; the poller backs off."""
+
+
 class Messenger:
     channel = "messenger"
 
@@ -510,7 +514,12 @@ class Messenger:
         page_id, _ = self.creds()
         code, body = self._req("GET", f"{page_id}/conversations", params={
             "platform": "messenger", "fields": "participants,updated_time", "limit": limit})
-        return body.get("data", []) if code == 200 else []
+        if code != 200:
+            err = body.get("error") or {}
+            if code == 429 or err.get("code") in (4, 17, 32, 613, 80001, 80006):
+                raise RateLimited(f"Graph rate limit (code {err.get('code')})")
+            return []
+        return body.get("data", [])
 
     def poll(self, allow: config.Allowlist, since: datetime, seen: set, include_unlisted: bool = False) -> list[dict]:
         """include_unlisted (public demo mode): read recent conversations of anyone, so the daemon can look for the
@@ -527,8 +536,8 @@ class Messenger:
             psid = next((p.get("id") for p in parts if p.get("id") in allow.psids), None)
             if not psid and include_unlisted:
                 psid = next((p.get("id") for p in parts if p.get("id") != page_id), None)
-                if psid and self._conv_seen.get(conv["id"]) == conv.get("updated_time"):
-                    continue  # unchanged since the last poll: no Graph call (rate limits)
+            if psid and self._conv_seen.get(conv["id"]) == conv.get("updated_time"):
+                continue  # unchanged since the last poll: no Graph call (rate limits)
             if not psid:
                 continue  # not allowlisted: no message text is fetched
             name = next((p.get("name") for p in parts if p.get("id") == psid), None)

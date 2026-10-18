@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import copy
 import os
+import queue
 import re
 import sys
+import threading
 import time
 import traceback
 from datetime import datetime
@@ -51,7 +53,8 @@ class LiveSendAdapter:
 
     def __init__(self, store: Store):
         self.store = store
-        self.buffer: dict[str, list[str]] | None = None
+        self.buffer: dict[str, list[str]] = {}   # live thread id -> texts, only while that thread's turn runs
+        self._mu = threading.Lock()
         self.links: dict[str, str] = {}
 
     def add_lease_link(self, world, thread, url) -> None:
@@ -62,12 +65,13 @@ class LiveSendAdapter:
         else:
             self.links[live_id] = f"Here's the link to complete your application and lease paperwork: {url}"
 
-    def begin_turn(self) -> None:
-        self.buffer = {}
+    def begin_turn(self, thread_id: str) -> None:
+        with self._mu:
+            self.buffer[thread_id] = []
 
-    def take_buffer(self) -> dict[str, list[str]]:
-        b, self.buffer = self.buffer or {}, None
-        return b
+    def take_buffer(self, thread_id: str) -> list[str]:
+        with self._mu:
+            return self.buffer.pop(thread_id, None) or []
 
     def publish_listing(self, world, listing, channel):
         from rentus_tools.errors import ToolError
@@ -76,8 +80,11 @@ class LiveSendAdapter:
     def send_message(self, world, thread, text, attachments):
         from rentus_tools.errors import ToolError
         live_id = thread.get("live_id") or thread["thread_id"]
-        if self.buffer is not None:
-            self.buffer.setdefault(live_id, []).append(text)
+        with self._mu:
+            buffered = live_id in self.buffer
+            if buffered:
+                self.buffer[live_id].append(text)
+        if buffered:
             return {"status": "sent", "screenshot": None,
                     "note": "queued: this turn's messages go out together as one reply when the turn ends"}
         res = outbound.deliver(self.store, live_id, text, origin="operator")
@@ -106,87 +113,113 @@ def register_adapters(store: Store) -> LiveSendAdapter:
 
 # ====================================================================== polling
 
-def poll_all(store: Store, provs: dict | None = None, allow: config.Allowlist | None = None) -> list[str]:
-    """Poll every provider; store allowlisted inbound messages; return thread ids that need a turn."""
+def sources(provs: dict | None = None) -> list[tuple[str, object]]:
     provs = provs or outbound.get_providers()
-    allow = allow or config.Allowlist.load()
-    st = store.state()
-    since = datetime.fromisoformat(st["started"])
-    seen_all = st.setdefault("seen", {})
-    sources = [(f"sms:{n}", p) for n, p in (provs.get("sms") or {}).items()]
-    sources += [(k, provs[k]) for k in ("email", "email_zoho", "messenger") if provs.get(k) is not None]
+    out = [(f"sms:{n}", p) for n, p in (provs.get("sms") or {}).items()]
+    out += [(k, provs[k]) for k in ("email", "email_zoho", "messenger") if provs.get(k) is not None]
     registry.load_from_env()
-    sources += [(name, spec.provider) for name, spec in registry.EXTRA.items()]
-    touched: list[str] = []
-    errors = st.setdefault("errors", {})
+    out += [(name, spec.provider) for name, spec in registry.EXTRA.items()]
+    return out
+
+
+def poll_source(store: Store, key: str, prov, allow: config.Allowlist | None = None) -> list[str]:
+    """Poll one provider; store admitted inbound messages; return thread ids that need a turn. Each source keeps
+    its own seen set / error / start time in state.json, so sources can be polled from separate threads."""
+    allow = allow or config.Allowlist.load()
+    with store.locked():
+        st = store.state()
+        st.setdefault("source_started", {}).setdefault(key, now_iso())
+        store.save_state(st)
+    since = datetime.fromisoformat(st["started"])
+    seen = set(st.get("seen", {}).get(key, []))
+    # a source added later (e.g. the Zoho info@ inbox) only answers mail that arrives after it was added
+    since_k = max(since, datetime.fromisoformat(st["source_started"][key])) if key == "email_zoho" else since
     demo_on = demo.enabled()
-    src_start = st.setdefault("source_started", {})
-    for key, prov in sources:
-        seen = set(seen_all.get(key, []))
-        # a source added later (e.g. the Zoho info@ inbox) only answers mail that arrives after it was added
-        src_start.setdefault(key, now_iso())
-        since_k = max(since, datetime.fromisoformat(src_start[key])) if key == "email_zoho" else since
-        try:
-            if demo_on and key.split(":")[0] in ("sms", "email", "email_zoho", "messenger"):
-                kw = {"include_unlisted": True}
-                if key == "email":
-                    kw["demo_to"] = demo.email_to()
-                items = prov.poll(allow, since_k, seen, **kw)
-            else:
-                items = prov.poll(allow, since_k, seen)
-            errors.pop(key, None)
-        except Exception as e:
-            errors[key] = f"{type(e).__name__}: {str(e)[:150]}"
-            continue
-        for it in items:
-            seen.add(it["ext_id"])
-            listed = allow.allows(it["channel"], it["contact"])
-            spec = registry.EXTRA.get(it["channel"])
-            is_demo = False
-            if not listed and demo_on and it["channel"] in ("sms", "email", "messenger"):
-                with store.locked():
-                    is_demo = demo.admit(store, it["channel"], it["contact"], it["text"], ts=it.get("ts"),
-                                         meta=it.get("meta"))
-            if not listed and not is_demo and not (spec and spec.drafts_for_unlisted()):
-                continue  # never stored, never passed to a model
+    touched: list[str] = []
+    err = None
+    try:
+        if demo_on and key.split(":")[0] in ("sms", "email", "email_zoho", "messenger"):
+            kw = {"include_unlisted": True}
+            if key == "email":
+                kw["demo_to"] = demo.email_to()
+            items = prov.poll(allow, since_k, seen, **kw)
+        else:
+            items = prov.poll(allow, since_k, seen)
+    except Exception as e:
+        items = []
+        err = f"{type(e).__name__}: {str(e)[:150]}"
+    for it in items:
+        seen.add(it["ext_id"])
+        listed = allow.allows(it["channel"], it["contact"])
+        spec = registry.EXTRA.get(it["channel"])
+        is_demo = False
+        if not listed and demo_on and it["channel"] in ("sms", "email", "messenger"):
             with store.locked():
-                t = store.ensure_thread(it["channel"], it["contact"], line=it.get("line"),
-                                        line_last4=it.get("line_last4"), renter_name=it.get("renter_name"))
-                t["allowlisted"] = listed  # unlisted (drafts-only channel): every reply waits for the owner
-                if is_demo and not t.get("demo"):
-                    t.update(demo=True, role="prospect", stage="inquiry")
-                if any(m.get("ext_id") == it["ext_id"] for m in t["messages"]):
-                    continue
-                store.add_message(t, "in", it["text"], "received", ext_id=it["ext_id"], ts=it.get("ts"))
-                if it["channel"] == "email":
-                    meta = it.get("meta") or {}
-                    em = t.setdefault("email", {})
-                    if meta.get("subject"):
-                        s = meta["subject"]
-                        while s.lower().startswith(("re:", "fwd:", "fw:")):
-                            s = s.split(":", 1)[1].strip()
-                        em["subject"] = s
-                    em["references"] = (meta.get("references") or []) + [meta.get("message_id")]
-                    if meta.get("inbox") == "zoho" and not listed:  # strangers to info@: keep the conversation on info@
-                        em["reply_to"] = "info@rentus.homes"
-                if providers.is_opt_out(it["text"]) and (it["channel"] == "sms" or t.get("demo")):
-                    t["opted_out"] = True
-                    t["pending_turn"] = False
-                    t["trace"].append({"ts": now_iso(), "actor": "tool", "name": "opt_out",
-                                       "summary": "contact sent STOP: no more messages on this thread", "ok": True})
-                elif not t.get("opted_out"):  # after STOP: stored, but no more turns
-                    t["pending_turn"] = True
-                    t["turn_attempts"] = 0
-                store.save_thread(t)
-                touched.append(t["thread_id"])
-        seen_all[key] = sorted(seen)[-2000:]
+                is_demo = demo.admit(store, it["channel"], it["contact"], it["text"], ts=it.get("ts"),
+                                     meta=it.get("meta"))
+        if not listed and not is_demo and not (spec and spec.drafts_for_unlisted()):
+            continue  # never stored, never passed to a model
+        with store.locked():
+            t = store.ensure_thread(it["channel"], it["contact"], line=it.get("line"),
+                                    line_last4=it.get("line_last4"), renter_name=it.get("renter_name"))
+            t["allowlisted"] = listed  # unlisted (drafts-only channel): every reply waits for the owner
+            if is_demo and not t.get("demo"):
+                t.update(demo=True, role="prospect", stage="inquiry")
+            if any(m.get("ext_id") == it["ext_id"] for m in t["messages"]):
+                continue
+            store.add_message(t, "in", it["text"], "received", ext_id=it["ext_id"], ts=it.get("ts"))
+            if it["channel"] == "email":
+                meta = it.get("meta") or {}
+                em = t.setdefault("email", {})
+                if meta.get("subject"):
+                    s = meta["subject"]
+                    while s.lower().startswith(("re:", "fwd:", "fw:")):
+                        s = s.split(":", 1)[1].strip()
+                    em["subject"] = s
+                em["references"] = (meta.get("references") or []) + [meta.get("message_id")]
+                if meta.get("inbox") == "zoho" and not listed:  # strangers to info@: keep the conversation on info@
+                    em["reply_to"] = "info@rentus.homes"
+            if providers.is_opt_out(it["text"]) and (it["channel"] == "sms" or t.get("demo")):
+                t["opted_out"] = True
+                t["pending_turn"] = False
+                t["trace"].append({"ts": now_iso(), "actor": "tool", "name": "opt_out",
+                                   "summary": "contact sent STOP: no more messages on this thread", "ok": True})
+            elif not t.get("opted_out"):  # after STOP: stored, but no more turns
+                t["pending_turn"] = True
+                t["turn_attempts"] = 0
+            store.save_thread(t)
+            touched.append(t["thread_id"])
     with store.locked():
         cur = store.state()
-        cur["seen"] = {**cur.get("seen", {}), **seen_all}
-        cur["source_started"] = {**src_start, **cur.get("source_started", {})}
-        cur["errors"] = errors
+        cur.setdefault("seen", {})[key] = sorted(seen)[-2000:]
+        errs = cur.setdefault("errors", {})
+        if err:
+            errs[key] = err
+        else:
+            errs.pop(key, None)
         cur["last_poll"] = now_iso()
+        cur.setdefault("last_poll_by_source", {})[key] = now_iso()
         store.save_state(cur)
+    if err:
+        raise PollError(key, err)
+    return touched
+
+
+class PollError(RuntimeError):
+    def __init__(self, key, msg):
+        super().__init__(f"{key}: {msg}")
+        self.key, self.msg = key, msg
+
+
+def poll_all(store: Store, provs: dict | None = None, allow: config.Allowlist | None = None) -> list[str]:
+    """Poll every provider once, in order (tests, --once)."""
+    allow = allow or config.Allowlist.load()
+    touched: list[str] = []
+    for key, prov in sources(provs):
+        try:
+            touched += poll_source(store, key, prov, allow)
+        except PollError:
+            pass
     return touched
 
 
@@ -326,8 +359,7 @@ def flush(store: Store, thread_id: str, channel: str, renter_text: str) -> dict 
     """Deliver this turn's buffered operator messages as one composed reply. Returns a trace entry."""
     if ADAPTER is None:
         return None
-    buf = ADAPTER.take_buffer()
-    texts = buf.get(thread_id, [])
+    texts = ADAPTER.take_buffer(thread_id)
     link = (ADAPTER.links or {}).pop(thread_id, None)
     if link:
         texts = texts + [link]
@@ -426,7 +458,7 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
         inbound = {"thread_id": wid, "channel": registry.world_channel(t["channel"]),
                    "renter_name": t.get("renter_name") or "a renter", "text": "\n".join(m["text"] for m in new_in)}
         if ADAPTER is not None:
-            ADAPTER.begin_turn()
+            ADAPTER.begin_turn(thread_id)
         if runner is None:
             from rentus_operator import toolbox
             from rentus_operator.loop import run
@@ -440,11 +472,11 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
             res = runner(w, inbound, history)
     except Exception as e:
         if ADAPTER is not None:
-            ADAPTER.take_buffer()  # nothing from a failed turn goes out; the retry rebuilds it
+            ADAPTER.take_buffer(thread_id)  # nothing from a failed turn goes out; the retry rebuilds it
         return _fail_turn(store, thread_id, f"{type(e).__name__}: {str(e)[:200]}")
     if getattr(res, "status", None) == "model_error":
         if ADAPTER is not None:
-            ADAPTER.take_buffer()
+            ADAPTER.take_buffer(thread_id)
         return _fail_turn(store, thread_id, "model_error: " + str(getattr(res, "final_text", "") or "")[:160])
     delivered = flush(store, thread_id, t["channel"], inbound["text"])
     with store.locked():
@@ -508,6 +540,100 @@ def tick(store: Store) -> dict:
     return {"new": len(touched), "turns": turns}
 
 
+def _interval(key: str) -> float:
+    name = {"sms": "LIVE_POLL_SMS", "messenger": "LIVE_POLL_MESSENGER", "email": "LIVE_POLL_EMAIL",
+            "email_zoho": "LIVE_POLL_EMAIL"}.get(key.split(":")[0])
+    default = {"LIVE_POLL_SMS": 2.0, "LIVE_POLL_MESSENGER": 3.0, "LIVE_POLL_EMAIL": 5.0}.get(name, config.poll_seconds())
+    try:
+        return float(config.env(name, str(default)) or default) if name else default
+    except ValueError:
+        return default
+
+
+class Runner:
+    """One poller thread per source (a slow IMAP or Graph call never delays SMS) and a few turn workers fed by a
+    queue: a turn starts the moment an inbound message is stored. One turn per thread at a time (busy marker in
+    run_turn); a sweeper re-queues pending turns (retries) every few seconds. Pollers back off on errors (up to
+    120 s) and on provider rate limits (at least 60 s)."""
+
+    def __init__(self, store: Store, provs: dict | None = None, *, workers: int = 3, turn=None, log=print):
+        self.store, self.provs = store, provs
+        self.q: queue.Queue = queue.Queue()
+        self.stop = threading.Event()
+        self.turn = turn or (lambda tid: run_turn(store, tid))
+        self.workers, self.log = workers, log
+        self.threads: list[threading.Thread] = []
+        self._queued: set = set()
+        self._qmu = threading.Lock()
+
+    def enqueue(self, tid: str) -> None:
+        with self._qmu:
+            if tid in self._queued:
+                return
+            self._queued.add(tid)
+        self.q.put(tid)
+
+    def _poller(self, key: str, prov) -> None:
+        base = _interval(key)
+        delay, fails = base, 0
+        while not self.stop.is_set():
+            try:
+                for tid in poll_source(self.store, key, prov):
+                    self.enqueue(tid)
+                fails, delay = 0, base
+            except PollError as e:
+                fails += 1
+                delay = min(base * (2 ** fails), 120.0)
+                if "RateLimited" in e.msg:
+                    delay = max(delay, 60.0)
+                self.log(time.strftime("%H:%M:%S"), f"poll {key} failed ({e.msg[:120]}); next in {delay:.0f}s")
+            except Exception as e:  # never let a poller die
+                fails += 1
+                delay = min(base * (2 ** fails), 120.0)
+                self.log(time.strftime("%H:%M:%S"), f"poll {key} crashed: {type(e).__name__}: {str(e)[:120]}")
+            self.stop.wait(delay)
+
+    def _worker(self) -> None:
+        while not self.stop.is_set():
+            try:
+                tid = self.q.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            with self._qmu:
+                self._queued.discard(tid)
+            try:
+                r = self.turn(tid)
+            except Exception as e:  # counts as a failed attempt; other threads keep going
+                r = _fail_turn(self.store, tid, f"{type(e).__name__}: {str(e)[:200]}")
+            if r and not r.get("skipped"):
+                self.log(time.strftime("%H:%M:%S"), {tid: r})
+
+    def _sweeper(self) -> None:
+        while not self.stop.wait(5.0):
+            try:
+                for t in self.store.all_threads():
+                    if t.get("pending_turn") and not t.get("busy"):
+                        self.enqueue(t["thread_id"])
+            except Exception:
+                pass
+
+    def start(self) -> "Runner":
+        for key, prov in sources(self.provs):
+            self.threads.append(threading.Thread(target=self._poller, args=(key, prov), name=f"poll-{key}", daemon=True))
+        for i in range(self.workers):
+            self.threads.append(threading.Thread(target=self._worker, name=f"turn-{i}", daemon=True))
+        self.threads.append(threading.Thread(target=self._sweeper, name="sweeper", daemon=True))
+        for th in self.threads:
+            th.start()
+        for t in self.store.all_threads():  # pending from before a restart
+            if t.get("pending_turn"):
+                self.enqueue(t["thread_id"])
+        return self
+
+    def close(self) -> None:
+        self.stop.set()
+
+
 class DaemonRunning(RuntimeError):
     pass
 
@@ -557,13 +683,19 @@ def main(once: bool = False) -> int:
     allow = config.Allowlist.load()
     print(time.strftime("%H:%M:%S"), f"live daemon pid={os.getpid()}: dir={store.root} allowlist={allow.size()} "
           f"send_enabled={config.send_enabled()} public={'open since ' + since if since else ('keyword' if demo.keyword_mode() else 'off')} lines={[str(l) for l in config.sms_lines()]}", flush=True)
-    while True:
+    if once:
         try:
             r = tick(store)
-            if r["new"] or r["turns"]:
-                print(time.strftime("%H:%M:%S"), r, flush=True)
+            print(time.strftime("%H:%M:%S"), r, flush=True)
         except Exception:
             print(time.strftime("%H:%M:%S"), traceback.format_exc(limit=3), flush=True)
-        if once:
-            return 0
-        time.sleep(config.poll_seconds())
+        return 0
+    runner = Runner(store, log=lambda *a: print(*a, flush=True)).start()
+    print(time.strftime("%H:%M:%S"), "pollers: " + ", ".join(f"{k} every {_interval(k):g}s" for k, _ in sources()),
+          flush=True)
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        runner.close()
+        return 0

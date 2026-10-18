@@ -842,3 +842,40 @@ def test_zoho_stranger_reply_stays_on_info(open_env):
     assert sent["to"] == "jane@example.com" and sent["reply_to"] == "info@rentus.homes"
     assert sent["subject"] == "Re: Room on Appling Way" and sent["in_reply_to"] == "<j1@mail>"
     assert sent["text"].startswith("Hi Jane,\n\nYou're chatting with Rentus Homes' AI assistant.")
+
+
+# ---------------------------------------------------------------- round 8: per-source pollers, immediate turns
+
+def test_sms_not_blocked_by_hanging_imap(env, monkeypatch):
+    import threading
+    import time as _t
+    monkeypatch.setenv("LIVE_POLL_SMS", "0.1")
+    hang = threading.Event()
+
+    class HangingImap:
+        def poll(self, *a, **k):
+            hang.wait(30)  # an IMAP server that never answers
+            return []
+
+    outbound.get_providers()["email"] = HangingImap()
+    outbound.get_providers()["email_zoho"] = HangingImap()
+    daemon.register_adapters(env["store"])
+    import rentus_tools as rt
+
+    def turn(tid):
+        def runner(w, inbound, h):
+            rt.call(w, "send_message", {"thread_id": inbound["thread_id"], "text": "Rent is $750 a month."})
+            return _Res([])
+        return daemon.run_turn(env["store"], tid, runner=runner)
+
+    r = daemon.Runner(env["store"], outbound.get_providers(), turn=turn, log=lambda *a: None).start()
+    try:
+        _t.sleep(0.3)
+        t0 = _t.time()
+        env["tf"].push(OWNER_PHONE, "how much?", "SM-r1")
+        while not env["tf"].sent and _t.time() - t0 < 5:
+            _t.sleep(0.05)
+        assert env["tf"].sent and _t.time() - t0 < 2.0
+    finally:
+        r.close()
+        hang.set()
