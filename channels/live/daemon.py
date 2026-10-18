@@ -454,7 +454,9 @@ def flush(store: Store, thread_id: str, channel: str, renter_text: str, gate: di
         if channel == "email":  # the email already opens with "Hi <name>,"
             d = d.removeprefix("Hi, ").removeprefix("Hola, ")
             d = d[:1].upper() + d[1:]
-        parts[0] = d + ("\n\n" if channel == "email" else " ") + parts[0]
+        body0 = re.sub(r"^(hi|hello|hey|hola|buenas)( there)?[,!.]?\s+", "", parts[0], flags=re.I)  # one greeting only
+        body0 = body0[:1].upper() + body0[1:]
+        parts[0] = d + ("\n\n" if channel == "email" else " ") + body0
     results = [outbound.deliver(store, thread_id, p, origin="operator") for p in parts]
     ok = all(r.get("status") in ("sent", "awaiting_approval") for r in results)
     if tt.get("demo") and any(r.get("status") == "sent" for r in results):
