@@ -138,3 +138,34 @@ Not done (budget): a second operator seed for Opus, and the full 1,419-row reade
 - `format_facts` (showing hours rendered "10:00 to 18:00" like the NeMo rows instead of the raw policy dict) and reasoning off are implemented as variants (`facts`, `think_off`) but not run.
 - The NeMo row with prompt v3 is the NeMo-path run of the final config: guard and the style pre-check live in our loop, not in `simple_agent`, and reasoning history is already NeMo's default. A second NeMo run is pending.
 - Single runs for the "alone" rows; the spread above (about ±0.02) applies.
+
+## Router (smoke test, not final)
+
+**Status: smoke test only, not a measurement.** 8 tasks, 1 run each, train split. The owner asked for a run that shows the router works and counts Lightning calls; the real comparison will run later on the realistic task set built from the owner's data. Don't quote these numbers as a result.
+
+**What it is.** `RunConfig(router=True)` (default off, `operator/rentus_operator/router.py`, described in `operator/README.md`). The 0.6B reader reads every inbound renter message before Lightning does, and code picks one of five decisions per message burst: `NO_OP` (platform system text, a re-sent duplicate, an ack while we asked nothing), `RECORD_ONLY` (pure data that the model reader and the rule reader agree on; code writes it to the register), `BATCH` (several messages before we answered: one turn), `ESCALATE_DIRECT` (hard no that both readers agree on, or abuse: code escalates with the reader's summary), and `LIGHTNING`. Every decision is logged as an event with actor `router`. Lightning still writes every renter reply. Its turn opens with the reader's parse and the register's current values, and the turn ends as soon as its `send_message` succeeds, so it no longer spends a model call on a closing summary after each reply. No new model: the budget is unchanged (Lightning 30B + reader 0.6B).
+
+**Setup.** Task set v2 train (as committed at `20a3de3`): `lease-{full, vague_date, spanish, small_talk, price_push, volunteered, hard_no, not_now}-train-001`. Final config (guard + prompt v3 + style pre-check + reasoning history) with the fine-tuned reader in both arms, 8 workers, temperature 0.2. The GPU was shared with other sessions' runs, so latency is not controlled.
+
+| | pass | mean reward | Lightning calls / conversation | input tokens / conv | output tokens / conv | reply latency p50 / mean | runs that hit the 30-step cap |
+|---|---|---|---|---|---|---|---|
+| router off | 1/8 | 0.886 | 24.6 | 322k | 10.5k | 16.1 s / 19.2 s | 6 of 8 |
+| router on, first version | 1/8 | 0.789 | 13.1 | 123k | 6.8k | 8.7 s / 12.6 s | 0 |
+| **router on, after two fixes** | **4/8** | **0.868** | **12.8** | **125k** | **7.5k** | 12.8 s / 14.8 s | 0 |
+
+Router decisions in the fixed run (46 routed events): LIGHTNING 34, RECORD_ONLY 9, BATCH 2, ESCALATE_DIRECT 1, NO_OP 0. Runs: `gym/results/train-v2-routersmoke-guard+prompt3+style+rhist+readermodel{,+router,+router-fix1}/`. Each per-task row has `model_calls`, `usage`, `reply_latency_s` and `router_decisions`.
+
+What the smoke run shows, read with care:
+- **Calls and tokens: the clearest effect.** About half the Lightning calls (24.6 to 12.8) and 61% fewer input tokens per conversation. Most of the saving comes from ending the turn on the send and from Lightning not re-reading and re-recording what the router already parsed. It does **not** come from skipping Lightning: the scripted Gym renters always owe a next question, so a reply was owed on every RECORD_ONLY event, and Lightning was skipped entirely 0 times. NO_OP only fires on real-inbox noise (reactions, duplicates, acks), which these tasks don't contain. The off arm's call count is capped: 6 of 8 off runs hit the 30-step limit.
+- **Quality: no clear loss after the fixes, and no proof of a gain.** Router on passed 4 tasks against 1, but reward was slightly lower (0.868 vs 0.886). With 8 tasks and 1 run, one task moves the mean by about 0.1, so both differences are noise until measured properly.
+- **The first version hurt quality (0.789), and the cause was found on these train tasks.** (1) The duplicate rule treated a renter's repeated stock line, given as the answer to a *new* question, as noise, and ended the conversation. Now only text re-sent before we answered counts as a duplicate. (2) Once the gate was complete, Lightning re-sent `upsert_renter` with value-less items (`{"lease": {"status": "answered", "months": 12}}`) that erased values the router had recorded, and `propose_showing` was then refused. In router mode the verifier now drops an update that would erase an already-recorded exact value, and the note shows the register's current values. Both fixes came from these 8 train transcripts and were checked on the same 8, so the fixed row is optimistic.
+- **One new failure mode to watch.** In `price_push` (fixed run), Lightning returned 4 empty responses in a row on the batched opening (no text, no tool call), so the renter got nothing (reward 0.38). One sample, cause not known.
+- Hard no: router on marked the renter `lost` and escalated by code, and Lightning wrote the single close (1.00). Router off forgot to set `lost` (0.86).
+- Latency is lower with the router (p50 16.1 s to 12.8 s), but other runs shared the GPU, so treat it as indicative only.
+
+Reproduce:
+```bash
+IDS=lease-full-train-001,lease-vague_date-train-001,lease-spanish-train-001,lease-small_talk-train-001,lease-price_push-train-001,lease-volunteered-train-001,lease-hard_no-train-001,lease-not_now-train-001
+gym/.venv/bin/python gym/ablate.py --run-name _ --split train --tasks-version v2 --prefix train-v2-routersmoke- --workers 8 --ids $IDS \
+    --variants guard+prompt3+style+rhist+readermodel,guard+prompt3+style+rhist+readermodel+router
+```

@@ -220,3 +220,33 @@ def test_router_off_is_unchanged(be, make_world):
     res = run(w, "Owner task", client=client, backend=be, config=RunConfig(model="stub"))
     assert res.status == "done" and "Router mode" not in client.requests[0]["messages"][0]["content"]
     assert "router=on" not in RunConfig().label() and "router=on" in RunConfig(router=True).label()
+
+
+def test_repeat_answering_a_new_question_is_not_a_duplicate(monkeypatch):
+    model_reader(monkeypatch)
+    w = world_with([("renter", "hi"), ("operator", "What is your move-in date?"), ("renter", "Not sure what you mean"),
+                    ("operator", "What exact date would you move in?"), ("renter", "Not sure what you mean")])
+    r = RT.Router(w, rt, None, RunConfig(router=True))
+    r.seen.update({"m0", "m2"})
+    assert r.route(T).decision != RT.NO_OP
+
+
+def test_protect_gate_drops_value_less_overwrites():
+    row = {"gate": {"lease": {"status": "answered", "value": True}, "phone": {"status": "answered", "value": "+19195550166"},
+                    "move_in": {"status": "vague", "date": None, "raw": "soon"}}}
+    args = {"thread_id": T, "fields": {"name": "Ana", "gate": {"lease": {"status": "answered", "months": 12},
+                                                               "phone": "+19195550177", "move_in": "2026-11-01"}}}
+    out, dropped = RT.protect_gate(args, row)
+    assert dropped == ["lease"] and out["fields"]["gate"] == {"phone": "+19195550177", "move_in": "2026-11-01"}
+    assert out["fields"]["name"] == "Ana"
+
+
+def test_router_mode_refuses_an_erasing_upsert(monkeypatch):
+    model_reader(monkeypatch)
+    w = world_with([("renter", "hi")])
+    toolbox.call(rt, w, "upsert_renter", {"thread_id": T, "fields": {"gate": {"lease": {"status": "answered", "value": True}}}})
+    client = StubClient([turn(call("upsert_renter", thread_id=T, fields={"gate": {"lease": {"status": "answered"}}})),
+                         turn(content="ok")])
+    res = run(w, "Owner task", client=client, backend=rt, config=RunConfig(model="stub", router=True))
+    assert reg(w)["gate"]["lease"]["value"] is True
+    assert "already recorded" in json.dumps([m for m in res.messages if m["role"] == "tool"])

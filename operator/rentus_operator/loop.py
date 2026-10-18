@@ -190,6 +190,18 @@ class _Runner:
             self.emit("verifier", "verifier", {"stage": "pre-call", "tool": name, "ok": True,
                                                "repaired": chk.repaired, "call_id": tc["id"]})
         args = chk.args
+        if self.cfg.router and name == "upsert_renter":
+            from .router import protect_gate, renter_row
+            args, dropped = protect_gate(args, renter_row(self.world, (args or {}).get("thread_id")))
+            if dropped:
+                self.emit("verifier", "verifier", {"stage": "pre-call", "tool": name, "ok": False, "call_id": tc["id"],
+                                                   "problems": [f"would erase recorded gate items: {dropped}"]})
+                if not args.get("fields"):
+                    return {"ok": False, "error": {"code": "INVALID_ARGS", "retryable": False, "message":
+                            f"gate items {', '.join(dropped)} are already recorded with exact values; this update "
+                            "has no value and would erase them, so it was not run. Leave recorded items out."},
+                            "verifier": {"action": "change course", "suggestion": "the register already has them; "
+                                         "continue with the next step"}}
         sig = V.signature(name, args)
         if self.cfg.style_precheck and name == "send_message":
             fb = V.style_precheck(args)

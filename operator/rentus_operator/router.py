@@ -106,15 +106,17 @@ def renter_row(world, thread_id: str) -> dict | None:
     return None
 
 
-def gate_missing(row: dict | None) -> list[str]:
-    """Same strict rule as the register tool (lease needs an explicit yes)."""
+def gate_missing(row: dict | None, floor: int = 6) -> list[str]:
+    """Same strict rule as the register tool's gate_missing."""
     g = (row or {}).get("gate") or {}
     miss = []
     for k in FIELDS:
         v = g.get(k) or {}
         ok = v.get("status") in GOOD and (v.get("date") if k == "move_in" else v.get("value"))
-        if k == "lease":
-            ok = v.get("status") == "answered" and v.get("value") is True
+        if k == "lease":   # mirrors rentus_tools register.lease_ok (D23: an accepted term >= the floor passes)
+            m = v.get("months")
+            ok = v.get("status") == "answered" and (m >= floor if isinstance(m, int) and not isinstance(m, bool)
+                                                    else v.get("value") is True)
         if k == "reason":
             ok = v.get("status") == "answered" and v.get("value")
         if not ok:
@@ -199,6 +201,44 @@ def parse_summary(parse: dict) -> str:
     bits.append(f"intents={parse.get('intents') or []}")
     bits.append(f"language={parse.get('language', 'en')}")
     return ", ".join(bits)
+
+
+def register_summary(row: dict | None) -> str:
+    g = (row or {}).get("gate") or {}
+    bits = []
+    for f in FIELDS:
+        v = g.get(f) or {}
+        if v.get("status") in GOOD:
+            val = v.get("date") if f == "move_in" else v.get("value")
+            bits.append(f"{f}={json.dumps(val, ensure_ascii=False)}")
+    if row and row.get("renter_id"):
+        bits.append(f"renter_id={row['renter_id']}")
+    return ", ".join(bits)
+
+
+def protect_gate(args: dict, row: dict | None) -> tuple[dict, list[str]]:
+    """Router mode: drop gate items from an upsert_renter call that would erase an item already recorded with an
+    exact value (a status-only or value-less update). Returns (args to run, items dropped)."""
+    fields = (args or {}).get("fields")
+    gate = fields.get("gate") if isinstance(fields, dict) else None
+    if not isinstance(gate, dict) or not row:
+        return args, []
+    have = row.get("gate") or {}
+    dropped = []
+    for k, v in list(gate.items()):
+        cur = have.get(k) or {}
+        cur_val = cur.get("date") if k == "move_in" else cur.get("value")
+        if cur.get("status") not in GOOD or cur_val in (None, ""):
+            continue
+        new_val = (v.get("date") if k == "move_in" else v.get("value")) if isinstance(v, dict) else v
+        if new_val in (None, "") or (isinstance(v, dict) and v.get("status", "answered") not in GOOD) \
+                or (k == "lease" and not isinstance(new_val, bool)):
+            dropped.append(k)
+    if not dropped:
+        return args, []
+    gate = {k: v for k, v in gate.items() if k not in dropped}
+    fields = {k: v for k, v in fields.items() if k != "gate"} | ({"gate": gate} if gate else {})
+    return {**args, "fields": fields}, dropped
 
 
 # ----------------------------------------------------------------------------------- decision
@@ -300,7 +340,9 @@ class Router:
         if not new:
             return mk(NO_OP, "no new renter message")
 
-        earlier = {_norm(m.get("text")) for m in msgs if m.get("from") not in ("operator", "owner")
+        # a duplicate = the same text re-sent before we answered; a repeat that answers a new question of ours is not
+        last_ours = max((i for i, m in enumerate(msgs) if m.get("from") in ("operator", "owner")), default=-1)
+        earlier = {_norm(m.get("text")) for m in msgs[last_ours + 1:] if m.get("from") not in ("operator", "owner")
                    and self._mid(m) not in ids}
         asked = question_pending(msgs)
         keep, dropped, seen_now = [], [], set()
@@ -399,7 +441,12 @@ class Router:
             lines.append("Already recorded to the register by code, do not record again: "
                          + ", ".join(f"{k}={json.dumps(v.get('date') if k == 'move_in' else v.get('value'), ensure_ascii=False)}"
                                      for k, v in recorded.items()) + ".")
-        lines.append("Gate items still missing: " + (", ".join(missing) if missing else "none, the gate is complete") + ".")
+        reg_now = register_summary(renter_row(self.world, thread_id))
+        if reg_now:
+            lines.append(f"Register now: {reg_now}.")
+        lines.append("Gate items still missing: " + (", ".join(missing) if missing else
+                     "none, the gate is complete: do not call upsert_renter for gate items again, go to "
+                     "find_showing_slots and propose_showing") + ".")
         if first:
             lines.append("This is the first message on the thread: read_thread and get_room first.")
         lines.append(f"Record with upsert_renter any answered item the router did not record, do any other action "
