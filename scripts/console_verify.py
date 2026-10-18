@@ -162,13 +162,13 @@ def path_approval(p):
         check("Marketplace Messenger thread labeled", "Marketplace · Messenger" in pg.inner_text(".convo-head"))
 
         # Facebook Page: prepare (unpublished) and Publish only on the owner's click, against the fake Page
-        rid = httpx.post(base + "/api/runs", json={"goal": "Appling Way room free Nov 1, $750, private bath"}, timeout=30).json()["run_id"]
+        rid = httpx.post(base + "/api/runs", json={"goal": "Appling Way room free Nov 1, $750, private bath", "origin": "verify"}, timeout=30).json()["run_id"]
         for _ in range(60):
             if get(f"/api/runs/{rid}/posts", base)["listings"]:
                 break
             time.sleep(0.5)
         pg.on("dialog", lambda d: d.accept())
-        pg.goto(base + "/#/assistant")
+        pg.goto(base + f"/?origin=verify&run={rid}#/assistant")
         pg.wait_for_selector('button[data-fb="prepare"]', timeout=20000)
         fb0 = get(f"/api/runs/{rid}/posts", base)["listings"][0]["channels"][-1]["state"]
         check("Facebook Page is never posted without a click", fb0 == "not_prepared", fb0)
@@ -236,11 +236,12 @@ def path_phone(p):
 
 
 def path_assistant(p, timeout=240):
-    b, pg = open_page(p, API + "/#/assistant")
+    b, pg = open_page(p, API + "/?origin=verify#/assistant")  # tagged: verify runs never show in the owner's history
     pg.wait_for_selector("#ask", timeout=15000)
+    check("opening the Assistant sends nothing and the box starts empty", pg.input_value("#ask") == "" and not pg.query_selector(".turn-owner"))
     pg.click("#new-chat")
     pg.wait_for_timeout(1000)
-    pg.fill("#ask", "Appling Way room free Nov 1, $750, private bath. Post it on Marketplace, Roomies and Craigslist.")
+    pg.fill("#ask", "Appling Way room free Nov 1, $750, private bath. Post it on Marketplace, Roomies, Craigslist and the Facebook Page.")
     pg.click("#ask-send")
     t0 = time.time()
     try:
@@ -256,9 +257,20 @@ def path_assistant(p, timeout=240):
         n = int(re.search(r"(\d+) tool call", tog).group(1)) if re.search(r"(\d+) tool call", tog) else 0
         check("tool calls listed under the reply", n >= 2, tog.replace("\n", " "))
         pg.click(".steps-toggle")
+    rid = get("/api/status").get("active_run")
+    if rid:
+        ls = get(f"/api/runs/{rid}/posts").get("listings") or []
+        rows = [r for l in ls for r in l["channels"] if r["channel"] != "facebook_page"]
+        states = ", ".join(f"{r['channel']}={r['label']}" for r in rows)
+        check("every platform is Ready / Needs login (never Posted or sandbox)", rows and all(r["state"] in ("ready", "login") for r in rows), states)
+        if ls and ls[0].get("photos"):
+            check("photo strip on the listing card", len(pg.query_selector_all(".listing-prev .strip img")) == len(ls[0]["photos"]),
+                  f"{len(ls[0]['photos'])} photos")
     check("listing card with per-channel status", pg.is_visible(".listing-prev") and len(pg.query_selector_all(".listing-prev .rows > div")) >= 1)
     check("no page errors", not pg._errors, "; ".join(pg._errors[:2]))
     shoot(pg, "console-assistant.png")
+    check("verify run kept out of the owner's chat history", all(c["run_id"] != rid for c in get("/api/chats")))
+    httpx.post(API + "/api/reset", timeout=15)  # leave nothing running for the owner
     b.close()
 
 

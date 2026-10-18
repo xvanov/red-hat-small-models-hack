@@ -259,3 +259,14 @@ def test_posting_status_and_facebook_publish_on_click(base):
     r = httpx.post(base + f"/api/runs/{rid}/listings/{lid}/facebook", json={"action": "publish"}).json()
     assert r["state"] == "published" and r["permalink"].startswith("https://example.invalid/")
     httpx.post(base + f"/api/runs/{rid}/stop")
+
+
+def test_chat_history_lists_only_owner_chats(base):
+    base, _ = base
+    t = httpx.post(base + "/api/runs", json={"goal": "test run", "origin": "test"}).json()["run_id"]
+    o = httpx.post(base + "/api/runs", json={"goal": "Owner asks something", "origin": "assistant"}).json()["run_id"]
+    chats = httpx.get(base + "/api/chats").json()
+    ids = [c["run_id"] for c in chats]
+    assert o in ids and t not in ids
+    assert next(c for c in chats if c["run_id"] == o)["title"] == "Owner asks something"
+    httpx.post(base + "/api/reset")

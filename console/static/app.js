@@ -541,11 +541,12 @@ function mountAssistant() {
     root.dataset.mounted = "1";
     root.innerHTML = `
       <div class="assist">
+        <aside class="history"><div class="history-head">Conversations</div><div id="history"></div></aside>
         <div class="chat">
           <div class="page-head" style="padding-bottom:10px;border-bottom:1px solid var(--line)"><h1>Assistant</h1><span class="sub">Tell the operator what you need. It lists rooms, handles repairs and asks you before anything goes out.</span><div class="right"><button class="btn sm" id="new-chat">New chat</button></div></div>
           <div class="chat-scroll" id="chat-scroll"><div class="chat-inner" id="chat"></div></div>
           <div class="chat-compose"><div class="composer">
-            <textarea id="ask" rows="2" placeholder="e.g. Appling Way room free Nov 1, $750, private bath"></textarea>
+            <textarea id="ask" rows="2" placeholder="Message the operator…"></textarea>
             <div class="bar"><span id="run-state"></span><button class="btn primary sm" id="ask-send">${I.send}Send</button></div>
           </div></div>
         </div>
@@ -553,23 +554,48 @@ function mountAssistant() {
       </div>`;
     $("#ask-send").onclick = ask;
     $("#ask").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); } });
-    $("#new-chat").onclick = async () => {
-      await post("/api/reset").catch(() => {});
-      attachRun(null);
-    };
+    $("#new-chat").onclick = () => { attachRun(null); $("#ask").focus(); }; // the next message starts a fresh run
     $("#chat").addEventListener("click", (e) => {
       const b = e.target.closest(".steps-toggle");
       if (b) { const t = S.turns[+b.dataset.i]; t.open = !t.open; renderChat(); return; }
       const s = e.target.closest(".suggest button");
-      if (s) { $("#ask").value = s.textContent; ask(); }
+      if (s) { const ta = $("#ask"); ta.value = s.dataset.text; ta.focus(); } // fills the box only; the owner presses Send
+    });
+    $("#history").addEventListener("click", (e) => {
+      const it = e.target.closest(".hitem");
+      if (it && it.dataset.id !== S.run) attachRun(it.dataset.id);
     });
   }
-  const active = S.status?.active_run;
-  const live = active && !["stopped", "error"].includes(S.status?.run_status);
-  if (live && active !== S.run) attachRun(active);
-  else if (!live && !S.run) renderChat();
+  // never auto-send; reopen the owner's own open chat only (test and verify runs are not in the history)
+  const want = new URLSearchParams(location.search).get("run"); // a link to one conversation (?run=<id>)
+  if (!S.run && want && !S.wantDone) { S.wantDone = true; attachRun(want); }
+  if (!S.run && S.chats) {
+    const open = S.chats.find((c) => c.open);
+    if (open) attachRun(open.run_id);
+  }
+  renderHistory();
+  renderChat();
   renderSide();
 }
+
+async function pollChats() {
+  try { S.chats = await j("/api/chats"); } catch { return; }
+  renderHistory();
+}
+function renderHistory() {
+  const el = $("#history");
+  if (!el) return;
+  const chats = S.chats || [];
+  const key = JSON.stringify([chats, S.run]);
+  if (el.dataset.key === key) return;
+  el.dataset.key = key;
+  el.innerHTML = chats.length ? chats.map((c) => `<div class="hitem ${c.run_id === S.run ? "sel" : ""}" data-id="${esc(c.run_id)}">
+      <div class="ht">${esc(c.title || "Untitled")}</div>
+      <div class="hd">${esc(new Date(c.started).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }))}${c.open ? ` · <span class="live">open</span>` : ""}</div></div>`).join("")
+    : `<div class="muted small" style="padding:12px 14px">Your conversations with the operator will be listed here.</div>`;
+}
+const chatOpen = () => !S.run || (S.chats || []).some((c) => c.run_id === S.run && c.open)
+  || (S.run === S.status?.active_run && !["stopped", "error"].includes(S.status?.run_status));
 
 function attachRun(id) {
   if (S.es) { S.es.close(); S.es = null; }
@@ -578,6 +604,7 @@ function attachRun(id) {
   S.runView = null;
   S.posts = null;
   S.calls = {};
+  renderHistory();
   renderChat();
   renderSide();
   if (!id) return;
@@ -637,12 +664,15 @@ function renderChat() {
   if (!el) return;
   const st = S.status?.run_status;
   const busy = S.turns.length && !curTurn().done;
-  $("#run-state").textContent = busy ? "Working…" : S.run ? "" : "Enter to send";
+  const open = chatOpen();
+  $("#run-state").textContent = !open ? "This conversation has ended. Start a new chat to continue." : busy ? "Working…" : "Enter to send";
+  $("#ask").disabled = !open;
+  $("#ask-send").disabled = !open;
   if (!S.turns.length) {
     el.innerHTML = `<div class="empty" style="padding-top:80px">${I.bot}<b>What should the operator do?</b><div>Describe a room to list, a repair, or a question about your renters.</div>
-      <div class="suggest">
-        <button>Appling Way room free Nov 1, $750, private bath. Post it on Marketplace, Roomies and Craigslist.</button>
-        <button>The tenant at Appling Way says the kitchen sink is leaking. Get quotes and book the cheapest plumber under $400.</button>
+      <div class="suggest"><div class="small muted">Examples (click to put one in the message box)</div>
+        <button data-text="Appling Way room free Nov 1, $750, private bath. Post it on Marketplace, Roomies, Craigslist and the Facebook Page.">List a room on the sites and the Facebook Page</button>
+        <button data-text="The tenant at Appling Way says the kitchen sink is leaking. Get quotes and book the cheapest plumber under $400.">Handle a repair within a budget</button>
       </div></div>`;
     return;
   }
@@ -676,10 +706,10 @@ async function ask() {
   const text = ta.value.trim();
   if (!text) return;
   ta.value = "";
-  const st = S.status?.run_status;
   try {
-    if (!S.run || ["stopped", "error"].includes(st)) {
-      const r = await post("/api/runs", { goal: text, seed_renters: false, live_channels: true });
+    if (!S.run) {
+      const r = await post("/api/runs", { goal: text, seed_renters: false, live_channels: true, origin: ORIGIN });
+      await pollChats();
       attachRun(r.run_id);
       S.status = { ...(S.status || {}), active_run: r.run_id, run_status: "starting" };
     } else {
@@ -701,6 +731,7 @@ async function pollRunView() {
   } catch { /* run gone */ }
 }
 
+const ORIGIN = new URLSearchParams(location.search).get("origin") || "assistant"; // console_verify opens ?origin=verify
 const POST_CLS = { posted: "ok", published: "ok", ready: "warn", draft: "warn", login: "warn", failed: "err", not_connected: "", not_prepared: "" };
 function postRow(lid, r) {
   const cls = POST_CLS[r.state] ?? "";
@@ -711,6 +742,7 @@ function postRow(lid, r) {
     else if (r.state === "published" && r.url) act = `<a class="btn sm" href="${esc(r.url)}" target="_blank" rel="noopener">View post</a>`;
   } else if (r.url && r.state === "posted") act = `<a class="btn sm" href="${esc(r.url)}" target="_blank" rel="noopener">View</a>`;
   const extra = [];
+  if (r.state === "ready" && r.detail) extra.push(`<div class="small muted">${esc(r.detail)}</div>`);
   if (r.screenshot) extra.push(`<a href="/api/file?path=${encodeURIComponent(r.screenshot)}" target="_blank" title="Open the filled form"><img class="shot" src="/api/file?path=${encodeURIComponent(r.screenshot)}" alt="Filled form on ${esc(chName(r.channel))}"></a>`);
   if (r.state === "login" && r.command) extra.push(`<div class="small muted">Log in once, then ask again:</div><code class="cmd">${esc(r.command)}</code>`);
   else if (r.state === "draft") extra.push(`<div class="small muted">Created on the Page as an unpublished post. Nobody sees it until you click Publish.</div>`);
@@ -734,6 +766,7 @@ function renderSide() {
     out.push(`<h2>Listing</h2><div class="card listing-prev"><div class="card-body">
       <div style="display:flex;gap:8px;align-items:baseline"><div class="ttl">${esc(l.title || "")}</div><div class="price" style="margin-left:auto">${l.price ? "$" + esc(l.price) + "/mo" : ""}</div></div>
       ${l.body ? `<div class="desc">${esc(l.body)}</div>` : ""}
+      ${(l.photos || []).length ? `<div class="strip">${l.photos.map((ph) => `<a href="/api/file?path=${encodeURIComponent(ph)}" target="_blank"><img src="/api/file?path=${encodeURIComponent(ph)}" alt="Room photo" loading="lazy"></a>`).join("")}</div>` : ""}
     </div><div class="card-head" style="border-top:1px solid var(--line)">Where it's posted<span class="right muted small">${rows.filter((r) => ["posted", "published"].includes(r.state)).length} live · ${ready} waiting on you</span></div>
     <div class="card-body rows">${rows.map((r) => postRow(l.listing_id, r)).join("")}</div></div>`);
   }
@@ -953,8 +986,7 @@ async function tick() {
   await pollLive();
   if (S.tab === "inbox") await refreshThread();
   if (S.tab === "assistant") {
-    const active = S.status?.active_run;
-    if (active && active !== S.run && !["stopped", "error"].includes(S.status?.run_status)) attachRun(active);
+    await pollChats();
     await pollRunView();
     renderChat();
   }

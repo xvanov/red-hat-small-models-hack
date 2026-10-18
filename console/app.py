@@ -171,6 +171,27 @@ def list_runs():
     return out
 
 
+def _chat_meta(run_id: str) -> dict:
+    try:
+        return json.loads((integ.RUNS / run_id / "chat.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+@app.get("/api/chats")
+def list_chats():
+    """The owner's Assistant conversations (origin "assistant"), newest first. Test and verify runs are not listed."""
+    out = []
+    if integ.RUNS.is_dir():
+        for d in integ.RUNS.iterdir():
+            m = _chat_meta(d.name) if d.is_dir() else {}
+            if m.get("origin") != "assistant":
+                continue
+            run = RUNS.get(d.name)
+            out.append({**m, "open": run is not None and getattr(run, "status", "") not in ("stopped", "error")})
+    return sorted(out, key=lambda c: c.get("started") or "", reverse=True)[:100]
+
+
 @app.post("/api/runs")
 def start_run(body: dict = Body(default={})):
     goal = (body.get("goal") or "").strip()
@@ -184,6 +205,10 @@ def start_run(body: dict = Body(default={})):
     run_id = "r_" + time.strftime("%H%M%S") + "_" + secrets.token_hex(2)
     run_dir = integ.RUNS / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    origin = str(body.get("origin") or "api")[:20]  # "assistant" = the owner's chat; "verify"/"test"/"api" stay out of the history
+    (run_dir / "chat.json").write_text(json.dumps({"run_id": run_id, "origin": origin, "title": goal[:120],
+                                                   "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                                                   "live_channels": bool(body.get("live_channels"))}))
     _stop_active()
     badge = integ.probe_backend(force=True)
     mode = _mode(badge)
@@ -335,10 +360,18 @@ def _fb_state(run_id: str) -> dict:
 def run_posts(run_id: str):
     """Honest per-channel posting status of the run's listings (console/live_world.py)."""
     run = _get_run(run_id)
-    world = run.snapshot() if run is not None else {}
-    lc = getattr(run, "live_channels", None)
-    return {"live": bool(lc), "live_setup": lc, "mode": (world or {}).get("mode"),
-            "listings": live_world.posts((world or {}).get("listings") or [], _run_events(run_id), _fb_state(run_id))}
+    if run is not None:
+        world = run.snapshot()
+    else:  # a past chat: the world as it was saved
+        f = integ.RUNS / run_id / "world.json"
+        world = json.loads(f.read_text()) if f.exists() else {}
+    lc = getattr(run, "live_channels", None) if run is not None else (_chat_meta(run_id).get("live_channels") or None)
+    listings = live_world.posts((world or {}).get("listings") or [], _run_events(run_id), _fb_state(run_id))
+    if lc:  # the owner's photos of the real room, shown as a strip on the listing card
+        photos = [str(p.relative_to(integ.REPO)) if p.is_relative_to(integ.REPO) else str(p) for p in live_world.room_photos()]
+        for l in listings:
+            l["photos"] = photos
+    return {"live": bool(lc), "live_setup": lc, "mode": (world or {}).get("mode"), "listings": listings}
 
 
 @app.post("/api/runs/{run_id}/listings/{listing_id}/facebook")

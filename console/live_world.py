@@ -122,7 +122,10 @@ def posts(listings: list[dict], events: list[dict], fb: dict) -> list[dict]:
                 state = {"ready_to_submit": "ready", "live": "posted", "posted": "posted"}.get(st, st or "unknown")
                 label = {"ready": "Ready, needs your click", "posted": "Posted"}.get(state, st)
                 rows.append({"channel": ch, "state": state, "label": label, "screenshot": shot if _exists(shot) else None,
-                             "url": url or None, "detail": "Form filled on your logged-in profile and stopped before submit." if state == "ready" else None})
+                             "url": url or None, "detail": ("Details form filled and stopped there. Photos go on the next page, which needs "
+                                                            f"you logged in: channels/.venv/bin/python -m channels.login {ch}")
+                             if state == "ready" and "-partial" in (shot or "") else
+                             "Form filled on your logged-in profile, photos attached, stopped before submit." if state == "ready" else None})
             else:
                 err = failed.get((lid, ch)) or {}
                 code = err.get("code") or "UPSTREAM_ERROR"
