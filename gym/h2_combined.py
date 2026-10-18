@@ -34,11 +34,8 @@ PAIRS = {"H2a": ("finetuned", "lightning"), "H2b": ("finetuned", "frontier")}
 
 
 def t_sf(t: float, df: int) -> float:
-    """One-sided upper tail of Student t (stats.py's helper if present, else normal approx for df>=30)."""
-    if hasattr(stats, "t_sf"):
-        return stats.t_sf(t, df)
-    x = df / (df + t * t)   # regularized incomplete beta via continued fraction is overkill here; use normal for safety
-    return 0.5 * math.erfc(t / math.sqrt(2))
+    """One-sided upper tail of Student t, P(T >= t)."""
+    return 1.0 - stats.t_cdf(t, df)
 
 
 def stratified_test(rows, alpha=stats.ALPHA_FW, n_boot=10_000, seed=0) -> dict:
@@ -95,15 +92,18 @@ def main(argv=None) -> int:
     ap.add_argument("--plan", default=str(HERE / "confirmatory_v3.json"))
     ap.add_argument("--md", action="store_true")
     ap.add_argument("--json", default=None)
+    ap.add_argument("--seeds", default=None, help="Amendment 8 stopping rule: keep only these Lightning seeds, e.g. 1,2,3")
     a = ap.parse_args(argv)
     rec = json.loads(RECORD.read_text())
     gold = {json.loads(l)["id"]: json.loads(l) for l in open(GOLD)}
-    if stats.sha256_file(GOLD) if hasattr(stats, "sha256_file") else None:
-        pass
     import hashlib
     if hashlib.sha256(GOLD.read_bytes()).hexdigest() != rec["sha256"]:
         raise SystemExit("combined gold differs from its committed record")
     plan = json.loads(Path(a.plan).read_text())
+    if a.seeds:
+        keep = {f"-s{x.strip()}" for x in a.seeds.split(",")}
+        for lab in ("baseline", "final", "router"):
+            plan["configs"][lab] = [r for r in plan["configs"][lab] if any(r.endswith(k) for k in keep)]
     base = stats.run_plan(plan)   # gated H1/H3/H4 exactly as pre-registered
     preds, why = {}, {}
     for lab in ("finetuned", "lightning", "frontier"):
