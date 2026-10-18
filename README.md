@@ -1,181 +1,246 @@
 # Rentus Operator
 
-Rentus Operator runs the leasing loop for a small room-rental business from one sentence. The owner types "the Appling Way room is free Nov 1, $750, private bath". **NVIDIA Nemotron 3.5 Lightning** (30B MoE, served on **vLLM**) then checks the room record, runs a fair-housing check on the listing, creates the listing and publishes it to the channels. It answers renters, qualifies each one against a strict five-item gate (one-year lease, exact move-in date, phone, reason, occupants), records them in a demand register, proposes showings, and escalates to the owner only what needs a decision. The same operator handles property operations too: find a plumber, collect quotes, book the cheapest one under the owner's spending limit. Lightning is the one model that talks and calls 26 tools. A deterministic verifier (plain code, not a model) checks every call before and after it runs and handles retries, fallbacks and a final self-check of the operator's claims. A fine-tuned **Qwen3-0.6B reader** is one of those tools: it turns a renter's message into exact JSON, so the operator never has to judge on its own whether "next month" is a move-in date. A **NeMo Gym** environment (82 tasks with scripted renters and vendors, 7 scorer check types, a held-out split) measures all of it.
+A room-rental owner spends the day on the same loop: write the listing, post it to several sites, answer the same questions in English and Spanish, check that each renter can sign a one-year lease, has an exact move-in date, a phone number, a reason and a headcount, book showings, then field a tenant's leaking sink and call plumbers. Rentus Operator runs that leasing and operations desk with small open models on one GPU. **NVIDIA Nemotron 3.5 Lightning** (30B MoE, 3B active, served on **Red Hat vLLM**) is the one model that talks to the owner, renters and vendors and calls 41 tools: room records, a fair-housing check before anything is published, listings and channels, a demand register, showings, vendors and quotes, and owner escalations. A deterministic verifier (plain code, not a model) checks every call before and after it runs, repairs or retries what it can, falls back when a site or vendor fails, and refuses to let the operator claim something the world state does not show. A fine-tuned **Qwen3-0.6B reader** is one of the tools: it turns a renter's message into exact JSON, so the operator never guesses whether "early November" is a move-in date. The owner decides only what is his to decide (price, payment terms, anything that commits money), on his phone. A **NeMo Gym** environment with scripted renters and vendors, 7 scorer check types and a pre-registered held-out set built from real conversation shapes measures all of it.
 
 ## Track and bounties
 
-- **Main track: Tool-Calling.** A single small model that selects and executes tools, handles errors, and recovers from failures. Fine-Tuned & Specialized (the reader) is the fallback track.
-- **Bounties:** Best Use of NVIDIA Nemotron Lightning, Best Model Improvement with NVIDIA NeMo Gym, Best Use of Red Hat vLLM, NVIDIA Developer Champions Choice.
+- **Main track: Tool-Calling.** One small model selects and executes tools, handles errors and recovers from failures; the reader and the verifier are tools it calls, not other agents.
+- **Bounties:** Best Use of NVIDIA Nemotron Lightning · Best Model Improvement with NVIDIA NeMo Gym · Best Use of Red Hat vLLM · NVIDIA Developer Champions Choice. Write-ups for each: [docs/submission.md](docs/submission.md).
 
 ## Quick start
 
 ```bash
-git clone <this repo> && cd red-hat-small-models-hack
-cp .env.example .env          # fill in OPERATOR_API_KEY (and BREV_API_KEY for the tunnel)
+git clone https://github.com/xvanov/red-hat-small-models-hack && cd red-hat-small-models-hack
+cp .env.example .env          # fill in the variables below
 scripts/setup.sh              # root .venv (uv, Python 3.12): tools, operator, console, channels + Chromium
-scripts/setup.sh --gym        # optional: gym/.venv-nemo (Python 3.13 + nemo-gym 0.6.0) and gym/.venv
-scripts/doctor.sh --quick     # tunnels, both endpoints, every package's tests (drop --quick to add the browser tests)
-scripts/demo.sh               # starts the tunnels if needed, then the console; prints http://localhost:8080
+scripts/setup.sh --gym        # optional: gym/.venv and gym/.venv-nemo (Python 3.13 + nemo-gym 0.6.0)
+scripts/doctor.sh --quick     # tunnels, both model endpoints, every package's tests (drop --quick for browser tests)
+scripts/demo.sh               # starts the tunnels if needed, then the console: http://localhost:8080
 ```
 
-In the console, type `Appling Way room free Nov 1, $750, private bath`, or pick a gym scenario and click **Run scenario**. With no GPU, `CONSOLE_FORCE_STUB=1 scripts/demo.sh` runs a rule-based rehearsal driver, and the badge says "stub".
-
-The root `.venv` is the one project environment. The gym keeps its own Python 3.13 env (`gym/setup_nemo_gym.sh`), and the reader keeps its own training env (`reader/requirements-train.txt`, on the GPU box). Scripts always call `.venv/bin/python` by path.
+In the console click **▶ Demo run** (listing, two renters, a fault, a plumber job, a phone approval), or type `Appling Way room free Nov 1, $750, private bath` in the owner box. `scripts/demo.sh` also prints a tailnet-only phone URL (`http://<tailscale-ip>:8080/approve`) for approvals. With no GPU, `CONSOLE_FORCE_STUB=1 scripts/demo.sh` runs a rule-based rehearsal driver and the badge says **stub**.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  owner([Owner: console chat]) -->|instruction / decision| op
-  renters([Renters: scripted from open data<br/>or real channels]) -->|inbox| op
-  subgraph GPU["1x RTX PRO 6000 (Brev), vLLM 0.27.1"]
-    op["OPERATOR<br/>Nemotron 3.5 Lightning 30B-A3B NVFP4<br/>talks + calls tools"]
-    reader["READER<br/>rentus-reader (Qwen3-0.6B SFT)<br/>message -> exact JSON"]
+  owner([Owner: console + phone /approve]) -->|instruction / decision| op
+  renters([Renters and vendors:<br/>scripted from open data and twins,<br/>or real channels in shadow mode]) -->|inbox| router
+  router{{"ROUTER (code, off in the final config)<br/>uses the reader's parse:<br/>no-op / record / batch / escalate / Lightning"}} --> op
+  subgraph GPU["1x RTX PRO 6000 Blackwell 96 GB (Brev) · vLLM 0.27.1"]
+    op["OPERATOR<br/>Nemotron 3.5 Lightning 30B-A3B (BF16)<br/>talks + calls 41 tools"]
+    reader["READER<br/>rentus-reader = Qwen3-0.6B + SFT<br/>message -> exact JSON"]
   end
-  op <-->|every call checked| ver{{"VERIFIER (code)<br/>schema repair, retries, fallbacks,<br/>loop guard, self-check"}}
-  ver <--> tools["rentus_tools: 26 tools<br/>inventory, listings + compliance, market rent (ZORI),<br/>inbox, register, calendar, vendors/quotes, owner"]
+  op <-->|every call checked| ver{{"VERIFIER (code)<br/>schema repair, retries, fallbacks, style pre-check,<br/>renter guard, loop guard, final self-check"}}
+  ver <--> tools["rentus_tools: room records, fair-housing check, listings,<br/>market rent (ZORI), inbox, demand register, showings,<br/>vendors/quotes, owner escalation"]
   tools -->|read_reply| reader
-  tools -->|live mode| channels["channels/: Playwright adapters,<br/>stop before submit, self-repair via Lightning"]
+  router -.->|read first| reader
+  tools -->|live mode| channels["channels/: Playwright adapters,<br/>stop before submit"]
   tools --> events[(runs/RUN_ID/events.jsonl)]
-  events --> console["console/: lanes, register, escalations,<br/>trace, Break something, scoreboard"]
-  gym["NeMo Gym env (gym/)<br/>same tools + scripted counterparts + scorers"] -.->|rollouts| op
+  events --> console["console/: pipeline, register, trace,<br/>Break something, evidence"]
+  gym["NeMo Gym env (gym/): same tools,<br/>scripted counterparts, scorer"] -.->|rollouts| op
 ```
 
-- **Operator** (`operator/`): `rentus_operator.run()` is the agent loop over vLLM's OpenAI-compatible API. One model holds the conversation and makes the tool calls in the same turn. Reasoning arrives in a separate field (`--reasoning-parser nemotron_v3`), and tool calls are parsed by `--tool-call-parser qwen3_coder`.
-- **Verifier** (`operator/rentus_operator/verifier.py`): repairs trivially broken JSON once, retries `RATE_LIMITED`/`TIMEOUT` with backoff, falls back to the next vendor or channel, refuses an identical call after a policy block, escalates after 3 repeats or at the step limit, and checks the final summary ("published on X", "booked") against the world state.
-- **Tools** (`tools/`): a sandbox world with fault injection (timeout, rate limit, page changed, login required, malformed result). The tools enforce the business rules: price must equal the room record, the fair-housing check runs before publishing, renter messages are at most 2 sentences with one question, and no showing is proposed until the gate is complete.
-- **Reader** (`reader/`): a second vLLM container on the same GPU. If it's unreachable, `read_reply` falls back to deterministic English/Spanish rules.
-- **Channels** (`channels/`): Playwright adapters for marketplace, Roomies, Craigslist and PadSplit. They fill the whole form and stop before the final submit button, with local mock copies of each site. When a selector breaks, Lightning proposes a fix and code validates it on the page.
-- **Gym** (`gym/`): a NeMo Gym 0.6.0 resources server around the same tools, with 51 train and 31 held-out tasks and a scorer in `gym/rentus_env/verify.py`.
-- **Console** (`console/`): FastAPI + SSE. It shows one badge per model ("live: Nemotron 3.5 Lightning (vLLM)", "reader: rentus-reader 0.6B (vLLM)" or "reader: rules fallback").
+| Part | Where | What it does |
+|---|---|---|
+| Operator | `operator/` | `rentus_operator.run()`: the agent loop over vLLM's OpenAI API. Reasoning arrives in its own field (`--reasoning-parser nemotron_v3`), tool calls via `--tool-call-parser qwen3_coder`. Final config: prompt v4 (`operator/prompts/system_v4.md`), concierge tool descriptions, renter guard with stand-down on owner-held threads, style pre-check, reasoning kept in history. |
+| Verifier | `operator/rentus_operator/verifier.py` | Repairs broken JSON once, retries `RATE_LIMITED`/`TIMEOUT` with backoff, falls back to the next vendor or channel, refuses an identical call after a policy block, escalates after 3 repeats or at the step limit, and checks the final summary ("published on X", "booked") against the world. |
+| Tools | `tools/` | Sandbox world with fault injection (timeout, rate limit, page changed, login required, malformed result). Business rules live here: price equals the room record, fair-housing check before publishing, at most 2 sentences and one question per renter message, no showing before the five-item gate is complete, no discount promised. |
+| Reader | `reader/` | Second vLLM container on the same GPU. If unreachable, `read_reply` falls back to deterministic English/Spanish rules (the console badge says so). |
+| Router | `operator/rentus_operator/router.py` | Optional: the reader reads each inbound message first and code decides whether Lightning is needed. Halves Lightning calls but loses some quality, so it is off in the final config (results below). |
+| Channels | `channels/` | Playwright adapters (Marketplace, Roomies, Craigslist, PadSplit) that fill the form and stop before the final submit, with local mock copies of each site. `channels/pilot_shadow.py` reads the real Facebook Page inbox and drafts in shadow only. |
+| Gym | `gym/` | NeMo Gym 0.6.0 resources server around the same tools, scripted renters/vendors, scorer `gym/rentus_env/verify.py`, task sets v1/v2 (synthetic) and v3 (twins of real threads). |
+| Console | `console/` | FastAPI + SSE. One badge per model, the leasing pipeline, demand register and supply signals, a grouped live trace, and evidence tabs (Why trust it, Results, Performance, Real world). |
 
-### Parameter budget (≤ 33B, summed across every generative model)
+### Parameter budget (≤ 33B, summed across every generative model the running system loads)
 
 | Model | Role | Params (model card) |
 |---|---|---|
-| [NVIDIA-Nemotron-3.5-Lightning-30B-A3B](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16) (served as NVFP4) | operator, selector repair, Gym policy | 30B total (3B active) |
-| [Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) + our SFT: [**xvanov/rentus-reader-qwen3-0.6b**](https://huggingface.co/xvanov/rentus-reader-qwen3-0.6b) | reader tool | 0.6B |
+| [NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16) | operator (all talking and tool calls) | 30B total (3B active) |
+| [Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) + our SFT: [**xvanov/rentus-reader-qwen3-0.6b**](https://huggingface.co/xvanov/rentus-reader-qwen3-0.6b) | reader tool; also the router's parser | 0.6B |
 | **Total** | | **30.6B ≤ 33B** |
 
-The verifier, the scripted renters/vendors and the compliance checks are code, not models. We use no separate speculative-decoding draft (DSpark/DFlash would count toward the budget). Hugging Face's raw weight counts are 31.58B (Lightning) and 0.75B (Qwen3-0.6B with tied embeddings), 32.3B in total, which is still under 33B.
+The verifier, router logic, scripted renters/vendors and compliance checks are code, not models. No speculative-decoding draft model is loaded (DSpark/DFlash would count; Lightning's built-in MTP was tried and turned off, see limitations). Hugging Face's raw weight counts are 31.58B (Lightning) and 0.75B (Qwen3-0.6B with tied embeddings), 32.3B together, still under 33B. Models used only for evaluation (the Claude Opus 5.5 reference, the model-played renter) are not part of the running system; the organizers confirmed those do not count (`docs/hackathon/updates.md`, 2026-10-17 12:50 ET).
 
-## How to reproduce the demo
+## How to reproduce
 
-1. **Env** (`.env.example` → `.env`, never committed):
+1. **Env.** `cp .env.example .env` (gitignored, never committed):
 
    | Variable | Value |
    |---|---|
-   | `OPERATOR_BASE_URL` | `http://localhost:8000/v1` (tunnel to vLLM) |
+   | `OPERATOR_BASE_URL` | `http://localhost:8000/v1` (SSH tunnel to vLLM on the GPU) |
    | `OPERATOR_MODEL` | `nemotron-3.5-lightning` |
-   | `OPERATOR_API_KEY` | the vLLM `--api-key` you started the server with |
+   | `OPERATOR_API_KEY` | the vLLM `--api-key` (`serving/rebuild.sh` generates one if empty) |
    | `READER_BASE_URL` | `http://localhost:8011/v1` (tunnel to the reader container) |
    | `READER_MODEL` | `rentus-reader` |
    | `READER_API_KEY` | same as `OPERATOR_API_KEY` |
-   | `BREV_API_KEY` | Brev CLI key; `serving/tunnel.sh` mints its ssh cert with it |
+   | `BREV_API_KEY` | Brev CLI key; `serving/tunnel.sh` mints its SSH cert with it |
 
-2. **GPU** (Brev `massedcompute_RTXPro6000`: 1x RTX PRO 6000 Blackwell 96 GB, $2.63/hr, instance `rentus-operator`):
+2. **GPU, one command.** `serving/rebuild.sh` creates the Brev instance (`massedcompute_RTXPro6000`: 1x RTX PRO 6000 Blackwell 96 GB, $2.63/hr) if needed, installs Docker, starts `vllm/vllm-openai:v0.27.1` with Lightning BF16 (flags in `serving/start_vllm.sh`, frozen in `serving/FROZEN.json`), pulls the reader from Hugging Face and serves it on the same card (`reader/serve_reader.sh`, 12% of GPU memory), opens both tunnels and runs `serving/smoke_test.py`. `serving/rebuild.sh --dry-run` prints every step. Idempotent: rerun after a failure.
 
-   ```bash
-   brev create rentus-operator --gpu massedcompute_RTXPro6000
-   printf 'VLLM_API_KEY=%s\n' "$OPERATOR_API_KEY" | ssh rentus-operator 'umask 077; mkdir -p ~/serving; cat > ~/serving/vllm.env'
-   scp serving/start_vllm.sh rentus-operator:serving/ && ssh rentus-operator 'bash ~/serving/start_vllm.sh'
-   # vllm/vllm-openai:v0.27.1, nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4, --max-model-len 65536
-   # --gpu-memory-utilization 0.80 --max-num-seqs 64 --enable-prefix-caching --async-scheduling
-   # --reasoning-parser nemotron_v3 --tool-call-parser qwen3_coder --enable-auto-tool-choice (+ mamba cache flags)
-   MODEL=/ckpt/rentus-reader bash ~/rentus/reader/serve_reader.sh    # on the instance: reader on 127.0.0.1:8001, 12% GPU
-   ```
+3. **Console.** `scripts/demo.sh`, then `.venv/bin/python scripts/console_verify.py all` drives every console path on the live models with Playwright and writes screenshots to `docs/img/`.
 
-   Train the reader first (`reader/README.md` §Reproduce), or serve `Qwen/Qwen3-0.6B` to see the base model fail.
-
-3. **Tunnels and console** (laptop):
+4. **Evaluation** (pre-registered commands from `gym/confirmatory_v3.json` and `docs/eval-protocol.md` Amendments 6 to 8; run from a clean worktree at the freeze commit):
 
    ```bash
-   serving/tunnel.sh                          # localhost:8000 -> instance:8000 (operator)
-   LPORT=8011 RPORT=8001 serving/tunnel.sh    # localhost:8011 -> instance:8001 (reader)
-   scripts/demo.sh                            # or let demo.sh start both tunnels
-   .venv/bin/python scripts/console_run.py --goal 'Appling Way room free Nov 1, $750, private bath' --out docs/img/console-listing.png
-   .venv/bin/python scripts/console_run.py --scenario lease-full-heldout-001 --out docs/img/console-leasing.png
+   V3=gym/tasks/v3/heldout.jsonl; OC='{"prompt_version":"v4","tool_descriptions":"concierge","guard_stand_down":true}'
+   gym/.venv/bin/python gym/run_seeds.py --variant base --tasks-file $V3 --seeds 1,2,3,4,5 --prefix v3-heldout-baseline --workers 5
+   gym/.venv/bin/python gym/run_seeds.py --variant guard+prompt3+style+rhist+readermodel --operator-config "$OC" \
+       --tasks-file $V3 --seeds 1,2,3,4,5 --prefix v3-heldout-final --workers 5
+   gym/.venv/bin/python gym/run_seeds.py --variant guard+prompt3+style+rhist+readermodel+router --operator-config "$OC" \
+       --tasks-file $V3 --seeds 1,2,3,4,5 --prefix v3-heldout-final-router --workers 5
+   OPERATOR_CONFIG="$OC" scripts/frontier_ref.sh $V3 1,2          # reference only: Claude Opus 5.5 via local Claude Code
+   # reader H2 on the 90 owner-labeled messages (Amendment 7)
+   python3 reader/eval.py --backend endpoint --base-url http://127.0.0.1:8001/v1 --model rentus-reader \
+       --rows-file data/published/owner_gold_combined.jsonl --label finetuned-twin
+   python3 reader/eval.py --backend endpoint --base-url http://127.0.0.1:8000/v1 --model nemotron-3.5-lightning --no-thinking \
+       --concurrency 8 --rows-file data/published/owner_gold_combined.jsonl --label lightning-twin
+   gym/.venv-frontier/bin/python reader/eval.py --backend claude_cli --model claude-opus-5-5 \
+       --rows-file data/published/owner_gold_combined.jsonl --label frontier-twin --concurrency 3
+   # statistics (no model calls), then fill this README
+   gym/.venv/bin/python gym/stats.py plan gym/confirmatory_v3.json --check
+   gym/.venv/bin/python gym/h2_combined.py --md --json gym/results/v3-confirmatory.json
+   gym/.venv/bin/python gym/floors.py --tasks-file $V3
+   gym/.venv/bin/python scripts/fill_results.py --write
    ```
 
-4. **Scoring** (`gym/README.md`): `gym/.venv/bin/python gym/run_eval.py --split heldout --run-name baseline [--via nemo]`, then `gym/ablate.py` for one-knob-at-a-time variants.
-
-### Live console runs (2026-10-17, Lightning + reader on vLLM)
-
-| Run | What happened |
-|---|---|
-| ![listing run](docs/img/console-listing.png) | Owner instruction "Appling Way room free Nov 1, $750, private bath": `list_rooms` → `get_room` → `check_listing_compliance` → `create_listing` → `publish_listing` on marketplace, roomies and craigslist → `report_to_owner`. Listing cards show in three lanes. Three scripted renters arrive. The operator qualifies María in Spanish (vague "a fines de mes" sent back for an exact date, then 2026-11-01), and every gate item shows a tick. The verifier blocked four messages that broke the style rules, and the operator rewrote them. The showing ended up escalated: see limitations. |
-| ![leasing scenario](docs/img/console-leasing.png) | Gym held-out task `lease-full-heldout-001`: the scripted renter Hayden passes all five gate items (lease yes, move-in 2026-12-01, phone, reason "closer to work", 2 occupants), and a showing is proposed inside showing hours. All 12 `read_reply` calls across both runs went to the served reader (`backend: model`). |
+   Exploratory sets: `--tasks-version v2 --split heldout` (v2) and the Messenger conformance suite (`gym/conformance/`). Serving bench: `docs/vllm.md` §Reproduce.
 
 ## Results
 
-Full write-up: [docs/results.md](docs/results.md) (*pending: the gym workstream writes it; it may not exist yet*).
+Every number below comes from a committed file. Values in `{{...}}` are filled by `scripts/fill_results.py` from the confirmatory result files once the runs finish; until then they are placeholders, not results.
 
-### Reader (held-out test, 1,419 rows; from `reader/README.md`)
+### Confirmatory: v3 held-out (46 leasing tasks, twins of real threads, pre-registered)
 
-| System | Exact match | JSON valid | Lease | Move-in | Phone | Occupants | Reason | Intent F1 | Language | Vague-date trap ↓ |
-|---|---|---|---|---|---|---|---|---|---|---|
-| Deterministic regex fallback | 0.575 | 1.000 | 0.886 | 0.994 | 0.998 | 0.977 | 0.877 | 0.772 | 0.998 | 0.012 |
-| Qwen3-0.6B base, same prompt | 0.000 | 0.910 | 0.106 | 0.023 | 0.011 | 0.028 | 0.004 | 0.105 | 0.699 | 0.082 |
-| **rentus-reader (Qwen3-0.6B + SFT)** | **0.791** | 1.000 | 0.991 | 0.977 | 0.997 | 0.999 | 0.865 | 0.951 | 1.000 | 0.012 |
-| Nemotron 3.5 Lightning, prompted | 0.106 | 0.985 | 0.569 | 0.554 | 0.827 | 0.721 | 0.534 | 0.450 | 0.944 | 0.365 |
+Model: Lightning BF16 on vLLM, temperature 0.2. Analyzed: {{V3_SEEDS}}. Pass rate = share of tasks where every check passed (95% Wilson); mean reward = share of checks passed (95% bootstrap over tasks); pass^k = passes in every run.
 
-Latency p50: reader 0.58 s per call at concurrency 32, Lightning 2.7 s at concurrency 8. Prompted Lightning treats over a third of vague move-in dates as exact. That failure is why the reader exists.
+| config | pass rate (95% CI) | mean reward (95% CI) | pass in every run | Lightning calls / task |
+|---|---|---|---|---|
+| Baseline (prompt v1, verbose tools, rule-based reader) | {{V3_BASELINE_PASS}} | {{V3_BASELINE_REWARD}} | {{V3_BASELINE_PASSALL}} | {{V3_BASELINE_CALLS}} |
+| **Final** (prompt v4, concierge tools, renter guard + stand-down, style pre-check, reasoning history, fine-tuned reader) | {{V3_FINAL_PASS}} | {{V3_FINAL_REWARD}} | {{V3_FINAL_PASSALL}} | {{V3_FINAL_CALLS}} |
+| Final + router | {{V3_ROUTER_PASS}} | {{V3_ROUTER_REWARD}} | {{V3_ROUTER_PASSALL}} | {{V3_ROUTER_CALLS}} |
+| Reference: Claude Opus 5.5, same harness and reader | {{V3_FRONTIER_PASS}} | {{V3_FRONTIER_REWARD}} | {{V3_FRONTIER_PASSALL}} | {{V3_FRONTIER_CALLS}} |
 
-**Download:** the fine-tuned reader is GitHub release [`reader-v1`](https://github.com/xvanov/red-hat-small-models-hack/releases/tag/reader-v1) (CC BY-SA 4.0, 949 MB tar.gz + `SHA256SUMS`). Model card: [reader/MODEL_CARD.md](reader/MODEL_CARD.md). Serving: [reader/README.md#download](reader/README.md#download).
+Floors on the same 46 tasks (`gym/results/v3-floors.json`): do-nothing 0.612, greet-only **0.841**, escalate-all 0.624, mark-lost 0.630 mean reward, and all four pass 0 tasks. A greeting alone earns 0.84, so read reward next to pass rate, never alone.
 
-### NeMo Gym (held-out, 31 tasks; `gym/results/*/summary.json`)
+**Pre-registered hypotheses** (one-sided, Holm over a fixed family of 5 at familywise α = 0.025; an untested hypothesis stays in the family with p = 1):
 
-| Run | Harness | Pass rate | Mean reward | Leasing | Listing | Ops | Recovery (mean reward) |
-|---|---|---|---|---|---|---|---|
-| Baseline, local runner | `rentus_operator` (prompt v1, verbose tools, verifier on, reader on) | 3.2% (1/31) | 0.452 | 0.284 | 0.833 | 0.816 | 0.460 |
-| Baseline, NeMo Gym 0.6.0 rollouts | NeMo `simple_agent` | 12.9% (4/31) | 0.646 | 0.648 | 0.729 | 0.696 | 0.536 |
-| Improved (prompt v2, tool descriptions v2, renter guard; one knob at a time) | `gym/ablate.py` | *pending* | *pending* | | | | |
+- **H1, final beats baseline:** {{H1_RESULT}}. Secondary: two-sided 95% paired CI {{H1_CI}}; Δ pass rate {{H1_DPASS}}.
+- **H2a, the 0.6B reader beats Lightning at reading renter messages** (90 owner-labeled messages, blind owner gold, exact match with reason scored on status): {{H2A_RESULT}}.
+- **H2b, the 0.6B reader beats Claude Opus 5.5** (same rows): {{H2B_RESULT}}.
+- **H3, the router cuts Lightning calls without losing more than 0.05 reward:** (i) {{H3I_RESULT}}; (ii) {{H3II_RESULT}}. Decision: {{H3_DECISION}}.
+- **H4, the local system is within 0.05 reward of Claude Opus 5.5 on the same harness:** {{H4_RESULT}}. Secondary: two-sided 95% paired CI {{H4_CI}}. A non-rejection means "not shown", not "worse".
 
-The improvement candidates are committed as separate knobs (`bdc8ade`), but their held-out numbers are not in yet.
+{{HOLM_TABLE}}
 
-### vLLM (Lightning NVFP4 on 1x RTX PRO 6000; from `serving/bench-results.md`)
+Secondary H2 (uncorrected, pre-declared): real-twin rows only, reader vs Lightning {{H2A_REAL61}}; reader vs Opus {{H2B_REAL61}}. Informative rows only (a gate field is not "absent"): vs Lightning {{H2A_INFORMATIVE}}; vs Opus {{H2B_INFORMATIVE}}. Exact match on all 90: fine-tuned {{READER_EM_FINETUNED}}, Lightning {{READER_EM_LIGHTNING}}, Opus {{READER_EM_FRONTIER}}.
 
-Shared ~3.9k-token prompt prefix, 256 output tokens, thinking off, measured through the SSH tunnel on a quiet server (11:37 / 11:41 ET):
+Scorer validation (owner grades 40 random transcripts blind, protocol A5): {{KAPPA_RESULT}}.
 
-| Concurrency | Prefix cache ON: tok/s, p50 latency, p50 TTFT | Prefix cache OFF: tok/s, p50 latency, p50 TTFT |
-|---|---|---|
-| 1 | 254, 1.00 s, 163 ms | 243, 1.01 s, 208 ms |
-| 4 | 614, 1.66 s, 308 ms | 579, 1.77 s, 482 ms |
-| 16 | 1286, 3.17 s, 768 ms | 878, 4.64 s, 1347 ms |
-| 32 | 1764, 4.61 s, 1134 ms | 1247, 6.44 s, 2068 ms |
+Caveats reported with every v3 number: five owner sign-offs were missing at freeze (Amendment 6), so v3 is "synthetic, realism not confirmed", the task-deciding labels were not owner-checked, and the showing-required check rests on a 45-day window the owner has not approved. The scoring rules come from the owner's Oct 4 to 18 sessions, inside the held-out time window (the rules, not the threads).
 
-At 16–32 concurrent requests, prefix caching gives +41–46% throughput and roughly halves time to first token. Caveat: other workstreams may have added load to the OFF run, and a clean re-run on an idle server is *pending*. Under real team load (gym rollouts plus reader training on the same GPU), a soak of 160 requests at concurrency 16 finished with 0 errors. Smoke tests: tool-call JSON came back valid in thinking-on and thinking-off modes. Tool-call parse success rate over a Gym run: *pending*.
+### Exploratory: v2 held-out (33 synthetic tasks, contaminated, 3 seeds each; `docs/results.md`)
 
-**Why Lightning, and how we tuned it:** it's a 30B model with only 3B active per token (a hybrid Mamba/MoE design), so it's fast enough to hold 30+ concurrent agent rollouts on one GPU, while the big total size keeps its tool selection reliable. It's served as NVFP4 (about 19 GB of weights), which leaves room on the same card for the reader and for training. We turn thinking off for routine tool turns, and every session shares one system prompt, which prefix caching turned into a ~76% cache hit rate under gym load (vLLM engine log, 12:15 ET).
+| config | pass rate (95% CI) | mean reward (95% CI) | Lightning calls / task |
+|---|---|---|---|
+| Baseline | 12.1% (5 to 27%) | 0.570 (0.493 to 0.648) | 8.4 |
+| Final (prompt v3 generation) | 45.5% (30 to 62%) | 0.929 (0.911 to 0.945) | 20.9 |
+| Final + router | 46.5% (31 to 63%) | 0.876 (0.834 to 0.914) | 11.2 |
+| Final on NeMo Gym `simple_agent` (2 seeds) | 54.5% (38 to 70%) | 0.887 (0.842 to 0.930) | |
 
-## Datasets and provenance
+Final vs baseline +0.359 reward (95% CI +0.281 to +0.436), 22 tasks better and 2 worse. Router vs final −0.053 (−0.093 to −0.016). v2 overlaps the v1 held-out set that was run about 15 times during development, so it is a regression check only.
 
-Full details, transformations and rebuild commands: [docs/data-provenance.md](docs/data-provenance.md). No real tenant or renter data is used anywhere.
+### Conformance to the owner's rules (`gym/results/conformance/`, development check, one run per item)
+
+61 testable behaviors from the concierge spec checklist (`docs/spec/concierge.md` §9), each a scripted Messenger scenario:
+
+| config | items passed |
+|---|---|
+| Reference player (privileged code, proves each item is passable) | 60 / 61 |
+| Final with prompt v3 (before the v4 work) | 28 / 61 |
+| Prompt v4 + concierge tools, first version | 33 / 61 |
+| **Prompt v4 + concierge tools + guard stand-down (the confirmatory final)** | **50 / 61** |
+
+These scenarios were written alongside the system and the v4 changes were made against them, so this is a development signal, not a held-out result.
+
+### Reader on the synthetic test (`reader/README.md`, `docs/results.md`)
+
+| System | Exact match, 1,419 rows | Exact match, same 400-row sample | Vague-date trap ↓ (1,419 rows) | p50 latency |
+|---|---|---|---|---|
+| Rule-based fallback | 0.575 | 0.555 | 0.012 | |
+| Qwen3-0.6B base | 0.000 | 0.000 | 0.082 | |
+| **rentus-reader (Qwen3-0.6B + SFT)** | **0.791** | **0.813** | 0.012 | 0.58 s (local) |
+| Lightning 30B, prompted | 0.106 | 0.123 | 0.365 | 2.7 s |
+| Claude Opus 5.5, prompted (reference) | | 0.738 (Zen) / 0.720 (Claude Code) | | 3.3 s |
+
+The synthetic test is partly in-distribution (template overlap disclosed in `docs/results.md`), which is why the confirmatory H2 uses owner-labeled messages instead.
+
+### vLLM serving (`docs/vllm.md`, `serving/results/serve_bench.jsonl`)
+
+| Measurement | Result |
+|---|---|
+| Prefix caching on vs off, real 6k-token operator prompt + tool schemas (NVFP4, paired via `cache_salt`) | +27% throughput at N=8, **+76% at N=32, +97% at N=64**; time to first token −50 to −64% |
+| Reasoning off vs on for routine tool turns (N=32) | 6.9 → **13.2 turns/s**, p95 8.1 s → 2.6 s, every turn still a tool call |
+| Throughput sweep, NVFP4 | 219 tok/s at N=1 → 1,412 at N=32 → 1,755 at N=128; 0 errors in 1,650 requests |
+| Two models on one card | reader p95 under 0.47 s at every operator load level, 0 errors in 507 probes |
+| NVFP4 → BF16 stability | NVFP4 crashed under ~16 to 48 concurrent agent requests (`misaligned address` / illegal memory access); BF16 ran 2,567 requests in 15.5 min with 0 errors. Cost: −38% decode throughput at N=32 (1,412 → 880 tok/s), TTFT 2.2 → 1.0 s |
+| H5, pre-registered 3-repetition caching bench on the frozen BF16 server | {{H5_RESULT}} |
+
+## Datasets, provenance and licenses
+
+Full details, transformations and rebuild commands: [docs/data-provenance.md](docs/data-provenance.md). License table: [LICENSES.md](LICENSES.md). No real tenant or renter text is published or sent to any third-party API.
 
 | Dataset | License | Used for |
 |---|---|---|
-| [Google Schema-Guided Dialogue](https://github.com/google-research-datasets/dstc8-schema-guided-dialogue), Homes services | CC BY-SA 4.0 | 2,000 relabelled renter turns in the reader set (so the reader set and weights are CC BY-SA 4.0) |
-| [UCI Apartment for Rent Classified](https://archive.ics.uci.edu/dataset/555/apartment+for+rent+classified) | CC BY 4.0 | per-bedroom base rents for Durham, Raleigh, Chapel Hill |
-| [Zillow Observed Rent Index (ZORI)](https://www.zillow.com/research/data/), ZIP level | Zillow Terms of Use, free with attribution (not CC) | 2019→2026 rent growth; `get_market_rent` tool |
-| [Inside Airbnb, Asheville NC](https://insideairbnb.com/get-the-data/) | CC BY 4.0 | amenity mix, private-bath and own-entrance rates of the sandbox rooms |
-| [nvidia/When2Call](https://huggingface.co/datasets/nvidia/When2Call) | CC BY 4.0 | reference for call-vs-ask-vs-refuse in prompt and task design |
-| [nvidia/Nemotron-RL-Agentic-Conversational-Tool-Use-Pivot-v1](https://huggingface.co/datasets/nvidia/Nemotron-RL-Agentic-Conversational-Tool-Use-Pivot-v1) | CC BY 4.0 | reference trajectories for the Gym environment |
-| 24 CFR 100.75 + HUD advertising guidance | US government works | fair-housing compliance rules (`tools/rentus_tools/impl/compliance_rules.md`) |
-| **Synthetic, made here:** reader set (12,000 bilingual rows), sandbox inventory, gym tasks | published with method | `data/build_reader_set.py` (templates, no LLM, seeded) → `data/published/reader/`; `data/build_inventory.py` → `data/published/inventory.json`; `gym/build_tasks.py` → `gym/tasks/` |
+| [Google Schema-Guided Dialogue](https://github.com/google-research-datasets/dstc8-schema-guided-dialogue), Homes services (pinned commit) | CC BY-SA 4.0 | 2,000 relabeled renter turns in the reader set |
+| [UCI Apartment for Rent Classified](https://archive.ics.uci.edu/dataset/555/apartment+for+rent+classified) | CC BY 4.0 | per-bedroom base rents, Durham / Raleigh / Chapel Hill |
+| [Zillow Observed Rent Index (ZORI)](https://www.zillow.com/research/data/) | Zillow terms, free with attribution | 2019 → 2026 rent growth; `get_market_rent` |
+| [Inside Airbnb, Asheville NC](https://insideairbnb.com/get-the-data/) | CC BY 4.0 | amenity mix of sandbox rooms |
+| [nvidia/Nemotron-Personas-USA](https://huggingface.co/datasets/nvidia/Nemotron-Personas-USA) | CC BY 4.0 | the invented renter in every twin |
+| [nvidia/When2Call](https://huggingface.co/datasets/nvidia/When2Call), [Nemotron-RL-Agentic-Conversational-Tool-Use-Pivot-v1](https://huggingface.co/datasets/nvidia/Nemotron-RL-Agentic-Conversational-Tool-Use-Pivot-v1) | CC BY 4.0 | references for call-vs-ask design and Gym trajectories |
+| 24 CFR 100.75 + HUD advertising guidance | US government works | fair-housing rules (`tools/rentus_tools/impl/compliance_rules.md`) |
+| **Made here:** reader set (14,000 train rows, `data/build_reader_set.py`, templates, no LLM) | CC BY-SA 4.0 | reader fine-tune; `data/published/reader/` |
+| **Made here:** twins of the owner's own leasing threads (`data/twins/`: label skeleton only, rewritten by Lightning with a Nemotron persona, re-verified, privacy-filtered by n-gram and embedding similarity) | CC BY 4.0 | v3 Gym tasks, twin reader test; `data/published/twins/`, `gym/tasks/v3/` |
+| **Made here:** owner blind labels (61 real-twin + 29 pilot messages) | CC BY 4.0 | H2 gold; `data/published/owner_gold_combined.jsonl` |
+| **Made here:** sandbox inventory, Gym tasks v1/v2, owner style statistics (numbers only) | CC BY 4.0 | sandbox world, development tasks, prompt tone |
 
-We excluded the Salesforce xLAM datasets (research-only license). All code was written during the event (first commit Oct 17, 2026 11:10 ET). Third-party libraries must have been public 2+ weeks before the event; the root `.venv` enforces it with `uv pip install --exclude-newer 2026-10-03`, and the serving/gym/reader pins (vLLM 0.27.1, nemo-gym 0.6.0, `reader/requirements-train.txt`) are dated in their READMEs.
+The owner's private threads were processed only on this machine and the rented GPU over an encrypted SSH tunnel, never sent to a third-party model API and never committed. Code is Apache-2.0. All code was written during the event (first commit Oct 17, 2026 11:10 ET); third-party libraries were public 2+ weeks before the event (root `.venv` installs with `--exclude-newer 2026-10-03`; vLLM 0.27.1 and nemo-gym 0.6.0 are dated in their READMEs). Salesforce xLAM was excluded (research-only license).
+
+## Methodology
+
+The evaluation was pre-registered in [docs/eval-protocol.md](docs/eval-protocol.md) at about 04:30 ET on Oct 18, before any confirmatory run, and attacked by two rounds of independent review (`docs/reviews/`: statistics, leakage, scorer and privacy, then a round-2 gate list). The commit history is the timestamp. What it fixed in advance: the hypotheses, the one-sided tests, the Holm family (m = 5, α = 0.025), the non-inferiority margin (0.05 reward), 5 seeds per config, the rerun and void rules, and that nobody reads v3 held-out transcripts until every run is done. Freezing is enforced in code: `scripts/freeze.py` hashes every frozen artifact into `docs/freeze-manifest.json`, and `gym/stats.py plan` refuses any run made on dirty frozen paths or off the freeze commit.
+
+Eight amendments, all logged with a time and reason:
+
+1. **Review round 1** (~04:00): one-sided tests and a fixed family; simulated power instead of a rule of thumb (the old "well powered" sentence was withdrawn); H2 gold must come from the owner, not from a model under test; scorer fixes so trivial agents cannot pass; checks the send guard makes impossible to fail are reported apart; the v2 set was demoted after we found it shares 31 of 33 tasks with the v1 held-out set we had tuned against.
+2. **Review round 2** (~05:00): run names, void rules and frozen paths enforced in code; serving config frozen (BF16, see limitations); a blind labeler that never shows the owner any model's label.
+3. **Label adjudication** (~04:50): the audit of the owner's labels is rule-based only; no model proposes changes to gold.
+4. **Pilot set** (~05:05): the owner's labels on a 29-message practice set are kept, reported separately.
+5. **Smaller H2 sample** (~05:20): the owner could label about 71 messages before the cut-off, not 150. Power was recomputed: only differences of about 15 to 20 points are detectable.
+6. **Final config and frontier repeats** (~06:20): the final config was chosen on development data only (prompt v4 + concierge tools + guard stand-down); the frontier gets 2 repeats, not 5. Five owner sign-offs were missing at freeze; we froze anyway and recorded the gaps, with their consequences stated next to every v3 result.
+7. **H2 on all 90 owner-labeled messages** (~06:40): 57 of the 61 real-twin messages carried no gate information (small talk and logistics), so exact match on them says little. The primary H2 analysis moved to 61 + 29 messages, stratified by source. This change came after the freeze and after the owner saw the messages' content (no model had been scored on them), so the original real-twin-only analysis is always shown next to it.
+8. **Re-freeze on the complete set** (~06:35), the incident: the first freeze used a partial 22-task cut that the twin pipeline had written under a time limit. Runs on it had started and were stopped after a few rollouts of seed 1, before anyone opened any score, row or transcript; they are kept on disk as `_superseded-22task-*` and never reported. The complete 46-task set was frozen and every config restarted. A post-freeze note records two more infrastructure events: a later pipeline step overwrote the reader test file the owner had labeled (H2 never reads it: the owner-gold rows carry their own input, and we verified all 61 against the original bytes), and the first two frontier repeats were voided because every rollout hit a Claude Code subscription rate limit, then relaunched. A stopping rule fixed at 08:15 ET decides how many seeds count, independent of any score.
+
+What this does not fix: v3 is small (46 tasks; H1 is powered only for a true gain of about +0.09 reward), it is one owner's business, and the frontier ran on a harness tuned for Lightning.
 
 ## Known limitations and next steps
 
-- **Sandbox, not live platforms.** The demo runs against the sandbox world and local mock copies of the listing sites. The real-platform adapters stop before the final submit button, and the live selector files are unverified until the owner logs in. Facebook posts are created unpublished. Live inboxes are not automated. Nothing reaches a real person without the owner's click.
-- **Renters are scripted.** Counterparts answer from open-data utterances using keyword matching on the operator's question. An unusually phrased question can get no reply.
-- **Operator reliability is the open problem, and the numbers show it.** The held-out baseline pass rate is 3–13%. In the live listing run above, the operator wrote lease as `{"answer": "yes"}` instead of the reader's `{"value": true}`. `propose_showing` was refused, the operator repeated the refused call, and the verifier escalated it after 3 tries. The operator also answered two renters in its final text instead of with `send_message`, so the console shows those replies in the owner's chat. The Gym improvements are aimed at exactly these failures, and their held-out results are pending.
-- **MTP is disabled.** Lightning's built-in multi-token prediction loaded and accepted about 3 tokens per step. But on vLLM 0.27.1 with this GPU it crashed the engine (CUDA illegal memory access) at 4 concurrent requests, so it's off. The GPU uses Marlin NVFP4 kernels (4-bit weights, 16-bit math), not native FP4 tensor cores.
-- **One shared GPU.** The operator, the reader, the Gym rollouts and reader training all share one card. Under that load, per-request speed dropped about 8x. On 2026-10-17 at 12:17 ET the operator engine stalled silently (15 requests "running", zero tokens generated, `/v1/models` still answering), and it needed a container restart. The watchdog only checks `/v1/models`, so it didn't catch this. A generation-level health probe is a next step.
-- **Reader:** the training data is mostly synthetic templates, and the test split holds out templates but is still close to training. Weights are public on Hugging Face ([xvanov/rentus-reader-qwen3-0.6b](https://huggingface.co/xvanov/rentus-reader-qwen3-0.6b)) and as a GitHub release (`reader-v1`).
-- **Verifier self-check** reads English claims only.
-- **Next:** a held-out run of the improved config, an operator LoRA from Gym rollouts (stretch goal), a generation-level watchdog, and live platform runs with the owner logged in.
+- **Small held-out sets.** 46 leasing tasks and 90 owner-labeled messages. Per-category numbers are anecdotes; H3 and H4 can only succeed if the true difference is near zero or positive. Ops and vendor tasks on v3 are 5 experimental tasks, never pooled.
+- **Sandbox, not live channels.** The scored runs use the sandbox world and mock sites. Real-platform adapters stop before the final submit button. One real listing exists: the operator wrote the Appling Way post on the Rentus Homes Facebook Page and the owner published it unedited ([permalink](https://www.facebook.com/122140650357237994/posts/122140650345237994), decision D20). Its inbox runs in shadow mode: the operator drafts, the owner sends. Nothing reaches a real person without the owner's click.
+- **Scripted renters.** Counterparts answer by keyword; an unusual question can get no reply. Model-played renters exist but are secondary and come from the operator's own model family.
+- **NVFP4 and MTP were unstable, so we serve BF16.** NVFP4 crashed the engine under concurrent agent load on vLLM 0.27.1 with this GPU (Marlin W4A16 path on SM120); BF16 ran clean at about 38% lower decode throughput. Built-in MTP (free under the budget) accepted about 3 tokens per step but crashed at 4 concurrent requests. The serving numbers above that say NVFP4 were measured before the switch.
+- **Router trade-off.** The router halves Lightning calls and input tokens but lost 0.053 reward on v2 (mostly recorded move-in dates), so it is off in the final config; v3 tests it again (H3).
+- **Leasing-heavy realistic set.** The real threads available were mostly leasing; operations behavior (maintenance, rent, vendors) is covered by synthetic tasks and the conformance suite only.
+- **Scorer limits.** Phrase lists and a keyword "asked" classifier can be fooled by paraphrase; a greeting alone earns 0.84 reward. The owner's blind grading (κ) decides whether pass rates may be called "correct behavior" or only "scorer-defined".
+- **Next:** live channels with the owner logged in, timed follow-ups (the sandbox has no clock, so timing rules are unscored), a generation-level watchdog, an operator LoRA from Gym rollouts, and integration with the owner's existing tools after the event.
 
 ## Team
 
-**Kalin Ivanov**, solo: product, architecture, every decision (contact via the submission form). Built with AI coding agents (Claude Code) running one workstream each: serving, operator, tools, gym, data, reader, console, channels, integration. `docs/PLAN.md` and `docs/DECISIONS.md` record who decided what.
+**Rentus: Kalin Ivanov**, solo (product, architecture, every decision; GitHub [@xvanov](https://github.com/xvanov)). Built with AI coding agents (Claude Code) running one workstream each: serving, operator, tools, gym, data and twins, reader, console, channels, evaluation. `docs/DECISIONS.md` records who decided what.
+
+## Links
+
+- Fine-tuned reader: [huggingface.co/xvanov/rentus-reader-qwen3-0.6b](https://huggingface.co/xvanov/rentus-reader-qwen3-0.6b) (CC BY-SA 4.0; also GitHub release `reader-v1`)
+- Live listing written by the operator: [Rentus Homes Facebook Page post](https://www.facebook.com/122140650357237994/posts/122140650345237994)
+- Demo video: {{VIDEO_URL}}
+- Bounty write-ups and submission answers: [docs/submission.md](docs/submission.md) · serving: [docs/vllm.md](docs/vllm.md) · Gym: [gym/README.md](gym/README.md) · full results: [docs/results.md](docs/results.md) · protocol: [docs/eval-protocol.md](docs/eval-protocol.md)
