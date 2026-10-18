@@ -67,6 +67,20 @@ Simulated renters and vendors in the Gym are scripted from open datasets, not a 
 - 2026-10-17: `contracts/tools.md` §9, task set v2 script fields (`reuse`, list `when_asked`, `classifier`, per-task room patches). Additive; v1 tasks unchanged.
 - 2026-10-17: `contracts/tools.md` §10, task format v3 (twin tasks: counterpart `persona` + `twin_script`), written by `data/twins/to_tasks.py`. Additive; v2 `script` kept.
 
+## Concierge tools (lane 2, Oct 18)
+
+Exposed with `tool_schemas("concierge")` (prompt `system_v4.md`); the default 26-tool list is unchanged. Additive.
+
+- `listing_disclosure(room_id|thread_id)`: full-disclosure messages and house rules from the room record, street only, each ≤2 sentences.
+- `capture_demand(thread_id, criteria, listing_of_interest?, phone?, email?, proxy?)`: upsert the demand record on the register row, merge a second channel by phone/email, fit to inventory, return alternatives and the next step.
+- `match_inventory(renter_id)`: rooms that pass the spec §5.4 hard gates, with reasons.
+- `search_external_rooms(renter_id)`: sourcing over the fictional `fixtures/demand_external_rooms.json`; status `sourcing`, due in `policy.sourcing_days` (3).
+- `park_prospect(renter_id, reason, timeframe?)`: status `not_now`, `reconnect_at` (named month → 1st, exact date, else +30 days).
+- `log_followup(renter_id, event)` / `due_followups(now?)`: follow-up cadence state (`next_checkin_at`) and what is due.
+- `cluster_report(as_of?)`: WATCH ≥3, SUPPLY SIGNAL ≥5 qualified, else "nominal".
+- Owner-only (not an operator tool): `impl.demand_owner.owner_call(world, "owner_confirm_showing", {event_id, decision})`; contract in `tools/README.md`.
+- `send_message` guards added: third-person owner references (`first_person`), house numbers before a confirmed showing (`address_private`; listings `address_public`); the canonical two-part lease question counts as one question.
+
 ## Milestones
 
 - **Phase 1, by 8 PM Sat:** the full loop runs in the sandbox on Lightning via vLLM, with a baseline Gym score.
