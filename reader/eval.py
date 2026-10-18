@@ -8,6 +8,10 @@ Backends:
   anthropic REFERENCE ONLY: a frontier model (default claude-opus-5-5) over the Anthropic
             Messages API via OpenCode Zen, same prompt. Never part of the running system.
             Needs the `anthropic` SDK (gym/.venv has it) and OPENCODE_API_KEY.
+  claude_cli REFERENCE ONLY: a frontier model (claude-opus-5-5 or claude-fable-5-1) through the owner's
+            local Claude Code CLI (`claude -p`, subscription login, no tools, no settings), same system
+            prompt and user message, JSON-only answer parsed and validated by prompt.parse_output.
+            Concurrency is capped at 3; rate limits back off, then stop (operator/rentus_operator/claude_code.py).
 
 Examples:
   python reader/eval.py --backend fallback
@@ -17,6 +21,7 @@ Examples:
       --model $OPERATOR_MODEL --label lightning --no-thinking
 
   python reader/eval.py --backend anthropic --label frontier-opus-5-5 --sample 400 --concurrency 8
+  python reader/eval.py --backend claude_cli --model claude-opus-5-5 --label frontier-cc-opus-5-5 --sample 400 --concurrency 3
 
 --sample N scores a seeded sample stratified by source x language x gold move-in status, and
 rescores every existing <label>.<split>.preds.jsonl on the same rows (same_sample_baselines).
@@ -190,6 +195,37 @@ def run_anthropic(rows: list[dict], a) -> list[dict]:
             preds.append(p)
             if i % 50 == 0:
                 print(f"  {i}/{len(rows)} spent ${METER.snapshot()['spent_usd']:.2f}", file=sys.stderr)
+    return preds
+
+
+def run_claude_cli(rows: list[dict], a) -> list[dict]:
+    """Frontier reference via the local Claude Code CLI: same system prompt + user message, no tools."""
+    sys.path.insert(0, str(REPO / "operator"))
+    from rentus_operator.claude_code import BREAKER, print_json
+
+    def one(r):
+        msgs = build_messages(r["input"])
+        system = "\n\n".join(m["content"] for m in msgs if m["role"] == "system")
+        user = "\n\n".join(m["content"] for m in msgs if m["role"] != "system")
+        t0 = time.time()
+        text, err, cost, usage, models = None, None, None, None, None
+        try:
+            data = print_json(system, user, a.model, a.effort, timeout=a.timeout)
+            text, cost, usage = data.get("result") or "", data.get("total_cost_usd"), data.get("usage")
+            models = sorted((data.get("modelUsage") or {}).keys())
+        except Exception as e:  # noqa: BLE001 - rate limit / CLI error: scored as an empty answer, never looped
+            err = f"{type(e).__name__}: {str(e)[:200]}"
+        return {"id": r["id"], "raw_text": text, "pred": parse_output(text) if text is not None else None,
+                "error": err, "latency_s": time.time() - t0, "notional_cost_usd": cost, "usage": usage,
+                "models": models}
+
+    preds = []
+    with ThreadPoolExecutor(max_workers=min(a.concurrency, 3)) as ex:
+        for i, p in enumerate(ex.map(one, rows), 1):
+            preds.append(p)
+            if i % 50 == 0:
+                print(f"  {i}/{len(rows)} errors {sum(1 for x in preds if x['error'])}"
+                      f"{' BREAKER OPEN' if BREAKER.tripped else ''}", file=sys.stderr)
     return preds
 
 
@@ -376,8 +412,10 @@ def provenance(data_path) -> dict:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--backend", choices=["fallback", "endpoint", "anthropic"], required=True)
+    ap.add_argument("--backend", choices=["fallback", "endpoint", "anthropic", "claude_cli"], required=True)
     ap.add_argument("--split", default="test", choices=["train", "dev", "test"])
+    ap.add_argument("--rows-file", default=None, help="score this JSONL of reader rows instead of --split "
+                    "(e.g. the twin reader test); results are named after the file stem")
     ap.add_argument("--limit", type=int, default=0, help="first N rows only (0 = all)")
     ap.add_argument("--base-url", default=None)
     ap.add_argument("--model", default=None)
@@ -395,8 +433,13 @@ def main():
     a = ap.parse_args()
     load_env()
 
-    rows = load_rows(a.split)
-    data_path = DATA / f"{a.split}.jsonl" if (DATA / f"{a.split}.jsonl").exists() else PUBLISHED / f"{a.split}.jsonl"
+    if a.rows_file:
+        rows = [json.loads(l) for l in Path(a.rows_file).read_text().splitlines() if l.strip()]
+        a.split = Path(a.rows_file).stem
+        data_path = Path(a.rows_file)
+    else:
+        rows = load_rows(a.split)
+        data_path = DATA / f"{a.split}.jsonl" if (DATA / f"{a.split}.jsonl").exists() else PUBLISHED / f"{a.split}.jsonl"
     if a.limit:
         rows = rows[:a.limit]
     if a.sample:
@@ -418,6 +461,21 @@ def main():
                 "model": a.model, "effort": a.effort, "cost_usd": round(sum(costs), 4),
                 "cost_per_row_usd": round(sum(costs) / len(costs), 5) if costs else None,
                 "concurrency": a.concurrency, "spend": METER.snapshot()}
+    elif a.backend == "claude_cli":
+        sys.path.insert(0, str(REPO / "operator"))
+        from rentus_operator.claude_code import BREAKER, DEFAULT_MODEL, check_model, cli_version
+        a.model = check_model(a.model or DEFAULT_MODEL)
+        preds = run_claude_cli(rows, a)
+        label = a.label or "frontier-cc-" + re.sub(r"[^\w.-]", "_", a.model)
+        costs = [p["notional_cost_usd"] for p in preds if p.get("notional_cost_usd") is not None]
+        info = {"backend": "claude_cli", "reference_only": True,
+                "provider": "local Claude Code CLI, owner's subscription login (claude -p, no tools, no settings)",
+                "model": a.model, "cli_version": cli_version(), "effort": a.effort,
+                "response_models": sorted({m for p in preds for m in (p.get("models") or [])}),
+                "notional_cost_usd": round(sum(costs), 4),
+                "notional_cost_note": "Claude Code's list-price estimate; billed to the subscription, not per call",
+                "concurrency": min(a.concurrency, 3), "rate_limit_breaker": {"tripped": BREAKER.tripped,
+                                                                             "reason": BREAKER.reason}}
     else:
         a.base_url = a.base_url or os.environ.get("READER_BASE_URL")
         a.model = a.model or os.environ.get("READER_MODEL")

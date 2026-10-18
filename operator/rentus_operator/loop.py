@@ -338,6 +338,9 @@ class MeteredClient:
 def make_client(cfg: RunConfig, timeout: float | None = None, max_retries: int | None = None):
     """The model client for cfg.api. "openai" (default) is the running system; "anthropic" is the
     reference-only frontier backend (rentus_operator.anthropic_client). Both keep per-call usage in .calls."""
+    if cfg.api == "claude_code":   # reference only: the frontier model through the local Claude Code CLI
+        from .claude_code import AgentClient
+        return AgentClient(cfg.model, cfg.effort)
     if cfg.api == "anthropic":
         from .anthropic_client import AnthropicChatAdapter
         return AnthropicChatAdapter(model=cfg.model, effort=cfg.effort or "high",
@@ -364,6 +367,9 @@ def run(world, goal_or_inbound, client=None, model: str | None = None, max_steps
         sink = toolbox.make_sink(be, run_id)
     if client is None:
         client = make_client(cfg)
+    if cfg.api == "claude_code":   # reference only: Claude Code runs its own tool loop over the same tools
+        from .claude_code import run_operator
+        return run_operator(world, goal_or_inbound, client, cfg, sink, be, run_id, sleep)
     R = _Runner(world, client, cfg, sink, be, sleep)
 
     st = toolbox.state(world)

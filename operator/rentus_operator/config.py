@@ -36,7 +36,9 @@ class RunConfig:
     max_tokens: int = 2048
     api: str = "openai"                   # "openai" (vLLM, the running system) | "anthropic" (REFERENCE ONLY:
                                           # frontier model via anthropic_client.py, never part of the system)
-    effort: str | None = None             # api=anthropic only: output_config.effort (None = adapter default "high")
+                                          # | "claude_code" (REFERENCE ONLY: frontier model via the local Claude
+                                          # Code CLI + Agent SDK, native tool use; claude_code.py)
+    effort: str | None = None             # api=anthropic/claude_code only: output_config.effort (None = adapter default "high")
     reasoning: bool | None = None         # None = server default; True/False sent as chat_template_kwargs
     keep_reasoning_in_history: bool = False
 
