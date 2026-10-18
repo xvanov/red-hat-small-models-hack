@@ -29,6 +29,26 @@ channels/.venv/bin/python -m channels.messenger_web serve   # keep running next 
 On a VNC desktop, prefix `login` with `DISPLAY=:2`. `serve` shows its browser window by default. Set
 `MESSENGER_WEB_HEADLESS=1` to hide it. Facebook is more likely to challenge a headless browser.
 
+## Headless login (cookie import from your laptop)
+
+This machine has no screen, so `login` (which needs a visible browser) refuses here. Copy your session from your
+laptop instead:
+
+1. On the laptop, in Chrome, install the **Cookie-Editor** extension (cookie-editor.com). EditThisCookie also works.
+2. Open https://www.facebook.com logged in as yourself, click the Cookie-Editor icon, then Export, then
+   **JSON**. The export is copied to the clipboard.
+3. Put it on this machine as `~/fb-cookies.json`. Either run `ssh k@100.64.38.18 'cat > ~/fb-cookies.json'`,
+   paste, and press Ctrl-D, or save it to a file and copy it with `scp`.
+4. On this machine, run `channels/.venv/bin/python -m channels.messenger_web import-cookies ~/fb-cookies.json`.
+   It loads only the facebook.com and messenger.com cookies into the profile, opens the inbox headless, prints
+   `{"ok": true, "state": "ok", "threads_visible": N}`, and deletes the file.
+5. Run `... read` (prints counts only), then `... serve`.
+
+The export is your live session, so treat it like a password. Facebook can still ask for a checkpoint
+because the session comes from a new IP address. The worker then reports `login_required` and does nothing more.
+`login`, `check`, `read`, `serve` and `import-cookies` all refuse with the blocking PID if another process holds
+the profile, and they clear a stale `SingletonLock` left by a crashed one.
+
 ## Safety
 
 - Every thread is read. The operator's reply on any thread becomes a draft that waits for the owner's approval.
