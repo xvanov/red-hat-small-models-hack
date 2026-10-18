@@ -67,7 +67,10 @@ def _summary(t: dict) -> dict:
     s = {k: t.get(k) for k in PUBLIC_THREAD_KEYS}
     s.update({"last_text": last.get("text", ""), "last_ts": last.get("ts") or t.get("created"),
               "unread": int(t.get("unread", 0)), "needs_owner": bool(t.get("needs_owner")),
-              "line": t.get("line"), "opted_out": bool(t.get("opted_out")), "busy": bool(t.get("pending_turn"))})
+              "line": t.get("line"), "opted_out": bool(t.get("opted_out")),
+              # busy: an operator turn is running now ("Operator is typing..."); queued: a reply is waiting for one
+              "busy": bool(t.get("busy")), "busy_since": t.get("busy_since") if t.get("busy") else None,
+              "queued": bool(t.get("pending_turn")) and not t.get("busy")})
     return s
 
 
@@ -96,52 +99,59 @@ def list_approvals() -> list[dict]:
             for a in _store().approvals() if a.get("status") == "pending"]
 
 
+def _set_approval(st: Store, approval_id: str, **fields) -> None:
+    items = st.approvals()
+    for x in items:
+        if x["id"] == approval_id:
+            x.update(fields)
+    st.save_approvals(items)
+
+
+def _refresh_needs_owner(st: Store, thread_id: str) -> None:
+    t = st.get_thread(thread_id)
+    if t is not None:
+        t["needs_owner"] = any(x.get("status") in ("pending", "sending") and x["thread_id"] == thread_id
+                               and x.get("kind") != "report" for x in st.approvals())
+        st.save_thread(t)
+
+
 def decide(approval_id: str, decision: str, text: str | None = None) -> dict:
+    """approve/edit send `text` when given, else the draft. The item is claimed ("sending") under the lock before
+    anything is sent, so two clicks (or two processes) can never send it twice; a gate block puts it back."""
     if decision not in ("approve", "edit", "deny"):
         return {"ok": False, "error": "decision must be approve, edit or deny"}
     st = _store()
     with st.locked():
-        items = st.approvals()
-        a = next((x for x in items if x["id"] == approval_id), None)
+        a = next((x for x in st.approvals() if x["id"] == approval_id), None)
         if a is None or a.get("status") != "pending":
             return {"ok": False, "error": "unknown or already decided approval"}
-    out_text = (text if decision == "edit" else a.get("draft_text")) or ""
-    result = {"ok": True, "sent": False}
-    if decision in ("approve", "edit") and out_text.strip():
-        result = outbound.deliver(st, a["thread_id"], out_text, origin="owner", approved=True,
-                                  existing_message_id=a.get("message_id"))
-        result["sent"] = result.get("status") == "sent"
-        if result.get("status") == "awaiting_approval":  # still gated (kill switch / rate cap): keep one item
-            with st.locked():
-                items = st.approvals()
-                for x in items:
-                    if x["id"] == result.get("approval_id"):
-                        x["status"] = "superseded"
-                st.save_approvals(items)
-            return {"ok": False, "error": result.get("error"), "status": "awaiting_approval"}
-    elif decision == "deny" and a.get("message_id"):
+        claim = "sending" if decision != "deny" else "denied"
+        _set_approval(st, approval_id, status=claim, decided=now_iso())
+    out_text = (text if (text or "").strip() else a.get("draft_text")) or ""
+    if decision == "deny":
         with st.locked():
             t = st.get_thread(a["thread_id"])
             for m in (t or {}).get("messages", []):
-                if m["id"] == a["message_id"]:
+                if m["id"] == a.get("message_id") and m["status"] == "awaiting_approval":
                     m["status"] = "draft"
             if t:
                 st.save_thread(t)
+            _refresh_needs_owner(st, a["thread_id"])
+        return {"ok": True, "decision": "deny", "sent": False, "status": "denied", "error": None}
+    result = {"ok": True, "status": "closed", "error": None}
+    if out_text.strip():
+        result = outbound.deliver(st, a["thread_id"], out_text.strip(), origin="owner", approved=True,
+                                  existing_message_id=a.get("message_id"), make_approval=False)
     with st.locked():
-        items = st.approvals()
-        for x in items:
-            if x["id"] == approval_id:
-                x["status"] = {"approve": "approved", "edit": "edited", "deny": "denied"}[decision]
-                x["decided"] = now_iso()
-                if decision == "edit":
-                    x["final_text"] = out_text
-        st.save_approvals(items)
-        t = st.get_thread(a["thread_id"])
-        if t is not None:
-            t["needs_owner"] = any(x.get("status") == "pending" and x["thread_id"] == t["thread_id"]
-                                   and x.get("kind") != "report" for x in items)
-            st.save_thread(t)
-    return {"ok": result.get("ok", True), "decision": decision, "sent": result.get("sent", False),
+        if result.get("status") == "awaiting_approval":  # still gated (kill switch / rate cap): back to pending
+            _set_approval(st, approval_id, status="pending", decided=None, last_error=result.get("error"))
+            _refresh_needs_owner(st, a["thread_id"])
+            return {"ok": False, "decision": decision, "sent": False, "status": "awaiting_approval",
+                    "error": result.get("error")}
+        final = {"approve": "approved", "edit": "edited"}[decision] if result.get("ok") else "failed"
+        _set_approval(st, approval_id, status=final, final_text=out_text if out_text != a.get("draft_text") else None)
+        _refresh_needs_owner(st, a["thread_id"])
+    return {"ok": bool(result.get("ok")), "decision": decision, "sent": result.get("status") == "sent",
             "status": result.get("status"), "error": result.get("error")}
 
 

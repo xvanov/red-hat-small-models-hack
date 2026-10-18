@@ -41,7 +41,7 @@ def main(argv=None) -> int:
     if a.cmd == "deliveries":
         st = Store()
         p = st.root / "sends.jsonl"
-        rows = [json.loads(x) for x in p.read_text().splitlines()[-20:]] if p.exists() else []
+        rows = [r for r in (json.loads(x) for x in p.read_text().splitlines()[-40:]) if not r.get("reserved")] if p.exists() else []
         provs = outbound.get_providers()
         for r in rows:
             out = {k: r.get(k) for k in ("thread_id", "channel", "line", "ok", "provider_status", "error_code")}

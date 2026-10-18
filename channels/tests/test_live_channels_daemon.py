@@ -240,7 +240,7 @@ def test_turn_error_retries_then_asks_owner(env):
         assert daemon.run_turn(env["store"], tid, runner=boom)["ok"] is False
     t = env["store"].get_thread(tid)
     assert not t["pending_turn"] and t["needs_owner"]
-    assert api.list_approvals()[0]["reason"].startswith("operator could not answer")
+    assert api.list_approvals()[0]["reason"].startswith("The assistant could not answer")
 
 
 class FakePersonal:
@@ -294,3 +294,142 @@ def test_personal_channel_unlisted_drafts_only(env, monkeypatch, drafts):
         assert prov.sent == [("fb-user-77", "Yes, it is available Nov 1. When would you move in?")]
     finally:
         registry.unregister("messenger_personal")
+
+
+# ---------------------------------------------------------------- review round 2 regressions
+
+def _blocked_approval(env, monkeypatch):
+    monkeypatch.setenv("LIVE_SEND_ENABLED", "0")
+    r = api.start_conversation("sms", OWNER_PHONE, "draft one")
+    monkeypatch.setenv("LIVE_SEND_ENABLED", "1")
+    return r, api.list_approvals()[0]
+
+
+def test_1_approve_sends_once_and_uses_given_text(env, monkeypatch):
+    r, ap = _blocked_approval(env, monkeypatch)
+    first = api.decide(ap["id"], "approve", "owner's wording")
+    second = api.decide(ap["id"], "approve")
+    assert first["sent"] is True and second["ok"] is False
+    assert env["tf"].sent == [(OWNER_PHONE, "owner's wording")]
+
+
+def test_1_claimed_approval_cannot_be_decided_again(env, monkeypatch):
+    r, ap = _blocked_approval(env, monkeypatch)
+    st = env["store"]
+    with st.locked():  # another process has claimed it and is sending right now
+        items = st.approvals()
+        items[0]["status"] = "sending"
+        st.save_approvals(items)
+    assert api.decide(ap["id"], "approve")["ok"] is False and env["tf"].sent == []
+
+
+def test_2_owner_sends_still_respect_kill_switch_optout_and_cap(env, monkeypatch):
+    from channels.live import config as cfg
+    r = api.start_conversation("sms", OWNER_PHONE, "one")
+    tid = r["thread_id"]
+    st = env["store"]
+    t = st.get_thread(tid)
+    t["contact"] = STRANGER  # not allowlisted: skip_allowlist lifts only that check
+    allow = cfg.Allowlist.load()
+    assert outbound._gate(st, t, allow, skip_allowlist=True) is None
+    (env["dir"] / "STOP").touch()
+    assert "switched off" in outbound._gate(st, t, allow, skip_allowlist=True)
+    assert api.send_owner_message(tid, "two")["status"] == "awaiting_approval"
+    (env["dir"] / "STOP").unlink()
+    monkeypatch.setenv("LIVE_MAX_PER_HOUR", "1")
+    assert "rate cap" in outbound._gate(st, t, allow, skip_allowlist=True)
+    assert api.send_owner_message(tid, "three")["status"] == "awaiting_approval"
+    monkeypatch.setenv("LIVE_MAX_PER_HOUR", "30")
+    with st.locked():
+        tt = st.get_thread(tid)
+        tt["opted_out"] = True
+        st.save_thread(tt)
+    assert api.send_owner_message(tid, "four")["status"] == "failed"
+    assert env["tf"].sent == [(OWNER_PHONE, "one")]
+
+
+def test_3_model_error_is_a_failed_attempt(env):
+    env["tf"].push(OWNER_PHONE, "hello", "SM-30")
+    daemon.poll_all(env["store"])
+    tid = api.list_threads()[0]["thread_id"]
+    daemon._MODEL["model"] = "cached"
+
+    class Bad:
+        messages, events, status, final_text = [], [], "model_error", "HTTP 500"
+
+    for i in range(daemon.MAX_TURN_ATTEMPTS):
+        assert daemon.run_turn(env["store"], tid, runner=lambda w, i_, h: Bad())["ok"] is False
+        assert "model" not in daemon._MODEL  # re-probed next time
+        t = env["store"].get_thread(tid)
+        assert t.get("world_synced", []) == [] and not t["busy"]
+    assert not t["pending_turn"] and api.list_approvals()[0]["kind"] == "error"
+    assert "reply by hand" in api.list_approvals()[0]["reason"]
+
+
+def test_6_single_daemon_lock(env):
+    st = env["store"]
+    fh = daemon.acquire_daemon_lock(st)
+    try:
+        with pytest.raises(daemon.DaemonRunning):
+            daemon.acquire_daemon_lock(Store())
+        assert daemon.main(once=True) == 3
+    finally:
+        fh.close()
+    daemon.acquire_daemon_lock(st).close()
+
+
+def test_6_busy_marker_blocks_a_second_turn_and_is_exposed(env):
+    import os
+    env["tf"].push(OWNER_PHONE, "hello", "SM-40")
+    daemon.poll_all(env["store"])
+    tid = api.list_threads()[0]["thread_id"]
+    st = env["store"]
+    with st.locked():
+        t = st.get_thread(tid)
+        t.update(busy=True, busy_since="2026-10-18T08:00:00-04:00", turn_owner=os.getppid())  # a live other pid
+        st.save_thread(t)
+    s = api.list_threads()[0]
+    assert s["busy"] is True and s["busy_since"] and s["queued"] is False
+    called = []
+    assert daemon.run_turn(st, tid, runner=lambda w, i, h: called.append(1) or _Res([]))["skipped"]
+    seen = {}
+
+    def runner(w, i, h):
+        seen["busy"] = api.get_thread(tid)["busy"]
+        return _Res([])
+
+    with st.locked():
+        t = st.get_thread(tid)
+        t["turn_owner"] = 2 ** 22 + 12345  # dead pid: stale marker is taken over
+        st.save_thread(t)
+    assert daemon.run_turn(st, tid, runner=runner)["ok"] and seen["busy"] is True and not called
+    assert api.get_thread(tid)["busy"] is False
+
+
+def test_9_thread_id_validation(env):
+    assert env["store"].get_thread("../../etc/passwd") is None
+    assert api.get_thread("sms:../x").get("error")
+    with pytest.raises(ValueError):
+        env["store"]._tpath("email:a/b")
+
+
+def test_c_one_readable_report_per_thread(env):
+    import rentus_tools as rt
+    daemon.register_adapters(env["store"])
+    env["tf"].push(OWNER_PHONE, "hello", "SM-50")
+    daemon.poll_all(env["store"])
+    tid = api.list_threads()[0]["thread_id"]
+
+    def runner(w, inbound, h):
+        rt.call(w, "report_to_owner", {"summary": f"New inquiry on thread {inbound['thread_id']} (renter:renter)."})
+        rt.call(w, "report_to_owner", {"summary": "Asked for move-in date."})
+        return _Res([])
+
+    daemon.run_turn(env["store"], tid, runner=runner)
+    env["tf"].push(OWNER_PHONE, "again", "SM-51")
+    daemon.poll_all(env["store"])
+    daemon.run_turn(env["store"], tid, runner=runner)
+    reps = [a for a in api.list_approvals() if a["kind"] == "report"]
+    assert len(reps) == 1
+    assert "t_sms" not in reps[0]["reason"] and "renter:" not in reps[0]["reason"]
+    assert "Asked for move-in date." in reps[0]["reason"]

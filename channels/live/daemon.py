@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import os
+import re
 import sys
 import time
 import traceback
@@ -216,15 +217,55 @@ def _config():
                 os.environ[k] = v
     except Exception:
         pass
-    cfg = RunConfig(**FINAL_CONFIG)
+    # Speed for live chat: reasoning off per request (chat_template_kwargs.enable_thinking=False; docs/vllm.md:
+    # ~2x turns/s, p95 8.1 -> 2.6 s). LIVE_REASONING=1 restores the measured final config's server default.
+    reasoning = None if (config.env("LIVE_REASONING", "0") or "0").strip() == "1" else False
+    cfg = RunConfig(**FINAL_CONFIG, reasoning=reasoning)
     if "OPERATOR_MODEL" not in os.environ:
-        if "model" not in _MODEL:
+        if "model" not in _MODEL:  # cleared after any failed turn, so a restarted endpoint is re-probed
             models = probe(cfg.base_url, cfg.api_key)
             if not models:
                 raise RuntimeError("operator endpoint not reachable (OPERATOR_BASE_URL)")
             _MODEL["model"] = models[0]
         cfg = cfg.with_(model=_MODEL["model"])
     return cfg
+
+
+IDS_RE = re.compile(r"\b(t_[a-z_]+_[0-9a-f_]+|(sms|email|messenger)[:_][0-9a-z:_]+|renter:[\w-]+|"
+                    r"(ESC|RPT)[-_]?\d+|R_[A-Z_]+|[0-9a-f]{10,})\b")
+
+
+def readable(text: str, n: int = 280) -> str:
+    """Owner-facing text without internal ids (thread ids, renter ids, ESC/RPT ids, hashes)."""
+    s = IDS_RE.sub("", text or "")
+    s = re.sub(r"\s*\(\s*\)|`\s*`|'\s*'|thread\s+(?=[,.;:])", "", s)
+    s = re.sub(r"\s{2,}", " ", s).strip(" ,;:")
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def _pid_alive(pid) -> bool:
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _fail_turn(store: Store, thread_id: str, err: str) -> dict:
+    _MODEL.clear()
+    with store.locked():
+        t = store.get_thread(thread_id)
+        t["busy"], t["busy_since"], t["turn_owner"] = False, None, None
+        t["turn_attempts"] = int(t.get("turn_attempts", 0)) + 1
+        t["trace"].append({"ts": now_iso(), "actor": "operator", "name": "turn_error", "summary": err, "ok": False})
+        if t["turn_attempts"] >= MAX_TURN_ATTEMPTS:
+            t["pending_turn"] = False
+            t["needs_owner"] = True
+            store.add_approval(thread_id, "The assistant could not answer this message after "
+                               f"{MAX_TURN_ATTEMPTS} tries ({readable(err, 120)}). Please reply by hand.", "",
+                               kind="error")
+        store.save_thread(t)
+    return {"ok": False, "error": err}
 
 
 def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
@@ -236,27 +277,33 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
         t = store.get_thread(thread_id)
         if t is None or not t.get("pending_turn"):
             return {"skipped": True}
+        if t.get("busy") and t.get("turn_owner") != os.getpid() and _pid_alive(t.get("turn_owner")):
+            return {"skipped": True, "busy": True}
+        t["busy"], t["busy_since"], t["turn_owner"] = True, now_iso(), os.getpid()
+        store.save_thread(t)
         world_d, history = t.get("world"), t.get("history")
         owner_pending = list(t.get("owner_pending") or [])
         synced = set(t.get("world_synced") or [])
         new_in = [m for m in t["messages"] if m["direction"] == "in" and m["id"] not in synced]
-    w = rt.World.from_dict(world_d) if world_d else _new_world(t)
-    w.mode = "live"
-    w.clock["now"] = _now_ny()
-    wt = next(x for x in w.threads if x.get("live_id") == thread_id or x["thread_id"] == thread_id)
-    wid = wt["thread_id"]
-    if t.get("renter_name"):
-        wt["renter_name"] = t["renter_name"]
-    for o in owner_pending:  # the owner's manual replies, so the operator sees them
-        wt["messages"].append({"id": o["id"], "from": "operator", "text": o["text"], "attachments": [], "ts": w.clock["now"]})
-    for m in new_in:
-        wt["messages"].append({"id": m["id"], "from": "renter", "text": m["text"], "attachments": [], "ts": w.clock["now"]})
-    esc0, rep0 = len(w.escalations), len(w.owner_reports)
-    inbound = {"thread_id": wid, "channel": registry.world_channel(t["channel"]),
-               "renter_name": t.get("renter_name") or "a renter", "text": "\n".join(m["text"] for m in new_in)}
-    err = None
-    res = None
+    print(time.strftime("%H:%M:%S"), f"turn start {thread_id} ({len(new_in)} new message(s))", flush=True)
+    t0 = time.time()
     try:
+        w = rt.World.from_dict(world_d) if world_d else _new_world(t)
+        w.mode = "live"
+        w.clock["now"] = _now_ny()
+        wt = next(x for x in w.threads if x.get("live_id") == thread_id or x["thread_id"] == thread_id)
+        wid = wt["thread_id"]
+        if t.get("renter_name"):
+            wt["renter_name"] = t["renter_name"]
+        for o in owner_pending:  # the owner's manual replies, so the operator sees them
+            wt["messages"].append({"id": o["id"], "from": "operator", "text": o["text"], "attachments": [],
+                                   "ts": w.clock["now"]})
+        for m in new_in:
+            wt["messages"].append({"id": m["id"], "from": "renter", "text": m["text"], "attachments": [],
+                                   "ts": w.clock["now"]})
+        esc0, rep0 = len(w.escalations), len(w.owner_reports)
+        inbound = {"thread_id": wid, "channel": registry.world_channel(t["channel"]),
+                   "renter_name": t.get("renter_name") or "a renter", "text": "\n".join(m["text"] for m in new_in)}
         if runner is None:
             from rentus_operator import toolbox
             from rentus_operator.loop import run
@@ -268,19 +315,13 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
         else:
             res = runner(w, inbound, history)
     except Exception as e:
-        err = f"{type(e).__name__}: {str(e)[:200]}"
+        return _fail_turn(store, thread_id, f"{type(e).__name__}: {str(e)[:200]}")
+    if getattr(res, "status", None) == "model_error":
+        return _fail_turn(store, thread_id, "model_error: " + str(getattr(res, "final_text", "") or "")[:160])
     with store.locked():
         t = store.get_thread(thread_id)
-        if err:
-            t["turn_attempts"] = int(t.get("turn_attempts", 0)) + 1
-            t["trace"].append({"ts": now_iso(), "actor": "operator", "name": "turn_error", "summary": err, "ok": False})
-            if t["turn_attempts"] >= MAX_TURN_ATTEMPTS:
-                t["pending_turn"] = False
-                t["needs_owner"] = True
-                store.add_approval(thread_id, f"operator could not answer ({err}); please reply by hand", "",
-                                   kind="error")
-            store.save_thread(t)
-            return {"ok": False, "error": err}
+        t["busy"], t["busy_since"], t["turn_owner"] = False, None, None
+        t["turn_attempts"] = 0
         t["world"] = w.to_dict()
         t["history"] = res.messages
         t["world_synced"] = sorted(synced | {m["id"] for m in new_in})
@@ -294,32 +335,80 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
         if stage:
             t["stage"] = stage
         for e in w.escalations[esc0:]:
-            store.add_approval(thread_id, e.get("reason") or "escalation", e.get("draft") or "", kind="escalation")
+            store.add_approval(thread_id, readable(e.get("reason") or "") or "The assistant needs your decision",
+                               e.get("draft") or "", kind="escalation")
             t["needs_owner"] = True
-        for r in w.owner_reports[rep0:]:
-            store.add_approval(thread_id, r.get("summary") or "report", "", kind="report")
-        t["last_turn"] = {"status": res.status, "at": now_iso()}
+        reports = [readable(r.get("summary") or "") for r in w.owner_reports[rep0:]]
+        reports = [r for r in reports if r]
+        if reports:  # at most one report item per thread: it replaces the previous pending one
+            items = store.approvals()
+            for x in items:
+                if x["thread_id"] == thread_id and x.get("kind") == "report" and x.get("status") == "pending":
+                    x["status"] = "superseded"
+            store.save_approvals(items)
+            store.add_approval(thread_id, readable(" ".join(reports)), "", kind="report")
+        t["last_turn"] = {"status": res.status, "at": now_iso(), "seconds": round(time.time() - t0, 1)}
         store.save_thread(t)
-    return {"ok": True, "status": res.status}
+    print(time.strftime("%H:%M:%S"), f"turn done {thread_id} {res.status} in {time.time() - t0:.1f}s", flush=True)
+    return {"ok": True, "status": res.status, "seconds": round(time.time() - t0, 1)}
 
 
 # ====================================================================== loop
 
 def tick(store: Store) -> dict:
-    touched = poll_all(store)
+    try:
+        touched = poll_all(store)
+    except Exception as e:
+        touched = []
+        print(time.strftime("%H:%M:%S"), "poll error:", type(e).__name__, str(e)[:200], flush=True)
     turns = []
     for t in store.all_threads():
         if t.get("pending_turn"):
-            turns.append({t["thread_id"]: run_turn(store, t["thread_id"])})
+            try:
+                turns.append({t["thread_id"]: run_turn(store, t["thread_id"])})
+            except Exception as e:  # never let one thread stop the others; counts as a failed attempt
+                turns.append({t["thread_id"]: _fail_turn(store, t["thread_id"], f"{type(e).__name__}: {str(e)[:200]}")})
     return {"new": len(touched), "turns": turns}
+
+
+class DaemonRunning(RuntimeError):
+    pass
+
+
+def acquire_daemon_lock(store: Store):
+    """One daemon per store: an exclusive, non-blocking fcntl lock held for the life of the process."""
+    import fcntl
+    store.root.mkdir(parents=True, exist_ok=True)
+    fh = open(store.root / "daemon.pid", "a+")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.seek(0)
+        other = fh.read().strip()
+        fh.close()
+        raise DaemonRunning(f"another live daemon is running (pid {other or '?'})") from None
+    fh.seek(0)
+    fh.truncate()
+    fh.write(str(os.getpid()))
+    fh.flush()
+    return fh
 
 
 def main(once: bool = False) -> int:
     store = Store()
-    store.root.mkdir(parents=True, exist_ok=True)
+    try:
+        lock = acquire_daemon_lock(store)  # noqa: F841  (held until exit)
+    except DaemonRunning as e:
+        print(str(e), file=sys.stderr)
+        return 3
+    with store.locked():  # a crash mid-turn left busy markers from our pid's predecessor: clear them
+        for t in store.all_threads():
+            if t.get("busy") and not _pid_alive(t.get("turn_owner")):
+                t["busy"], t["busy_since"], t["turn_owner"] = False, None, None
+                store.save_thread(t)
     register_adapters(store)
     allow = config.Allowlist.load()
-    print(time.strftime("%H:%M:%S"), f"live daemon: dir={store.root} allowlist={allow.size()} "
+    print(time.strftime("%H:%M:%S"), f"live daemon pid={os.getpid()}: dir={store.root} allowlist={allow.size()} "
           f"send_enabled={config.send_enabled()} lines={[str(l) for l in config.sms_lines()]}", flush=True)
     while True:
         try:

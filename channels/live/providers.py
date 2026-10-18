@@ -206,33 +206,41 @@ class ResendGmailEmail:
                 typ, data = c.uid("SEARCH", None, "FROM", f'"{addr}"', "SINCE", since.strftime("%d-%b-%Y"))
                 uids = (data[0] or b"").split() if typ == "OK" else []
                 for uid in uids[-40:]:
-                    typ, parts = c.uid("FETCH", uid, "(BODY.PEEK[])")
-                    raw = next((p[1] for p in parts or [] if isinstance(p, tuple) and len(p) > 1), None)
-                    if typ != "OK" or raw is None:
-                        continue
-                    msg = email.message_from_bytes(raw, policy=email.policy.default)
-                    mid = str(msg.get("Message-ID", "")).strip() or f"uid:{uid.decode()}"
-                    if mid in seen:
-                        continue
-                    frm = [a.lower() for _, a in getaddresses(msg.get_all("From", []))]
-                    if addr not in frm or not self._addressed_to_us(msg):
-                        continue
-                    ts = _dt(str(msg.get("Date", "")))
-                    if ts and ts < since:
-                        continue
-                    subj = str(msg.get("Subject", ""))
-                    refs = str(msg.get("References", "")).split()
-                    out.append({"channel": "email", "contact": addr, "text": strip_quoted(body_text(msg)),
-                                "ext_id": mid, "ts": ts.isoformat() if ts else None, "line": self.cfg.from_addr,
-                                "line_last4": None, "renter_name": (getaddresses(msg.get_all("From", []))[0][0] or None),
-                                "meta": {"subject": subj, "message_id": mid, "references": refs,
-                                         "in_reply_to": str(msg.get("In-Reply-To", "")).strip()}})
+                    try:
+                        item = self._one(c, uid, addr, since, seen)
+                    except Exception:  # one malformed message must not stop the others
+                        item = None
+                    if item:
+                        out.append(item)
         finally:
             try:
                 c.logout()
             except Exception:
                 pass
         return sorted(out, key=lambda x: x["ts"] or "")
+
+    def _one(self, c, uid, addr: str, since: datetime, seen: set) -> dict | None:
+        typ, parts = c.uid("FETCH", uid, "(BODY.PEEK[])")
+        raw = next((p[1] for p in parts or [] if isinstance(p, tuple) and len(p) > 1), None)
+        if typ != "OK" or raw is None:
+            return None
+        msg = email.message_from_bytes(raw, policy=email.policy.default)
+        mid = str(msg.get("Message-ID", "")).strip() or f"uid:{uid.decode()}"
+        if mid in seen:
+            return None
+        frm = [a.lower() for _, a in getaddresses(msg.get_all("From", []))]
+        if addr not in frm or not self._addressed_to_us(msg):
+            return None
+        ts = _dt(str(msg.get("Date", "")))
+        if ts and ts < since:
+            return None
+        subj = str(msg.get("Subject", ""))
+        refs = str(msg.get("References", "")).split()
+        return {"channel": "email", "contact": addr, "text": strip_quoted(body_text(msg)),
+                "ext_id": mid, "ts": ts.isoformat() if ts else None, "line": self.cfg.from_addr,
+                "line_last4": None, "renter_name": (getaddresses(msg.get_all("From", []))[0][0] or None),
+                "meta": {"subject": subj, "message_id": mid, "references": refs,
+                         "in_reply_to": str(msg.get("In-Reply-To", "")).strip()}}
 
     def find_delivered(self, ref_tag: str, since: datetime) -> bool:
         """Delivery check for the test inbox: our message with this [ref] tag arrived in GMAIL_USER's mail."""

@@ -15,6 +15,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,7 @@ from pathlib import Path
 
 from . import config
 
+THREAD_ID_RE = re.compile(r"^[a-z_]+:[\w:]+$")
 CHANNEL_WORLD = {"sms": "sms", "email": "email", "messenger": "facebook_page"}
 
 
@@ -71,11 +73,17 @@ class Store:
         os.replace(tmp, p)
 
     def _tpath(self, thread_id: str) -> Path:
+        if not isinstance(thread_id, str) or not THREAD_ID_RE.match(thread_id):
+            raise ValueError("invalid thread id")
         return self.threads_dir / (thread_id.replace(":", "_") + ".json")
 
     # ---------------------------------------------------------------- threads
     def get_thread(self, thread_id: str) -> dict | None:
-        return self._read(self._tpath(thread_id), None)
+        try:
+            p = self._tpath(thread_id)
+        except ValueError:
+            return None
+        return self._read(p, None)
 
     def save_thread(self, t: dict) -> None:
         t["updated"] = now_iso()
