@@ -47,7 +47,7 @@ def final_gate(twin: dict) -> dict:
     """The last non-absent status/value the renter gave for each gate item."""
     out = {}
     for t in twin["turns"]:
-        if t["role"] != "renter":
+        if t["role"] != "renter" or not t.get("gold"):
             continue
         for f in FIELDS:
             if t["gold"][f]["status"] != "absent":
@@ -81,7 +81,8 @@ def script_of(twin: dict) -> list[dict]:
             cur = {"start": not seen_owner, "texts": [], "items": list(asked)}
             blocks.append(cur)
         cur["texts"].append(t["text"])
-        cur["items"] += [x for x in items_of(t["gold"]) if x not in cur["items"]]
+        if t.get("gold"):
+            cur["items"] += [x for x in items_of(t["gold"]) if x not in cur["items"]]
     lines = []
     for b in blocks:
         say = " ".join(b["texts"])
@@ -94,10 +95,10 @@ def script_of(twin: dict) -> list[dict]:
 
 
 def subcategory(twin: dict) -> str:
-    intents = {i for t in twin["turns"] if t["role"] == "renter" for i in t["gold"]["intents"]}
-    last = [t for t in twin["turns"] if t["role"] == "renter"][-1]["gold"]["intents"]
+    intents = {i for t in twin["turns"] if t.get("gold") for i in t["gold"]["intents"]}
+    last = [t for t in twin["turns"] if t.get("gold")][-1]["gold"]["intents"]
     oc = twin.get("outcome") or {}
-    vague = any(t["gold"]["move_in"]["status"] == "vague" for t in twin["turns"] if t["role"] == "renter")
+    vague = any(t["gold"]["move_in"]["status"] == "vague" for t in twin["turns"] if t.get("gold"))
     for name, cond in (("hard_no", "hard_no" in intents), ("not_now", "not_now" in last),
                        ("price_push", "price_negotiation" in intents), ("shorter_lease", "shorter_lease" in intents),
                        ("ghosted", bool(oc.get("ghosted"))), ("language_switch", twin["language_switch"]),
@@ -163,7 +164,7 @@ def checks_of(twin: dict, tid: str, room: dict, gate: dict, sub: str) -> list[di
         for f in FIELDS:
             if t.get("gold") and t["gold"][f]["status"] == "answered":
                 c.append({"type": "never", "asked": f, "thread": tid, "name": f"does not re-ask {f}"})
-    intents = {i for t in twin["turns"] if t["role"] == "renter" for i in t["gold"]["intents"]}
+    intents = {i for t in twin["turns"] if t.get("gold") for i in t["gold"]["intents"]}
     oc = twin.get("outcome") or {}
     gate_complete = all(gate.get(f, {}).get("status") in ("answered", "exception") for f in FIELDS)
     if "price_negotiation" in intents:
@@ -229,7 +230,8 @@ def to_task(twin: dict, n: int, rooms: list[dict]) -> dict:
             **llm_renter_fields(twin, gate, sub, ends_silent),
             "twin_script": {
                 "turns": [{"i": t["i"], "role": "renter" if t["role"] == "renter" else "operator", "text": t["text"],
-                           "ts": t["ts"], **({"gold": t["gold"]} if t["role"] == "renter" else {"acts": t["acts"]})}
+                           "ts": t["ts"], **({"gold": t["gold"]} if t.get("gold") else
+                                             {"acts": t.get("acts") or ["send_photo"]} if t["role"] != "renter" else {})}
                           for t in twin["turns"]],
                 "gold_facts": gate, "phone": twin["phone"],
                 "ghosts_after_turn": last_renter if ends_silent else None,
@@ -304,7 +306,7 @@ def key_behaviors(twin: dict, sub: str, ends_silent: bool) -> list[dict]:
 def llm_renter_fields(twin: dict, gate: dict, sub: str, ends_silent: bool) -> dict:
     """The same twin as fields of gym/rentus_env/llm_renter.py, so setting "mode": "llm_renter" on the
     counterpart runs it with the existing model-played renter (truth sheet + behaviours)."""
-    rt = [t for t in twin["turns"] if t["role"] == "renter"]
+    rt = [t for t in twin["turns"] if t["role"] == "renter" and t.get("gold")]
     first_owner = next((t["i"] for t in twin["turns"] if t["role"] == "owner"), 10 ** 9)
     opening = [t["text"] for t in rt if t["i"] < first_owner]
     truth, beh = {"pets": "none"}, {"max_facts_per_reply": 2}
