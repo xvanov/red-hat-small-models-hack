@@ -29,7 +29,7 @@ If the coordinating Claude session runs out of tokens or is restarted under anot
 2. Owner labels the reader test sample (H2) if he chose to; else H2-realistic is "untested".
 3. Confirmatory runs per `gym/confirmatory_v3.json` (5 seeds), frontier reference on v3, stats → `docs/results.md`.
 4. Owner grades the κ sample.
-5. README final, demo rehearsal, make the repo public (or invite judges), record the 3–5 min video (`docs/demo-script.md`), submit the Airtable form by 10:45 (link in local `docs/hackathon/README.md`), delete the Brev instance.
+5. README final, demo rehearsal, make the repo public (or invite judges), record the 3–5 min video (`docs/demo-script.md`), submit the Airtable form by 10:45 (link in local `docs/hackathon/README.md`), keep the Brev instance running through judging and awards (D38, until at least 13:30 ET); delete only when the owner says so.
 
 ## Friction log
 Notes and reports in `.agent-logs/87a72e7b/` (gitignored). The trimmed report for @Robbie is `friction-report-2.txt`.
