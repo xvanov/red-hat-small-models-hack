@@ -100,9 +100,10 @@ def send_message(world, thread_id: str, text: str, attachments: list[str] | None
         raise ToolError("POLICY_BLOCKED",
                         "message tells the renter a showing time is confirmed, but the owner has not confirmed it: "
                         + " / ".join(claims),
-                        hint="say the time is proposed and pending the owner's confirmation, for example "
-                             "'I proposed Saturday at 11 AM, pending the owner's confirmation' "
-                             "('propuse el sábado a las 11, pendiente de confirmación del dueño')",
+                        # First person: messages go out as the owner, so never mention "the owner".
+                        hint="say the time is proposed and you will confirm it shortly, in first person, for example "
+                             "'I've penciled in Saturday at 11 AM and will confirm it shortly' "
+                             "('te propongo el sábado a las 11, te lo confirmo en breve')",
                         details={"rules": ["showing_not_confirmed"], "claims": claims})
     room, listing = thread_room(world, t)
     figs = dollar_figures(text)
