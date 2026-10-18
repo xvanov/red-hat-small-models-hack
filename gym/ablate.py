@@ -61,6 +61,12 @@ def variant_config(a, spec: str):
     return run_eval.make_config(a).with_(**over), backend
 
 
+def never_reached_model(r: dict) -> bool:
+    """Protocol 4.4: a rollout is rerun only if it returned zero model completions and failed on infrastructure."""
+    failed = r.get("status") in ("model_error", "missing") or bool(r.get("error"))
+    return failed and not (r.get("model_calls") or 0) and not (r.get("steps") or 0)
+
+
 def run_variant(a, spec: str, run_name: str, reader_url: str | None) -> dict:
     import os
     cfg, backend = variant_config(a, spec)
@@ -80,7 +86,7 @@ def run_variant(a, spec: str, run_name: str, reader_url: str | None) -> dict:
     retried = list((s.get("model_error_retries") or {}).get("tasks_rerun", []))
     for _ in range(a.retry_errors):  # endpoint outages: rerun only the rollouts that never reached the model
         rows = [json.loads(l) for l in open(d / "per_task.jsonl")]
-        bad = [r["task_id"] for r in rows if r.get("status") in ("model_error", "missing") or r.get("error")]
+        bad = [r["task_id"] for r in rows if never_reached_model(r)]
         if not bad:
             break
         wait_endpoint(cfg)
@@ -90,6 +96,10 @@ def run_variant(a, spec: str, run_name: str, reader_url: str | None) -> dict:
         run_eval.evaluate(vr, cfg)
         rd = run_eval.RESULTS / vr.run_name
         new = {json.loads(l)["task_id"]: json.loads(l) for l in open(rd / "per_task.jsonl")}
+        with open(d / "per_task.attempts.jsonl", "a") as fa:   # replaced attempts are kept, never overwritten
+            for r in rows:
+                if r["task_id"] in new:
+                    fa.write(json.dumps({**r, "replaced_by_retry": True}, ensure_ascii=False, default=str) + "\n")
         rows = [new.get(r["task_id"], r) for r in rows]
         with open(d / "per_task.jsonl", "w") as f:
             for r in rows:
@@ -102,9 +112,13 @@ def run_variant(a, spec: str, run_name: str, reader_url: str | None) -> dict:
         meta = {k: v for k, v in s.items() if k not in ("tasks", "pass_rate", "mean_reward", "by_category",
                                                         "check_pass_rate", "errors")}
         s = run_eval.summarize(rows, meta)
-    s["model_error_retries"] = {"tasks_rerun": retried,
-                                "still_failed": [r["task_id"] for r in (json.loads(l) for l in open(d / "per_task.jsonl"))
-                                                 if r.get("status") in ("model_error", "missing") or r.get("error")]}
+    final_rows = [json.loads(l) for l in open(d / "per_task.jsonl")]
+    mid = [r["task_id"] for r in final_rows if r.get("error") and not never_reached_model(r)]
+    s["model_error_retries"] = {"rule": "protocol 4.4: rerun only rollouts with zero model completions",
+                                "tasks_rerun": retried,
+                                "still_failed": [r["task_id"] for r in final_rows if never_reached_model(r)],
+                                "mid_rollout_drops": mid,
+                                "void": len(mid) > 0.10 * max(1, len(final_rows))}
     s["variant"] = {"spec": spec, "reader_backend": backend}
     (d / "summary.json").write_text(json.dumps(s, indent=1) + "\n")
     return s

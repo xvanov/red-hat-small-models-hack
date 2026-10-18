@@ -69,6 +69,10 @@ def make_config(args):
         cfg = cfg.with_(api="anthropic", model=args.model or DEFAULT_MODEL, effort=args.effort,
                         base_url="https://opencode.ai/zen")
         return cfg
+    if getattr(args, "api", "openai") == "claude_code":   # REFERENCE ONLY: frontier via the local Claude Code CLI
+        from rentus_operator.claude_code import DEFAULT_MODEL, check_model
+        return cfg.with_(api="claude_code", model=check_model(args.model or DEFAULT_MODEL), effort=args.effort,
+                         base_url="claude-code-cli")
     if args.base_url:
         cfg = cfg.with_(base_url=args.base_url)
     if args.model:
@@ -105,6 +109,9 @@ def start_stub() -> str:
     return f"http://127.0.0.1:{port}/v1"
 
 
+TASKS_PATH = None
+
+
 def load_tasks(split: str, ids: list[str] | None = None, limit: int | None = None,
                version: str = "v1", tasks_file: str | None = None) -> list[dict]:
     """v1 = gym/tasks/{split}.jsonl (the set every committed result used); v2 = gym/tasks/v2/{split}.jsonl.
@@ -112,6 +119,8 @@ def load_tasks(split: str, ids: list[str] | None = None, limit: int | None = Non
     path = Path(tasks_file) if tasks_file else \
         HERE / "tasks" / (f"{split}.jsonl" if version == "v1" else f"{version}/{split}.jsonl")
     tasks = [json.loads(l) for l in open(path)]
+    global TASKS_PATH
+    TASKS_PATH = path
     if ids:
         tasks = [t for t in tasks if t["id"] in ids]
     return tasks[:limit] if limit else tasks
@@ -243,6 +252,8 @@ def run_local_task(task: dict, cfg, run_dir: Path) -> dict:
         out["model_latency_s"] = round(sum(c.get("latency_s") or 0 for c in client.calls), 2)
         out["usage"] = {k: sum((c.get("usage") or {}).get(k) or 0 for c in client.calls)
                         for k in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")}
+    if getattr(client, "meta", None):   # claude_code reference: which model actually answered, CLI version, auth source
+        out["model_meta"] = {k: sorted(v) if isinstance(v, set) else v for k, v in client.meta.items()}
     return out
 
 
@@ -373,7 +384,56 @@ def summarize(results: list[dict], meta: dict) -> dict:
             "by_category": {k: {"tasks": len(v), "pass_rate": round(sum(r["pass"] for r in v) / len(v), 4),
                                 "mean_reward": round(sum(r["reward"] for r in v) / len(v), 4)} for k, v in sorted(cat.items())},
             "check_pass_rate": {k: round(a / b, 4) for k, (a, b) in sorted(checks.items())},
+            # Amendment 1: reward without the checks a send_message guard makes impossible to fail, and the
+            # attempted violations those guards stopped (refused drafts by rule)
+            "mean_reward_earned": round(sum(r.get("reward_earned", r["reward"]) for r in results) / n, 4) if n else 0.0,
+            "pass_rate_earned": round(sum(bool(r.get("pass_earned", r["pass"])) for r in results) / n, 4) if n else 0.0,
+            "refused_by_rule": dict(sorted(_sum_counts(r.get("refused_by_rule") for r in results).items())),
             "errors": sum(1 for r in results if r.get("error"))}
+
+
+def _sum_counts(dicts) -> dict:
+    out: dict = defaultdict(int)
+    for d in dicts:
+        for k, v in (d or {}).items():
+            out[k] += v
+    return out
+
+
+def sha256_file(path) -> str | None:
+    import hashlib
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def tree_sha256(*rels: str) -> str:
+    """sha256 over (path, file sha256) of every tracked-or-not .py/.md/.json file under the given repo paths."""
+    import hashlib
+    h = hashlib.sha256()
+    for rel in rels:
+        for f in sorted((REPO / rel).rglob("*")):
+            if f.is_file() and f.suffix in (".py", ".md", ".json", ".jsonl", ".sh") and "__pycache__" not in f.parts:
+                h.update(str(f.relative_to(REPO)).encode() + b"\0" + (sha256_file(f) or "").encode() + b"\n")
+    return h.hexdigest()
+
+
+def provenance(tasks_path) -> dict:
+    """Exact inputs of a run (leakage review #8): commit, dirty flag, task file and code-tree hashes."""
+    def git(*a):
+        try:
+            return subprocess.check_output(["git", *a], cwd=REPO, text=True, stderr=subprocess.DEVNULL).strip()
+        except Exception:  # noqa: BLE001
+            return None
+    status = git("status", "--porcelain", "--", "gym/rentus_env", "gym/tasks", "tools", "operator", "reader/prompt.py",
+                 "serving", "data/twins")
+    return {"commit": git("rev-parse", "HEAD"), "describe": git("describe", "--always", "--dirty"),
+            "dirty": bool(git("status", "--porcelain")), "dirty_frozen_paths": bool(status),
+            "dirty_files": (status or "").splitlines()[:50],
+            "tasks_path": str(tasks_path), "tasks_sha256": sha256_file(tasks_path),
+            "code_sha256": {"gym/rentus_env": tree_sha256("gym/rentus_env"), "tools": tree_sha256("tools"),
+                            "operator": tree_sha256("operator"), "serving": tree_sha256("serving")}}
 
 
 def git_head() -> str | None:
@@ -395,6 +455,11 @@ def evaluate(args, cfg=None) -> dict:
         from rentus_operator.anthropic_client import zen_api_key
         if not zen_api_key():
             raise SystemExit("api=anthropic needs OPENCODE_API_KEY (env, or the file named by $FRONTIER_ENV_FILE)")
+    elif cfg.api == "claude_code" and not stub:
+        from rentus_operator.claude_code import cli_path, sdk_version
+        cli_path()
+        if not sdk_version():
+            raise SystemExit("api=claude_code needs claude-agent-sdk (gym/.venv-frontier; see scripts/frontier_ref.sh)")
     elif not stub:
         models = probe_models(cfg.base_url, cfg.api_key)
         if models is None:
@@ -435,7 +500,7 @@ def evaluate(args, cfg=None) -> dict:
             "tasks_file": getattr(args, "tasks_file", None), "operator_seed": getattr(args, "seed", None),
             "via": args.via, "stub": stub,
             "model": cfg.model, "base_url": cfg.base_url, "config_label": cfg.label(), "config": cfg_d,
-            "tools_backend": Backend().name, "git": git_head(),
+            "tools_backend": Backend().name, "git": git_head(), "provenance": provenance(TASKS_PATH),
             "nemo_gym_version": "0.6.0" if args.via == "nemo" else None,
             "started": datetime.fromtimestamp(t0, timezone.utc).isoformat(timespec="seconds"),
             "seconds": round(time.time() - t0, 1)}
@@ -450,6 +515,25 @@ def evaluate(args, cfg=None) -> dict:
             "run_cost_usd": round(sum(costs), 4), "cost_per_task_usd": round(sum(costs) / len(costs), 4) if costs else None,
             "task_seconds_p50": secs[len(secs) // 2] if secs else None, "task_seconds_mean": round(sum(secs) / len(secs), 1) if secs else None,
             "model_calls": sum(r.get("model_calls") or 0 for r in results), "process_spend": METER.snapshot()}
+    if cfg.api == "claude_code":
+        from rentus_operator.claude_code import BREAKER, cli_version, sdk_version
+        costs = [r.get("cost_usd") or 0 for r in results]
+        secs = sorted(r.get("seconds") or 0 for r in results)
+        metas = [r.get("model_meta") or {} for r in results]
+        summary["reference_model"] = {
+            "note": "REFERENCE ONLY: frontier model on the same tools/prompt/scorer, not part of the running system",
+            "provider": "local Claude Code CLI (owner's subscription login) via claude-agent-sdk, native tool use",
+            "model": cfg.model, "effort": cfg.effort or "high", "cli_version": cli_version(), "sdk_version": sdk_version(),
+            "response_models": sorted({m for x in metas for m in x.get("response_models", [])}),
+            "model_usage_models": sorted({m for x in metas for m in x.get("model_usage", [])}),
+            "api_key_sources": sorted({str(x.get("api_key_source")) for x in metas if x}),
+            "notional_cost_usd": round(sum(costs), 4),
+            "notional_cost_note": "Claude Code's list-price estimate; billed to the subscription, not per call",
+            "task_seconds_p50": secs[len(secs) // 2] if secs else None,
+            "task_seconds_mean": round(sum(secs) / len(secs), 1) if secs else None,
+            "model_calls": sum(r.get("model_calls") or 0 for r in results),
+            "statuses": {st: sum(1 for r in results if r.get("status") == st) for st in sorted({r.get("status") for r in results})},
+            "rate_limit_breaker": {"tripped": BREAKER.tripped, "reason": BREAKER.reason}}
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
     print(json.dumps({k: summary[k] for k in ("run_name", "via", "model", "config_label", "tasks", "pass_rate",
                                               "mean_reward", "by_category", "check_pass_rate", "errors")}, indent=1))
@@ -475,8 +559,9 @@ def build_parser():
     ap.add_argument("--no-reader", action="store_true")
     ap.add_argument("--reasoning", default="default", choices=["on", "off", "default"])
     ap.add_argument("--temperature", type=float, default=0.2)
-    ap.add_argument("--api", default="openai", choices=["openai", "anthropic"],
-                    help="anthropic = REFERENCE-ONLY frontier backend (OpenCode Zen), never the running system")
+    ap.add_argument("--api", default="openai", choices=["openai", "anthropic", "claude_code"],
+                    help="anthropic / claude_code = REFERENCE-ONLY frontier backends (OpenCode Zen / local Claude Code "
+                         "CLI), never the running system")
     ap.add_argument("--effort", default=None, help="api=anthropic: output_config.effort (default high)")
     ap.add_argument("--max-steps", type=int, default=30)
     ap.add_argument("--workers", type=int, default=8)
