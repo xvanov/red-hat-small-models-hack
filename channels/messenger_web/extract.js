@@ -53,11 +53,14 @@
       // Marketplace rows read "Buyer Name · Listing title"
       const parts = name.split(" · ");
       if (parts.length >= 2) { name = parts[0]; listing = parts.slice(1).join(" · "); }
-      const rowText = lines.slice(1).join(" | ");
+      // the last line is the age of the last activity ("46m", "13h", "2d", "1w")
+      let age = null;
+      for (let i = lines.length - 1; i >= 0; i--) { if (/^(\d+\s?(m|h|d|w|y)|now|just now)$/i.test(lines[i])) { age = lines[i].replace(" ", ""); lines.splice(i, 1); break; } }
+      const rowText = lines.slice(1).filter((x) => x !== "\u00b7" && x.length > 1).join(" | ");
       const unread = !!a.querySelector("[aria-label*='unread' i], [aria-label*='Mark as read' i]") ||
         /unread/i.test(a.getAttribute("aria-label") || "");
       out.push({thread_id: m[1], name, listing_title: listing, marketplace: listing !== null || /marketplace/i.test(a.innerText),
-                snippet: rowText.slice(0, 300), unread});
+                snippet: rowText.slice(0, 300), unread, age, href: (a.getAttribute("href") || "").split("?")[0], e2ee: /e2ee/.test(a.getAttribute("href") || "")});
     }
     return out;
   }
@@ -90,7 +93,10 @@
         if (!dir) dir = cx > mid ? "out" : "in";
         // a centered narrow line is a separator (date, notice), not a bubble
         if (Math.abs(cx - mid) < rr.width * 0.04 && r.width < rr.width * 0.5) continue;
-        msgs.push({dir, text: t});
+        const msgId = row.getAttribute("data-message-id") ||
+          (row.querySelector("[data-message-id]") || {getAttribute: () => null}).getAttribute("data-message-id") ||
+          (row.closest("[data-message-id]") || {getAttribute: () => null}).getAttribute("data-message-id");
+        msgs.push({dir, text: t, mid: msgId});
       }
     }
     const header = first(["[role='main'] h2", "[role='main'] h1"]);

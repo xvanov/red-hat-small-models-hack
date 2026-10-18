@@ -6,7 +6,8 @@ Everything that holds real conversation text lives under runs/live/messenger_web
   LIVE_ALLOW_MESSENGER_NAMES     comma-separated display names whose threads may be auto-sent (default: none)
   MESSENGER_WEB_PROFILE          browser profile dir (default channels/.profiles/messenger_web, gitignored)
   MESSENGER_WEB_POLL_SECONDS     inbox poll interval, floor 20 (default 30)
-  MESSENGER_WEB_MAX_THREADS      threads read from the top of the inbox (default 10)
+  MESSENGER_WEB_MAX_THREADS      threads read from the top of the inbox (default 5)
+  MESSENGER_WEB_BACKLOG_HOURS    only open threads whose last activity is this recent (default 48)
   MESSENGER_WEB_OPENS_PER_POLL   changed threads opened per poll (default 3)
   MESSENGER_WEB_MAX_SENDS_HOUR   worker-side send cap (default 10)
   MESSENGER_WEB_HEADLESS         "1" hides the browser window (default: visible)
@@ -85,6 +86,16 @@ def norm_text(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
 
 
+def age_hours(age: str | None) -> float | None:
+    """'46m' / '13h' / '2d' / '1w' / '1y' (thread-list age of the last activity) -> hours."""
+    if (age or "").strip().lower() in ("now", "just now", "justnow"):
+        return 0.0
+    m = re.fullmatch(r"(\d+)\s?([mhdwy])", (age or "").strip())
+    if not m:
+        return None
+    return int(m.group(1)) * {"m": 1 / 60, "h": 1, "d": 24, "w": 168, "y": 8760}[m.group(2)]
+
+
 def message_ids(thread_id: str, messages: list[dict]) -> list[str]:
     """Stable ids for parsed messages: hash of thread, direction, text and the occurrence number of that
     same (direction, text) pair in the thread, so a repeated "ok" gets distinct ids."""
@@ -93,7 +104,8 @@ def message_ids(thread_id: str, messages: list[dict]) -> list[str]:
     for m in messages:
         key = (m["dir"], norm_text(m["text"]))
         counts[key] = counts.get(key, 0) + 1
-        h = hashlib.sha256(f"{thread_id}|{key[0]}|{key[1]}|{counts[key]}".encode()).hexdigest()[:16]
+        basis = f"mid|{m['mid']}" if m.get("mid") else f"{key[0]}|{key[1]}|{counts[key]}"
+        h = hashlib.sha256(f"{thread_id}|{basis}".encode()).hexdigest()[:16]
         out.append(f"mw:{thread_id}:{h}")
     return out
 

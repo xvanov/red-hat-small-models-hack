@@ -42,7 +42,7 @@ def read_messages(page, S: dict, other_name: str | None = None) -> dict:
     # incoming groups can carry the sender's name as a text line above the bubbles
     names = {C.norm_name(other_name), C.norm_name((other_name or "").split(" ")[0])} - {""}
     msgs = [m for m in msgs if not (m["dir"] == "in" and C.norm_name(m["text"]) in names)]
-    res["messages"] = [{"dir": m["dir"], "text": m["text"]} for m in msgs]
+    res["messages"] = [{"dir": m["dir"], "text": m["text"], "mid": m.get("mid")} for m in msgs]
     return res
 
 
@@ -69,7 +69,8 @@ class Worker:
         self.sleep = sleep
         self.clock = clock
         self.poll_s = C.env_num("MESSENGER_WEB_POLL_SECONDS", 30, floor=20)
-        self.max_threads = int(C.env_num("MESSENGER_WEB_MAX_THREADS", 10))
+        self.max_threads = int(C.env_num("MESSENGER_WEB_MAX_THREADS", 5))
+        self.backlog_h = C.env_num("MESSENGER_WEB_BACKLOG_HOURS", 48)
         self.opens_per_poll = int(C.env_num("MESSENGER_WEB_OPENS_PER_POLL", 3))
         self.max_sends_hour = int(C.env_num("MESSENGER_WEB_MAX_SENDS_HOUR", 10))
         self.state = "starting"
@@ -137,18 +138,27 @@ class Worker:
         changed = []
         for r in rows:
             t = db.get(r["thread_id"])
+            age_h = C.age_hours(r.get("age"))
             sig = f"{r['name']}|{r['snippet']}"
             if t is None:
+                if age_h is not None and age_h > self.backlog_h:
+                    continue  # old chat: never opened, never surfaced
+                href = r.get("href") or ""
+                url = ("https://www.facebook.com" + href) if href.startswith("/") else \
+                    self.S["thread_url"].format(thread_id=r["thread_id"])
                 db[r["thread_id"]] = t = {"thread_id": r["thread_id"], "name": r["name"],
                                           "listing_title": r["listing_title"], "marketplace": r["marketplace"],
-                                          "url": self.S["thread_url"].format(thread_id=r["thread_id"]),
-                                          "row_sig": None, "messages": [], "first_seen": C.now_iso()}
+                                          "url": url, "row_sig": None, "age_h": None, "messages": [],
+                                          "first_seen": C.now_iso()}
             t["name"] = r["name"] or t.get("name")
             t["listing_title"] = r["listing_title"] or t.get("listing_title")
             t["marketplace"] = bool(r["marketplace"] or t.get("marketplace"))
             t["list_rank"] = rows.index(r)
-            if t.get("row_sig") != sig:
+            # e2ee rows show a fixed snippet, so new activity shows up as the age getting smaller
+            newer = age_h is not None and t.get("age_h") is not None and age_h < t["age_h"] - 1e-6
+            if t.get("row_sig") != sig or newer:
                 changed.append((r["thread_id"], sig))
+            t["age_h"] = age_h
         C.write_json(self.threads_path, db)
         opened = 0
         for tid, sig in changed[: self.opens_per_poll]:

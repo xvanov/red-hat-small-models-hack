@@ -53,7 +53,8 @@ def test_thread_list(browser):
     assert [r["thread_id"] for r in rows] == ["111", "222", "333"]
     assert rows[0]["name"] == "Jane Testrenter" and rows[0]["listing_title"] == "Private room near Duke"
     assert rows[0]["marketplace"] and not rows[1]["marketplace"]
-    assert rows[1]["name"] == "Bob Example"
+    assert rows[1]["name"] == "Bob Example" and rows[1]["e2ee"] and rows[1]["age"] == "2h"
+    assert [r["age"] for r in rows] == ["5m", "2h", "3d"]
 
 
 def test_read_messages_direction_and_system_filter(browser):
@@ -61,7 +62,8 @@ def test_read_messages_direction_and_system_filter(browser):
     page.goto("https://www.facebook.com/messages/t/111/")
     res = read_messages(page, C.selectors(), "Jane Testrenter")
     assert res["thread_id"] == "111"
-    assert res["messages"] == [
+    assert all(m["mid"].startswith("mid.$fake") for m in res["messages"])
+    assert [{"dir": m["dir"], "text": m["text"]} for m in res["messages"]] == [
         {"dir": "in", "text": "Hi! Is this still available?"},
         {"dir": "out", "text": "Yes it is. When would you like to move in?"},
         {"dir": "in", "text": "November 1st. Is parking included?"},
@@ -88,7 +90,9 @@ def test_poll_and_adapter(browser, root):
     page = _page(browser)
     w = _worker(page, root)
     r = w.poll_once()
-    assert r == {"rows": 3, "changed": 3, "opened": 3}
+    assert r == {"rows": 3, "changed": 2, "opened": 2}  # Carla's chat is 3 days old: backlog limit 48 h
+    assert set(w.threads()) == {"111", "222"}
+    assert w.threads()["222"]["url"] == "https://www.facebook.com/messages/e2ee/t/222/"
     assert w.poll_once()["opened"] == 0  # nothing changed: no thread reopened
     w.state = "running"
     w.write_status()
@@ -173,3 +177,14 @@ def test_live_registry_factory_and_ids(browser, root, monkeypatch):
     assert p.channel == "messenger_personal" and callable(p.poll) and callable(p.send) and p.display
     monkeypatch.setenv("LIVE_ALLOW_MESSENGER_NAMES", "Bob Example")
     assert A.allowlisted_thread_ids(root) == {"222": "Bob Example"}
+
+
+def test_age_hours_and_newer_activity(browser, root):
+    assert C.age_hours("46m") == pytest.approx(46 / 60) and C.age_hours("2d") == 48 and C.age_hours("1w") == 168
+    assert C.age_hours("Just now") == 0 and C.age_hours("now") == 0 and C.age_hours("x") is None
+    w = _worker(_page(browser), root)
+    w.poll_once()
+    db = w.threads()
+    db["222"]["age_h"] = 5.0  # was 5 h old, now the list says 2 h: new activity on an e2ee chat
+    C.write_json(w.threads_path, db)
+    assert w.poll_once()["changed"] == 1
