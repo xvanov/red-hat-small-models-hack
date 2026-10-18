@@ -38,6 +38,7 @@ Custom types
 from __future__ import annotations
 
 import difflib
+import json
 import re
 import sys
 from datetime import datetime
@@ -49,14 +50,15 @@ GYM = HERE.parent
 if str(GYM) not in sys.path:
     sys.path.insert(0, str(GYM))
 
-from rentus_env import verify as V  # noqa: E402
+import importlib  # noqa: E402
+V = importlib.import_module("rentus_env.verify")
 from rentus_env.counterparts import classify_question  # noqa: E402
 
 GATE = ("lease", "move_in", "phone", "reason", "occupants")
 CUSTOM = ("burst_question_last", "disclosure_before_questions", "reply_to_line", "reask_differs", "msg",
           "count_messages", "message_order", "separate_messages", "no_send", "owner_notified", "owner_text",
           "no_time_offer_before_gate", "listing_text", "event_ok", "register_key", "register_rows",
-          "no_delete_tool", "probe")
+          "no_delete_tool", "probe", "figures_in", "no_confirm_claim", "language_before")
 
 TIME_OFFER = re.compile(r"\b\d{1,2}(:\d{2})?\s?(am|pm|a\.m\.|p\.m\.)\b|\b\d{1,2}:\d{2}\b|\b(noon|mediod[ií]a)\b", re.I)
 
@@ -145,6 +147,8 @@ def _owner_entries(ctx: dict, c: dict) -> list[tuple[str, str]]:
             continue
         a = e["args"]
         if e["tool"] == "escalate_to_owner" and "escalate" in kinds:
+            if c.get("require_draft") and not str(a.get("draft") or "").strip():
+                continue
             out.append(("escalate", f"{a.get('reason', '')} {a.get('draft') or ''}"))
         elif e["tool"] == "report_to_owner" and "report" in kinds:
             out.append(("report", str(a.get("summary", ""))))
@@ -182,11 +186,18 @@ def c_disclosure_before_questions(c, ctx):
 
 def _response_to(c, ctx) -> list[dict] | None:
     msgs = sent(ctx, {k: v for k, v in c.items() if k in ("phase", "phases", "before_phase", "from_phase")})
+    if c.get("first_burst"):
+        out = []
+        for e in msgs:
+            out.append(e)
+            if e.get("reply"):
+                break
+        return out
     if "after_renter_contains" in c:
         needle = _low(c["after_renter_contains"])
         start = None
         for n, e in enumerate(msgs):
-            if needle in _low(str((e.get("reply") or [None, ""])[1] or "")):
+            if needle in _low(str(e.get("reply") or "")):
                 start = n + 1
                 break
         if start is None:   # the renter line opened a phase (renter_says) or the thread (opening)
@@ -218,6 +229,14 @@ def c_reply_to_line(c, ctx):
         return False, f"{len(burst)} messages > {c['max_messages']}"
     if c.get("last_asks") and asks(texts[-1]) != c["last_asks"]:
         return False, f"last message asks {asks(texts[-1])}, want {c['last_asks']}: {_short(texts[-1])}"
+    if c.get("last_asks_in") and asks(texts[-1]) not in c["last_asks_in"]:
+        return False, f"last message asks {asks(texts[-1])}, want one of {c['last_asks_in']}: {_short(texts[-1])}"
+    if c.get("last_contains") and not _any(texts[-1], c["last_contains"]):
+        return False, f"last message lacks {c['last_contains']}: {_short(texts[-1])}"
+    if c.get("no_gate_question"):
+        bad = [t for t in texts if asks(t) in GATE]
+        if bad:
+            return False, f"gate question in the response: {_short(bad[0])}"
     if c.get("asks_any") and not any(asks(t) in c["asks_any"] for t in texts):
         return False, f"no message asks {c['asks_any']}"
     if c.get("contains_any") and not _any(hay, c["contains_any"]):
@@ -329,13 +348,59 @@ def c_owner_text(c, ctx):
     return True, f"{len(ents)} owner texts ok"
 
 
+def _times(t: str) -> set[str]:
+    return {re.sub(r"[\s.:]|00", "", m.group(0).lower()) for m in TIME_OFFER.finditer(t)}
+
+
 def c_no_time_offer_before_gate(c, ctx):
+    said = set()
+    for t in ctx.get("renter_texts") or []:
+        said |= _times(t)
     for e in sent(ctx, c):
         if (e.get("gate_before") or {}).get(c["thread"]):
             continue
-        if TIME_OFFER.search(text(e)):
+        offered = _times(text(e)) - said   # echoing the renter's own time is not an offer
+        if offered:
             return False, f"time offered before the gate: {_short(text(e))}"
     return True, "ok"
+
+
+_FIG = re.compile(r"\$\s?(\d[\d,]*(?:\.\d+)?)")
+
+
+def c_figures_in(c, ctx):
+    allowed = {float(x) for x in c["allowed"]}
+    for e in sent(ctx, c):
+        for m in _FIG.finditer(text(e)):
+            v = float(m.group(1).replace(",", ""))
+            if v not in allowed:
+                return False, f"${m.group(1)} not in the record: {_short(text(e))}"
+    return True, "every figure is in the record"
+
+
+_CLAIM = re.compile(r"\b(is|it'?s|you'?re|that'?s|we'?re|are|all|now)\s+(now\s+)?(confirmed|set|booked|locked in|scheduled)\b|"
+                    r"\bsee you (then|thursday|tomorrow|on|at|there)\b|\bconfirmad[oa]\b|\bnos vemos\b", re.I)
+_PENDING = re.compile(r"pending|propos|pencil|will confirm|i'?ll confirm|confirm (it|this|that|the time)?\s*(shortly|soon|later)|"
+                      r"once i confirm|until i confirm|te (lo )?confirmo|pendiente", re.I)
+
+
+def c_no_confirm_claim(c, ctx):
+    for e in sent(ctx, c):
+        for snt in re.split(r"(?<=[.!?])\s+", text(e)):
+            if _CLAIM.search(snt) and not _PENDING.search(snt) and not snt.rstrip().endswith("?"):
+                return False, f"claims a confirmed time: {_short(snt)}"
+    return True, "no confirmation claimed"
+
+
+def c_language_before(c, ctx):
+    want = c.get("language", "en")
+    needle = _low(c["until_renter_contains"])
+    for e in sent(ctx, c):
+        if (want == "es") != V.looks_spanish(text(e)):
+            return False, f"not in {want} before the renter's yes: {_short(text(e))}"
+        if e.get("reply") and needle in _low(str(e["reply"])):
+            return True, "kept the language until the renter answered"
+    return True, "kept the language (renter never switched)"
 
 
 def c_listing_text(c, ctx):
@@ -428,8 +493,15 @@ def c_probe(c, ctx):
         return bool(c["exists"]), f"{c['path']} present"
     if "equals" in c:
         return V._norm(v) == V._norm(c["equals"]), f"{c['path']}={_short(str(v))}"
+    if "contains" in c:
+        hay = json.dumps(v, default=str).lower()
+        return str(c["contains"]).lower() in hay, f"{c['path']} {'has' if str(c['contains']).lower() in hay else 'lacks'} {c['contains']!r}"
+    if "count_gte" in c:
+        n = len(v) if isinstance(v, (list, dict)) else 0
+        return n >= c["count_gte"], f"count {n}"
     if "includes" in c or "excludes" in c or "above" in c:
-        ids = [m.get("renter_id") for m in v] if isinstance(v, list) else []
+        key = c.get("id_key", "renter_id")
+        ids = [m.get(key) for m in v] if isinstance(v, list) else []
         miss = [x for x in c.get("includes", []) if x not in ids]
         extra = [x for x in c.get("excludes", []) if x in ids]
         if miss or extra:

@@ -28,7 +28,7 @@ _SCRATCH = {"clock": {"now": "2026-10-20T10:00:00"},
 
 
 def _names(be: Backend) -> list[str]:
-    names = set(be.tool_names())
+    names = set(be.tool_names()) | {t.get("function", t).get("name") for t in _all_schemas(be)}
     try:  # owner-only tools may be registered without being exposed to the model
         import rentus_tools.core as core
         for attr in ("REGISTRY", "_REGISTRY", "TOOLS_BY_NAME", "_TOOLS"):
@@ -62,10 +62,11 @@ def probe_all(be: Backend | None = None) -> dict[str, dict]:
     put("reconnect_at", bool(park) or _upsert_ok(be, {"reconnect_at": "2026-11-01", "paused_reason": "probe"}),
         "reconnect_at / paused_reason on the register (park_prospect)",
         f"tool {park}" if park else "upsert_renter fields.reconnect_at")
-    put("proxy", _upsert_ok(be, {"proxy": {"is_proxy": True, "actual_seeker_confirmed": False}}) or bool(_tool_like(names, r"demand")) and
-        _demand_accepts(be, names, "proxy"), "register proxy field {is_proxy, actual_seeker_confirmed}", "upsert_renter fields.proxy")
-    put("sourcing", _upsert_ok(be, {"sourcing": {"opened_at": "2026-10-20", "due_at": "2026-10-23"}}) or
-        bool(_tool_like(names, r"sourc")), "sourcing task {opened_at, due_at} on the register", "upsert_renter fields.sourcing or a sourcing tool")
+    put("proxy", _has_param(be, "capture_demand", "proxy") or _upsert_ok(be, {"proxy": {"is_proxy": True}}),
+        "register proxy field {is_proxy, actual_seeker_confirmed}", "capture_demand(proxy) or upsert_renter fields.proxy")
+    src = _tool_like(names, r"sourc|search_external")
+    put("sourcing", bool(src) or _upsert_ok(be, {"sourcing": {"opened_at": "2026-10-20", "due_at": "2026-10-23"}}),
+        "sourcing task {opened_at, due_at} on the register", f"tool {src or 'none'}")
     put("dedupe", _dedupe(be), "cross-channel merge by phone/email with sources[]", "two threads, same phone -> one row")
     roll = _tool_like(names, r"rollup|supply_signal|cluster")
     put("rollup", bool(roll), "demand_rollup tool (clusters, WATCH, SUPPLY SIGNAL)", f"tool {roll or 'none'}")
@@ -76,7 +77,7 @@ def probe_all(be: Backend | None = None) -> dict[str, dict]:
     put("event_mode", _event_mode(be), "showing mode (in_person / video_call / hybrid) on calendar events",
         "propose_showing takes mode")
     sched = _tool_like(names, r"tick|followup|follow_up|cadence|scheduler")
-    put("scheduler", bool(sched), "follow-up state on the register + a sandbox clock tick that emits due check-ins",
+    put("scheduler", len(sched) >= 2 or any("due" in n for n in sched), "follow-up state on the register + a sandbox clock tick that emits due check-ins",
         f"tool {sched or 'none'}")
     put("quiet_window", False, "clock-driven quiet windows in the sandbox (120 s small-talk wait, cancel on answer)",
         "no sandbox mechanism; live driver only")
@@ -89,8 +90,30 @@ def _demand_accepts(be, names, key) -> bool:
     return False   # unknown demand tool shapes are checked by hand when they land
 
 
+def _has_param(be: Backend, tool: str, param: str) -> bool:
+    for t in be.TOOLS + _all_schemas(be):
+        f = t.get("function", t)
+        if f.get("name") == tool:
+            return param in (f.get("parameters") or {}).get("properties", {})
+    return False
+
+
+def _all_schemas(be: Backend) -> list:
+    try:
+        return be.tool_schemas("concierge")
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _dedupe(be: Backend) -> bool:
     w = be.new_world(copy.deepcopy(_SCRATCH))
+    if "capture_demand" in {t.get("function", t).get("name") for t in _all_schemas(be)}:
+        a = be.call(w, "capture_demand", {"thread_id": "t_probe_a", "criteria": {"budget": 900, "area": "Durham"}, "phone": "9195550101"})
+        b = be.call(w, "capture_demand", {"thread_id": "t_probe_b", "criteria": {"budget": 900, "area": "Durham"}, "phone": "9195550101"})
+        reg = be.coll(w, "register")
+        if a.get("ok") and b.get("ok") and len(reg) == 1 and len(reg[0].get("thread_ids") or []) == 2:
+            return True
+        w = be.new_world(copy.deepcopy(_SCRATCH))
     a = be.call(w, "upsert_renter", {"thread_id": "t_probe_a", "fields": {"phone": "9195550101"}})
     b = be.call(w, "upsert_renter", {"thread_id": "t_probe_b", "fields": {"phone": "9195550101"}})
     if not (a.get("ok") and b.get("ok")):
@@ -118,7 +141,7 @@ def _video(be: Backend) -> bool:
 
 
 def _event_mode(be: Backend) -> bool:
-    for t in be.TOOLS:
+    for t in be.TOOLS + _all_schemas(be):
         f = t.get("function", t)
         if f.get("name") == "propose_showing":
             return "mode" in (f.get("parameters") or {}).get("properties", {})

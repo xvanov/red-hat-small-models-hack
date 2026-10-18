@@ -108,11 +108,26 @@ class Play:
                 clock["now"] = now
             elif kind == "confirm_event":
                 ev = self.event(("proposed",))
+                if ev is None and self.event(("confirmed",)):
+                    continue   # already confirmed by the other signal: the calendar edit changes nothing
                 if ev is None:
                     problems.append("confirm_event: the renter has no proposed showing")
                     continue
                 ev["status"] = "confirmed"
                 ev["confirmed_by"] = "owner_calendar_edit"
+            elif kind == "owner_confirm":   # R-SHOW-5 signal a: the owner says confirm/reject in the owner channel
+                ev = self.event(("proposed", "confirmed", "rejected"))
+                if ev is None:
+                    problems.append("owner_confirm: the renter has no showing")
+                    continue
+                try:
+                    from rentus_tools.impl.demand_owner import owner_call
+                    env = owner_call(self.st, "owner_confirm_showing", {"event_id": ev["event_id"], "decision": op.get("decision", "confirm")})
+                    if not env.get("ok"):
+                        self.notes.append(f"owner_confirm_showing: {env['error']['message'][:120]}")
+                except ImportError:   # no owner tool: flip the status like the console stub would
+                    if ev.get("status") == "proposed":
+                        ev["status"] = "confirmed" if op.get("decision", "confirm") == "confirm" else "rejected"
             elif kind == "delete_event":
                 ev = self.event(("proposed",))
                 if ev is None:
@@ -149,8 +164,10 @@ class Play:
     # ------------------------------------------------------------------------------- players
     def subst(self, v):
         if isinstance(v, str):
+            slot = self.last_slots[0]["start"][:16] if self.last_slots else "2026-01-01T10:00"
             if v == "$slot":
-                return self.last_slots[0]["start"][:16] if self.last_slots else "2026-01-01T10:00"
+                return slot
+            v = v.replace("$slot", slot.replace("T", " "))
             ev = self.event() or self.last_event or {}
             return (v.replace("$thread", str(self.thread)).replace("$renter", str(self.renter_id()))
                      .replace("$event", str(ev.get("event_id", ""))))
@@ -183,6 +200,11 @@ class Play:
         t0 = time.time()
         status, err, messages = "ok", None, []
         try:
+            for step in self.task.get("setup") or []:   # harness-side state setup, not part of the scored trace
+                env = self.s.backend.call(self.s.world, step["tool"], self.subst(step.get("args", {})))
+                if not env.get("ok"):
+                    self.notes.append(f"setup {step['tool']} refused: {env['error']['message'][:120]}")
+            self.initial = self.s.final_state()
             if self.task.get("kind") == "tool_probe":
                 for step in self.task.get("probe") or []:
                     self.probe_results.append(self.s.call(step["tool"], step.get("args", {})))
@@ -209,7 +231,8 @@ class Play:
             traceback.print_exc()
         state = self.s.final_state()
         ctx = {"trace": self.s.trace, "state": state, "initial_state": self.initial, "phases": self.phases,
-               "tool_names": self.s.backend.tool_names(), "probe_results": self.probe_results}
+               "tool_names": self.s.backend.tool_names(), "probe_results": self.probe_results,
+               "renter_texts": [m["text"] for m in self.s.transcript if m.get("from") == "renter"]}
         checks = run_checks(self.task, ctx)
         if status == "precondition_failed":
             checks.append({"i": len(checks), "type": "precondition", "name": "precondition", "pass": False,
