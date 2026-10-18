@@ -497,8 +497,16 @@ def main(once: bool = False) -> int:
         return 3
     with store.locked():  # a crash mid-turn left busy markers from our pid's predecessor: clear them
         for t in store.all_threads():
+            changed = False
             if t.get("busy") and not _pid_alive(t.get("turn_owner")):
                 t["busy"], t["busy_since"], t["turn_owner"] = False, None, None
+                changed = True
+            want = roles.role_for(t["channel"])
+            if t.get("role", "prospect") != want:  # role changed in .env: fresh World in the new role; old messages
+                t.update(role=want, world=None, history=None, stage=roles.initial_stage(want), lease_sent=None,
+                         world_synced=[m["id"] for m in t["messages"] if m["direction"] == "in"])
+                changed = True
+            if changed:
                 store.save_thread(t)
     register_adapters(store)
     allow = config.Allowlist.load()
