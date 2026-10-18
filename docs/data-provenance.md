@@ -17,6 +17,10 @@ data/.venv/bin/python data/build_inventory.py
 
 > **Owner clarification 2026-10-17:** teams may use any open dataset.
 
+> **Privacy (applies to every use of the owner's data below):** private data never leaves infrastructure we control: this machine and our rented GPU instance (reached over an encrypted SSH tunnel); it is never sent to a third-party model API and never committed. The owner approved processing on the rented GPU (decision D28). The loopback check in `data/twins/common.LocalLLM` cannot tell a local server from an SSH-forwarded port, so "local endpoint" in this repo means "this machine or the rented GPU through the tunnel", never a hosted model API.
+
+> **Licenses (decision D28, table in `LICENSES.md`):** code Apache-2.0 (`LICENSE`); SGD-derived reader data and the current reader weights CC BY-SA 4.0; the synthetic twin dataset CC BY 4.0 with attribution to nvidia/Nemotron-Personas-USA (it contains no SGD content); Gym tasks, style examples and inventory CC BY 4.0.
+
 ## Synthetic data is published with its method
 
 The hackathon rules allow synthetic data only if the data and the method are
@@ -32,7 +36,7 @@ published openly. Ours are:
 ## Datasets
 
 ### Google Schema-Guided Dialogue (SGD, DSTC8)
-- **URL:** https://github.com/google-research-datasets/dstc8-schema-guided-dialogue
+- **URL:** https://github.com/google-research-datasets/dstc8-schema-guided-dialogue, pinned to commit `e852981ae34990f4358979625854259302feaa78` (`data/download.py` checks the commit in the archive's zip comment; derived `homes_dialogues.jsonl` sha256 `e0d67c28e876a4e947d7cbfa7c4b6d146d04145c7e2fd3b6191b752d0e4c0e3e`).
 - **License:** CC BY-SA 4.0 (`LICENSE.txt` in the repo).
 - **Used:** only dialogues whose services include `Homes_1` or `Homes_2` (1,273 dialogues: 847 train, 180 dev, 246 test), USER turns only as reader inputs, the preceding turns as thread context.
 - **Transformations:** re-labeled for our reader schema by rules over SGD dialogue acts: `INFORM visit_date` -> `scheduling` intent (a showing date is not a move-in date); `REQUEST *` -> `question` (asking the property's phone is not a renter phone); `NEGATE_INTENT` -> `not_now`; `AFFIRM` after an operator turn about a visit -> `scheduling`; THANK_YOU / GOODBYE / AFFIRM / SELECT with no other act -> `small_talk`; a regex picks up "moving ... for work/school" as a `reason`. Everything else stays `absent`. SGD's own train/dev/test split is kept, so SGD test dialogues are never trained on. Up to 2,000 train turns and 300 per eval split are sampled (seeded).
@@ -72,6 +76,12 @@ published openly. Ours are:
 - **Used:** the first 20,000 lines of `train.jsonl` (1.75 GB file) streamed, then a seeded 2,000-row sample to `data/processed/hf_samples/` for inspection. Our pinned `datasets==3.2.0` cannot parse this card's `Json` feature type, so `download.py` streams the raw JSONL instead.
 - **Feeds (planned):** NeMo Gym-format conversational tool-use trajectories as a reference for the Gym environment and any operator LoRA (W4).
 
+### Owner style statistics and example replies (`data/style/`, lane 5)
+- **Source:** the owner's private, anonymized message export (owner-written rows of the tenants and contractors datasets). Read locally; private data never leaves infrastructure we control: this machine and our rented GPU instance (reached over an encrypted SSH tunnel); it is never sent to a third-party model API and never committed.
+- **Published:** `owner_style_stats.json`, aggregate numbers only (message length, sentences, questions, greetings, emoji, dashes, language mix, burst rate, hour histogram), no text; `compute_stats.py` (code; needs the private export to run); `tone-guide.md`; `examples.jsonl`, 30 synthetic example replies written from scratch by an agent (every row `"synthetic": true`, invented names, streets and prices).
+- **License:** CC BY 4.0, like the twins.
+- **Feeds:** operator prompt style and few-shot examples (`docs/playbooks/`).
+
 ## Excluded or skipped
 
 - **Salesforce xLAM function-calling datasets: excluded.** Released for research use only, which does not fit an openly published hackathon submission.
@@ -82,14 +92,19 @@ published openly. Ours are:
 
 | Split | Rows | Synthetic | SGD | Published |
 |---|---|---|---|---|
-| train | 14,000 | 12,000 | 2,000 | first 5,000 |
+| train | 14,000 | 12,000 | 2,000 | all: `train_full.jsonl.gz` (sha256 of the uncompressed file `3d9237ef6e79f8a18bdd22fde1417b019b86eb318ae152239dfb22694a3d19b3`, verified by `data/publish_reader_train.py --check`); `train.jsonl` keeps the first 5,000, which the Gym task builders read |
 | dev | 1,100 | 800 | 300 | all |
 | test | 1,419 | 1,144 | 275 | all |
 
-Test is held out: it uses test-only templates (every 5th template in each list),
-test-only name / employer / school / city / area-code pools, SGD's test dialogues,
-and any test message that also appears verbatim in train or dev is dropped. Full
-label counts per split are in `data/published/reader/stats.json`.
+Test is held out only partly by template. Correction 2026-10-18 (leakage review #4): the test split draws a
+test-only template with probability 0.6 and otherwise from **all** templates (`build_reader_set.py` `pick`), and
+openers, closers and joiners are not split at all. Measured: 188 of the 1,144 synthetic test rows use only
+templates that also occur in train/dev, 956 use at least one test-only template; 47 synthetic and 6 SGD test rows
+equal a train/dev row after normalizing punctuation and digits. So the right description is "test-biased templates
+(60% test-only draws), test-only name / employer / school / city / area-code pools, SGD's test dialogues, exact
+lowercase duplicates of train/dev dropped". The set is frozen and not regenerated (that would void the scores);
+`docs/results.md` reports exact match on both template groups. Full label counts per split are in
+`data/published/reader/stats.json`.
 
 ### nvidia/Nemotron-Personas-USA
 - **URL:** https://huggingface.co/datasets/nvidia/Nemotron-Personas-USA
@@ -110,7 +125,7 @@ label counts per split are in `data/published/reader/stats.json`.
 4. *Verify.* Each twin renter message is re-labeled and must equal its target (statuses, dates, values, intents, language). Mismatches go back for a rewrite, up to 3 attempts. Twins that still fail are dropped. Gold labels are known by construction: the original's labels with the twin's own dates, phone and reason.
 5. *Privacy filter.* Every twin line is compared with every real line: character 8-gram containment (>= 0.5 of the twin line, or >= 0.6 of a real line), embedding cosine >= 0.90 (`paraphrase-multilingual-MiniLM-L12-v2`, local CPU; embedding models are outside the 33B budget), exact match, and PII regex. A flagged line is rewritten blind and re-verified, or the twin is dropped. Real phrases that occur in 3+ different threads count as common and are not protected. The filter asserts that the published set passes.
 
-**Privacy guarantees.** Real text never enters the repository and never leaves the owner's machine: the pipeline's only model client refuses non-local endpoints, so it reaches only the local vLLM servers. All intermediates holding real text stay in `~/rentus-private-data/work/`.
+**Privacy guarantees.** Private data never leaves infrastructure we control: this machine and our rented GPU instance (reached over an encrypted SSH tunnel); it is never sent to a third-party model API and never committed. Concretely: labeling, twin verification, the privacy-filter rewrites and the H6 replay send anonymized real threads to Lightning on vLLM on our single-tenant rented Brev GPU, reached through `serving/tunnel.sh`; vLLM there binds to 127.0.0.1 and runs without request logging. The pipeline's model client refuses any endpoint that is not loopback (an SSH-forwarded port counts as loopback, which is why the sentence above names the GPU instance explicitly). All intermediates holding real text stay in `~/rentus-private-data/work/` on this machine. The instance's disk and container logs are wiped at teardown.
 
 **What is published.**
 - `stats_card.json`: aggregates of the real threads (counts, rates, quartiles), with cells under 5 suppressed.
@@ -118,6 +133,6 @@ label counts per split are in `data/published/reader/stats.json`.
 - `twins.jsonl`, `reader_test.jsonl`: twin conversations with gold labels, and a reader test set in the `data/reader_schema.md` row format (`source: "twin"`).
 - `gym/tasks/v3/heldout.jsonl`: held-out Gym tasks (format in `contracts/tools.md` §10).
 
-Twins are released under CC BY 4.0, and their personas keep Nemotron-Personas-USA's CC BY 4.0 attribution.
+Twins are released under CC BY 4.0 (D28), and their personas keep Nemotron-Personas-USA's CC BY 4.0 attribution. They contain no SGD content.
 
 **Limits.** The regex scrub is a second layer and misses free-form identifiers, so the owner's anonymization comes first. Labels come from a model, so a mislabeled real message gives a twin whose shape is slightly off, but the twin's gold labels still match the twin's text. Thread outcomes are model judgements.
