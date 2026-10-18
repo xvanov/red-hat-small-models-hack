@@ -170,6 +170,9 @@ def main(argv=None) -> int:
                     help="Amendment 6: freeze although owner sign-offs are missing; they are recorded in the manifest as "
                          "missing_signoffs_at_freeze and the consequence in docs/FREEZE.md section 1 applies to each. "
                          "Artifacts and problems still block.")
+    ap.add_argument("--refreeze", default=None, metavar="AMENDMENT",
+                    help="replace an existing manifest (a deliberate re-freeze, named by the protocol amendment that "
+                         "authorizes it); the old manifest is kept inside the new one under `supersedes`")
     a = ap.parse_args(argv)
     c = collect()
     print(report(c))
@@ -180,14 +183,20 @@ def main(argv=None) -> int:
     if not ready:
         print("refusing to write the manifest")
         return 1
+    prev = None
     if MANIFEST.exists():
-        print(f"refusing: {MANIFEST.relative_to(REPO)} exists; a second freeze is a new protocol version (docs/FREEZE.md)")
-        return 1
+        if not a.refreeze:
+            print(f"refusing: {MANIFEST.relative_to(REPO)} exists; a second freeze is a new protocol version (docs/FREEZE.md)")
+            return 1
+        prev = json.loads(MANIFEST.read_text())
+        prev["freeze_commit"] = git("log", "-n", "1", "--format=%H", "--", str(MANIFEST.relative_to(REPO)))
     man = {"_note": "Freeze manifest (docs/FREEZE.md). The commit that adds this file is the freeze commit.",
            "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "parent_commit": git("rev-parse", "HEAD"),
            "artifacts": c["artifacts"], "absent_optional": c["missing_optional"],
            "frozen_paths": frozen_paths(), "frozen_path_trees": c["frozen_path_trees"], "signoffs": c["signoffs"],
            "missing_signoffs_at_freeze": c["missing_signoffs"]}
+    if prev is not None:
+        man["refreeze"] = {"authorized_by": a.refreeze, "supersedes": prev}
     MANIFEST.write_text(json.dumps(man, indent=1, ensure_ascii=False) + "\n")
     print(f"wrote {MANIFEST.relative_to(REPO)}; now commit it (and nothing else) as the freeze commit")
     return 0
