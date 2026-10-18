@@ -195,3 +195,151 @@ def trust() -> dict:
         "reader": reader,
         "sources": ["docs/results.md", "gym/results/*/summary.json", "reader/results/*.metrics.json"],
     }
+
+
+# ------------------------------------------------------------------ v2 held-out results with CIs
+_STATS = {"mod": None}
+_RESULTS_CACHE: dict = {"key": None, "value": None}
+V2_RE = re.compile(r"^v2-heldout-(?P<name>.+?)(?:-s(?P<seed>\d+))?$")
+V2_LABELS = {  # run-name stem -> (label, kind); unknown stems are shown by name
+    "baseline": ("Baseline", "baseline"),
+    "final": ("Final", "final"),
+    "final-router": ("Final + router", "variant"),
+    "final-nemo": ("Final on NeMo Gym simple_agent", "variant"),
+}
+
+
+def _stats():
+    """gym/stats.py (owned by the coordinator), imported by path so no other `stats` module shadows it."""
+    if _STATS["mod"] is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("rentus_gym_stats", REPO / "gym" / "stats.py")
+        mod = importlib.util.module_from_spec(spec)
+        import sys
+        sys.modules["rentus_gym_stats"] = mod  # dataclasses look the module up by name
+        spec.loader.exec_module(mod)
+        _STATS["mod"] = mod
+    return _STATS["mod"]
+
+
+def _v2_groups() -> dict[str, list[Path]]:
+    groups: dict[str, list[Path]] = {}
+    if not GYM.is_dir():
+        return groups
+    for d in sorted(GYM.iterdir()):
+        m = V2_RE.match(d.name)
+        if not (m and d.is_dir() and (d / "per_task.jsonl").exists()):
+            continue
+        s = _json(d / "summary.json") or {}
+        if s.get("invalid") or s.get("stub"):
+            continue
+        groups.setdefault(m.group("name"), []).append(d)
+    return groups
+
+
+def results_v2() -> dict:
+    """Held-out v2 configs with 95% CIs and paired tests, computed by gym/stats.py from per_task.jsonl."""
+    groups = _v2_groups()
+    key = tuple((n, tuple((p.name, (p / "per_task.jsonl").stat().st_mtime) for p in ps)) for n, ps in sorted(groups.items()))
+    if key == _RESULTS_CACHE["key"]:
+        return _RESULTS_CACHE["value"]
+    out = {"configs": [], "compare": [], "categories": {}, "source": "gym/results/v2-heldout-*/per_task.jsonl via gym/stats.py",
+           "doc": "docs/results.md"}
+    if not groups:
+        _RESULTS_CACHE.update(key=key, value=out)
+        return out
+    st = _stats()
+    cfgs = {}
+    order = list(V2_LABELS) + sorted(n for n in groups if n not in V2_LABELS)
+    for name in order:
+        if name not in groups:
+            continue
+        paths = groups[name]
+        try:
+            cfg = st.Config(name, [str(p) for p in paths])
+        except BaseException:  # stats raises SystemExit on a missing run
+            continue
+        s = st.summarize(cfg)
+        sums = [_json(p / "summary.json") or {} for p in paths]
+        rows = [r for p in paths for r in _rows(p / "per_task.jsonl")]
+        secs = [r["seconds"] for r in rows if isinstance(r.get("seconds"), (int, float))]
+        calls = [r["model_calls"] for r in rows if isinstance(r.get("model_calls"), (int, float))]
+        cost = [r["cost_usd"] for r in rows if isinstance(r.get("cost_usd"), (int, float))]
+        label, kind = V2_LABELS.get(name, (name.replace("-", " "), "reference" if "frontier" in name else "variant"))
+        k = s["k"]
+        cfgs[name] = cfg
+        out["configs"].append({
+            "name": name, "label": label, "kind": kind, "runs": s["runs"] and len(s["runs"]), "tasks": s["tasks"],
+            "pass_rate": s["pass_rate"], "pass_ci": list(s["pass_ci"]), "mean_reward": s["mean_reward"],
+            "reward_ci": list(s["reward_ci"]), "pass_all_runs": s["pass_hat"][k][0] if k >= 2 else None,
+            "pass_any_run": s["pass_at"][k] if k >= 2 else None, "flaky_tasks": s.get("flaky_tasks"),
+            "model": sums[0].get("model"), "via": sums[0].get("via"), "config_label": sums[0].get("config_label"),
+            "spec": (sums[0].get("variant") or {}).get("spec"), "git": sums[0].get("git"),
+            "started": min((x.get("started") or "") for x in sums) or None,
+            "task_seconds_p50": statistics.median(secs) if secs else None,
+            "model_calls_mean": statistics.mean(calls) if calls else None,
+            "cost_per_task_usd": statistics.mean(cost) if cost else None,
+            "runs_dirs": [p.name for p in paths]})
+    base = cfgs.get("baseline")
+    final = cfgs.get("final")
+    pairs = []
+    if final and base:
+        pairs.append((final, base))
+    for n, c in cfgs.items():
+        if final and c is not final and c is not base:
+            pairs.append((c, final))
+    cmps = [st.compare(a, b) for a, b in pairs]
+    if cmps:
+        adj_r = st.holm([c["p_reward"] for c in cmps])
+        adj_p = st.holm([c["p_pass"] for c in cmps])
+        for c, pr, pp in zip(cmps, adj_r, adj_p):
+            lab = {x["name"]: x["label"] for x in out["configs"]}
+            out["compare"].append({"a": lab.get(c["a"], c["a"]), "b": lab.get(c["b"], c["b"]), "tasks": c["tasks"],
+                                   "d_reward": c["d_reward"], "d_reward_ci": list(c["d_reward_ci"]),
+                                   "p_reward_holm": pr, "d_pass": c["d_pass"], "a_better": c["a_better"],
+                                   "b_better": c["b_better"], "p_pass_holm": pp})
+    for n in ("baseline", "final"):
+        if n in cfgs:
+            out["categories"][n] = {cat: {"tasks": v["tasks"], "pass_rate": v["pass_rate"], "pass_ci": list(v["pass_ci"]),
+                                          "mean_reward": v["mean_reward"], "reward_ci": list(v["reward_ci"])}
+                                    for cat, v in st.by_category(cfgs[n]).items()}
+    _RESULTS_CACHE.update(key=key, value=out)
+    return out
+
+
+# ------------------------------------------------------------------ vLLM serving performance
+SERVING = REPO / "serving" / "results"
+
+
+def performance() -> dict:
+    """Serving numbers from serving/results/serve_bench.jsonl (docs/vllm.md explains the method)."""
+    rows = _rows(SERVING / "serve_bench.jsonl")
+    out = {"sweep": [], "prefix": [], "reasoning": [], "totals": None, "hardware": None,
+           "source": "serving/results/serve_bench.jsonl", "doc": "docs/vllm.md"}
+    if not rows:
+        return out
+    def slim(r):
+        s, rd = r.get("server") or {}, r.get("reader") or {}
+        return {"n": r.get("concurrency"), "tok_s": r.get("agg_out_tok_s"), "req_s": r.get("req_per_s"),
+                "lat_p50_s": r.get("lat_p50_s"), "lat_p95_s": r.get("lat_p95_s"), "ttft_p50_ms": r.get("ttft_p50_ms"),
+                "ttft_p95_ms": r.get("ttft_p95_ms"), "hit": s.get("prefix_cache_hit_rate"), "errors": r.get("errors"),
+                "requests": r.get("requests"), "reader_p50_ms": rd.get("p50_ms"), "reader_p95_ms": rd.get("p95_ms"),
+                "out_tok_mean": r.get("out_tok_mean"), "tool_call_share": r.get("tool_call_share"),
+                "prompt_tok_mean": r.get("prompt_tok_mean"), "started": r.get("started")}
+    sweep = {}
+    for r in rows:  # the latest row per level wins (the N=32 clean re-run replaces the contaminated one)
+        if r.get("label", "").startswith("baseline: prefix cache on") and r.get("mode") == "decode":
+            sweep[r["concurrency"]] = slim(r)
+    out["sweep"] = [sweep[k] for k in sorted(sweep)]
+    on = {r["concurrency"]: slim(r) for r in rows if r.get("label", "").startswith("prefix reuse ON")}
+    off = {r["concurrency"]: slim(r) for r in rows if r.get("label", "").startswith("prefix reuse OFF")}
+    out["prefix"] = [{"n": n, "on": on[n], "off": off[n]} for n in sorted(set(on) & set(off))]
+    out["reasoning"] = [{"reasoning": r.get("reasoning"), **slim(r)} for r in rows if r.get("mode") == "turn"]
+    out["totals"] = {"requests": sum(r.get("requests") or 0 for r in rows), "errors": sum(r.get("errors") or 0 for r in rows),
+                     "prompt_tokens": rows[-1].get("prompt_tok_mean"), "tools": rows[-1].get("tools")}
+    doc = REPO / "docs" / "vllm.md"
+    if doc.exists():
+        m = re.search(r"One (\$[\d.]+/hr) (RTX Pro 6000[^\s,]*)", doc.read_text())
+        if m:
+            out["hardware"] = {"gpu": m.group(2), "price": m.group(1)}
+    return out

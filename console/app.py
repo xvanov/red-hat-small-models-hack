@@ -147,6 +147,16 @@ def get_trust():
     return panels.trust()
 
 
+@app.get("/api/results")
+def get_results():
+    return panels.results_v2()
+
+
+@app.get("/api/performance")
+def get_performance():
+    return panels.performance()
+
+
 @app.get("/api/runs")
 def list_runs():
     out = []
@@ -264,7 +274,7 @@ def approvals():
         last = next((m.get("text") for m in reversed(t.get("messages") or []) if m.get("from") == "renter"), None)
         j = jobs.get(ref) or {}
         reason, draft = e.get("reason") or "", e.get("draft")
-        if reason.strip() in (ref or "", e.get("ref_id") or "") and draft:  # model put the id in reason
+        if reason.strip() in (ref or "", e.get("ref_id") or "", e.get("ref_type") or "", "thread", "job") and draft:  # model put the id in reason
             reason, draft = draft, None
         items.append({"esc_id": e.get("esc_id"), "reason": reason, "draft": draft,
                       "status": e.get("status") or "open", "ref": ref, "decided_via": e.get("decided_via"),
