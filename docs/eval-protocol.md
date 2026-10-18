@@ -453,3 +453,19 @@ Written after the owner finished blind-labeling and before any model has been sc
 ## Amendment 4 (Oct 18 ~05:05 ET): pilot label set
 
 Before any model has been scored on it, the owner's blind, audited labels on the 29-message practice set (`data/twins/fixtures/out/reader_test.jsonl`: 10 fictional conversations written by an agent, not derived from real data) are declared a **supplementary pilot set**. Reader / Lightning / frontier scores on it are reported separately, descriptively, with intervals, and are **not** part of the confirmatory Holm family. It also serves as a rubric-calibration record (11 rule-based audit flags, all adjudicated by the owner).
+
+## Amendment 5 (Oct 18 ~05:20 ET): H2 sample size 71 (owner time constraint); pilot 29 reported separately; power for H2 recomputed
+
+Made before `data/published/twins/reader_test.jsonl` exists, so before anyone (person or model) has seen a real twin reader row.
+
+- **Sample size.** The owner can label about 71 messages before the cut-off, so A1a's "at least 150 rows" becomes **at least 71 rows**: the same draw (`random.Random(0)` permutation of the sorted twin ids, whole conversations added in that order) stops at the first thread that brings the total to ≥ 71. `labeler/server.py` (`MIN_ROWS = 71`) draws it into `labeler/sample_manifest.json` on the first request after the real file's sha256 matches `frozen_sha256` in `data/twins/splits.json`, and the page switches to it by itself. The labeling is **fully blind**: no model label, no twin gold, and nothing copied from the message into the form.
+- **Pilot.** The 29-message practice set (Amendment 4) is reported separately and descriptively, never pooled with the 71 and never in the Holm family.
+- **Power, recomputed** with `gym/stats.py simulate_reader_power` (the `cluster_paired_test` decision rule, resampling threads; 200 simulated studies × 500 bootstrap resamples per point, per-thread shift SD 0.15, as in A3). The fixture averaged 4.1 messages per conversation, so 71 rows means roughly 12 to 18 threads. True exact-match difference needed for 80% power:
+
+| threads × rows per thread | disagree 10% | disagree 20% |
+|---|---|---|
+| 18 × 4 = 72 | not reachable (> 0.10, the most a 10% disagreement allows) | 0.15 (α .025) / 0.20 (α .005) |
+| 14 × 5 = 70 | not reachable | 0.18 / 0.20 |
+| 12 × 6 = 72 | not reachable | 0.18 / 0.20 |
+
+  Reading: at the observed 19% disagreement between the fine-tuned reader and Opus (synthetic set), H2a/H2b detect only a true difference of about **15 to 20 points**; if the systems disagree on 10% of rows or fewer, H2 cannot reach 80% power at all. H2a and H2b stay in the family (m = 5 unchanged); a non-rejection is reported as "not shown", never as "no difference". The report states the realized thread count and rows per thread.

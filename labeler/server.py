@@ -6,9 +6,9 @@ Shows one renter message at a time (last 1-2 context lines + the message + "toda
 model's label, and saves the owner's label for each item to labeler/out/.
 
 Sample (A1a): all renter rows of a simple random sample of twin threads, seed 0, added thread by thread
-until at least 150 rows. The draw is `random.Random(0).sample(sorted(set(twin_ids)), k)` (the same
+until at least 71 rows (Amendment 5; was 150). The draw is `random.Random(0).sample(sorted(set(twin_ids)), k)` (the same
 procedure as gym/stats.py `simple_random_sample`) taken over every thread, so the thread order is a
-seeded permutation and the sample is its shortest prefix holding >= 150 rows. It is written once to a
+seeded permutation and the sample is its shortest prefix holding >= 71 rows. It is written once to a
 manifest and reused on every restart; it is never redrawn unless the manifest is deleted.
 
 Sources and modes (never mixed):
@@ -42,7 +42,7 @@ FIXTURE_SRC = REPO / "data/twins/fixtures/out/published/reader_test.jsonl"
 SPLITS = REPO / "data/twins/splits.json"
 OUT = Path(os.environ.get("LABELER_OUT") or HERE / "out").resolve()   # tests point this at a copy
 SEED = 0
-MIN_ROWS = 150
+MIN_ROWS = 71   # eval-protocol Amendment 5 (owner time constraint); the 29-row fixture pilot keeps its own manifest
 
 MODES = {
     "real": {"src": REAL_SRC, "manifest": HERE / "sample_manifest.json", "labels": OUT / "owner_labels.jsonl"},

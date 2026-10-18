@@ -18,7 +18,7 @@ files are in `labeler/logs/` (gitignored). Rerunning `start.sh` restarts both.
 ## Sample
 
 A1a: all renter rows of a simple random sample of twin threads, seed 0 (`random.Random(0).sample` over the sorted
-twin ids, the same draw as `gym/stats.py simple_random_sample`), added thread by thread until at least 150 rows.
+twin ids, the same draw as `gym/stats.py simple_random_sample`), added thread by thread until at least **71** rows (eval-protocol Amendment 5; the 29-row fixture sample is the pilot, Amendment 4).
 Drawn once and written to a manifest (twin ids, row ids, `row_ids_sha256`, source sha256); every restart reuses it.
 
 | mode | source | manifest | labels |
@@ -49,6 +49,9 @@ absent`; move-in exact + date -> `answered` (or `exception` with the condition b
 E.164 (`exception` with the caveat box), declined -> `no`; occupants 1-5+ -> `answered` count (`exception` with the
 part-time guest box); reason given/declined -> `answered`/`no`, value null (scored on status only); language
 `other` is stored as `"other"` (the schema has en/es only). Skip saves `skipped: true, output: null`.
+
+Fully blind: the form never prefills a field from the message or from any label (the old "copy the number from the
+message" convenience is gone); fields start at "not mentioned" / English until the owner picks.
 
 Move-in exact date: a month dropdown (names), a day number and a year prefilled from the item's conversation
 date (it follows "next time that date comes after the conversation date" until edited); the date is shown in words.
