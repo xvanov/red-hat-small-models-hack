@@ -18,6 +18,11 @@ class RunConfig:
     renter_guard: bool = False            # P2.1 (a): a renter-facing run may not end on plain text while the
                                           # renter's last message is unanswered; the harness bounces it back
     renter_guard_rounds: int = 3          # max bounces per run
+    burst_guard: bool = False             # renter guard also bounces a run that ends with the renter holding no
+                                          # question while gate items are missing (not closed/parked/escalated);
+                                          # shares renter_guard_rounds, needs renter_guard on
+    guard_stand_down: bool = False        # renter guard does not bounce a run on a thread the owner took over
+                                          # (thread owner_owned / stand_down), where the agent must send nothing
     format_facts: bool = False            # P2.1 (g): showing hours rendered "10:00 to 18:00" as the NeMo rows do,
                                           # instead of the raw policy dict
     style_precheck: bool = False          # P2.1 (d): verifier checks send_message style rules BEFORE the call and
@@ -57,6 +62,10 @@ class RunConfig:
                f"verifier={'on' if self.verifier else 'off'} reader={'on' if self.reader else 'off'}")
         if self.renter_guard:
             out += " renter_guard=on"
+        if self.burst_guard:
+            out += " burst_guard=on"
+        if self.guard_stand_down:
+            out += " guard_stand_down=on"
         if self.style_precheck:
             out += " style_precheck=on"
         if self.format_facts:

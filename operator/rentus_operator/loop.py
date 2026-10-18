@@ -125,6 +125,27 @@ def _opening(goal) -> tuple[str, str | None]:
     return json.dumps(g), None
 
 
+def _thread(st: dict, thread_id: str) -> dict:
+    threads = list(st.get("threads", []) or [])
+    for ch in (st.get("channels") or {}).values():
+        if isinstance(ch, dict):
+            threads += [t for t in ch.get("threads", []) or [] if isinstance(t, dict)]
+    if isinstance(st.get("threads"), dict):
+        threads = list(st["threads"].values())
+    for t in threads:
+        if isinstance(t, dict) and t.get("thread_id") == thread_id:
+            return t
+    return {}
+
+
+def thread_stood_down(world, thread_id: str | None) -> bool:
+    """True when the owner took the thread over (owner_owned / stand_down): the agent must send nothing there."""
+    if not thread_id:
+        return False
+    t = _thread(toolbox.state(world), thread_id)
+    return bool(t.get("owner_owned") or t.get("stand_down"))
+
+
 def _thread_messages(st: dict, thread_id: str) -> list[dict]:
     threads = list(st.get("threads", []) or [])
     for ch in (st.get("channels") or {}).values():
@@ -144,6 +165,34 @@ def renter_unanswered(world, thread_id: str | None) -> bool:
         return False
     msgs = _thread_messages(toolbox.state(world), thread_id)
     return bool(msgs) and msgs[-1].get("from") not in ("operator", "owner")
+
+
+STALL_STOP_STATUSES = {"lost", "not_now", "parked", "applied", "closed", "placed", "sourcing", "showing_proposed",
+                       "showing_confirmed"}
+
+
+def renter_stalled(world, thread_id: str | None, escalated: bool) -> list[str]:
+    """burst_guard: the operator spoke last on a renter thread, but its last message asks nothing while gate items are
+    still missing and the thread is not closed, parked, escalated or owner-held. Returns the missing items ([] = fine)."""
+    if not thread_id or escalated or thread_stood_down(world, thread_id):
+        return []
+    msgs = _thread_messages(toolbox.state(world), thread_id)
+    if not msgs or msgs[-1].get("from") != "operator" or "?" in str(msgs[-1].get("text", "")) \
+            or "¿" in str(msgs[-1].get("text", "")):
+        return []
+    from .router import gate_missing, renter_row
+    row = renter_row(world, thread_id)
+    if row and (str(row.get("status", "")).lower() in STALL_STOP_STATUSES or row.get("sourcing")
+                or row.get("reconnect_at") or (row.get("demand") or {}).get("reconnect_at")):
+        return []
+    return gate_missing(row)
+
+
+def burst_guard_feedback(thread_id: str, missing: list[str]) -> str:
+    return (f"[harness] The renter on thread {thread_id} has nothing to answer: your last message asks no question, "
+            f"and gate items are still missing ({', '.join(missing)}). Continue the flow now with send_message: any "
+            "remaining disclosure or house-rules messages, then the next missing gate question as the last message. "
+            "If the thread should end here (a close, a park, an escalation), do that with the right tool instead.")
 
 
 def renter_guard_feedback(thread_id: str) -> str:
@@ -443,12 +492,21 @@ def run(world, goal_or_inbound, client=None, model: str | None = None, max_steps
             continue
 
         final_text = m["content"]
-        if guard_left > 0 and renter_unanswered(world, renter_thread):
+        if guard_left > 0 and renter_unanswered(world, renter_thread) \
+                and not (cfg.guard_stand_down and thread_stood_down(world, renter_thread)):
             guard_left -= 1
             R.emit("verifier", "harness", {"stage": "renter-guard", "ok": False, "thread_id": renter_thread,
                                            "problems": ["run ended on plain text with the renter unanswered"]})
             messages.append({"role": "user", "content": renter_guard_feedback(renter_thread)})
             continue
+        if cfg.burst_guard and guard_left > 0:
+            missing = renter_stalled(world, renter_thread, escalated=bool(R.escalations))
+            if missing:
+                guard_left -= 1
+                R.emit("verifier", "harness", {"stage": "burst-guard", "ok": False, "thread_id": renter_thread,
+                                               "problems": [f"run ended with no pending question; missing {missing}"]})
+                messages.append({"role": "user", "content": burst_guard_feedback(renter_thread, missing)})
+                continue
         if not cfg.verifier:
             status = "done"
             break
