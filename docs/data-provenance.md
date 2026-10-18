@@ -27,6 +27,7 @@ published openly. Ours are:
 | Reader training/eval set (synthetic part) | `data/build_reader_set.py`: hand-written English and Spanish templates composed per message, persona styling, labels known by construction. No LLM. Rules in `data/reader_schema.md`. Seeded, fully reproducible. | `data/published/reader/{train,dev,test}.jsonl` + `stats.json` |
 | Spanish SGD translations (planned) | `data/translate_es.py`, plan in `data/translate_es.md`. Uses the operator model on vLLM; deterministic digit-preservation check. | will be added to the same folder when run |
 | Sandbox room inventory | `data/build_inventory.py`: fictional rooms priced from UCI x ZORI, amenities from Inside Airbnb. | `data/published/inventory.json` + `inventory_stats.json` |
+| Rewritten twins (draft, see below) | `data/twins/`: label skeletons of the owner's real threads rewritten by Lightning with Nemotron personas, verified and privacy-filtered. | `data/published/twins/` (stats card, filter report, twins, reader test set) + `gym/tasks/v3/heldout.jsonl` |
 
 ## Datasets
 
@@ -75,7 +76,7 @@ published openly. Ours are:
 
 - **Salesforce xLAM function-calling datasets: excluded.** Released for research use only, which does not fit an openly published hackathon submission.
 - **HUD Fair Market Rents API and Census ACS API: skipped.** HUD's API needs a registered token we don't have; ZORI + UCI already cover rent levels. Can be added later if a key is obtained (the Census API works keyless at low volume).
-- **Nemotron Personas:** not downloaded. The synthetic reader set uses hand-written persona styles in code (casual, formal, terse, emoji, all-caps; English/Spanish name pools) in that spirit.
+- **Nemotron Personas:** not used by the reader set, which uses hand-written persona styles in code. The twins pipeline uses it (below).
 
 ## Reader set at a glance (seed 7)
 
@@ -89,3 +90,34 @@ Test is held out: it uses test-only templates (every 5th template in each list),
 test-only name / employer / school / city / area-code pools, SGD's test dialogues,
 and any test message that also appears verbatim in train or dev is dropped. Full
 label counts per split are in `data/published/reader/stats.json`.
+
+### nvidia/Nemotron-Personas-USA
+- **URL:** https://huggingface.co/datasets/nvidia/Nemotron-Personas-USA
+- **License:** CC BY 4.0.
+- **Used:** shard `data/train-00000-of-00011.parquet`; a seeded sample of 4,000 adults (age 19-68), fields uuid, persona, professional_persona, hobbies, sex, age, marital status, education, occupation, city, state (`data/twins/personas.py`).
+- **Feeds:** the invented renter of each rewritten twin. Each published twin and v3 task carries the persona with its source uuid and license.
+
+## Method (draft): rewritten twins of real conversations
+
+**Status:** pipeline built and tested end to end on 10 invented fixture threads (`data/twins/fixtures/`). Not yet run on real data; the owner supplies the anonymized exports (decision D22).
+
+**Why.** The open synthetic sets are clean by construction. Real renters are vaguer, switch language, push on price and go silent. Twins carry that shape into open data without carrying any real person's words.
+
+**How a twin is made** (code in `data/twins/`, details in its README):
+1. *Ingest.* The owner's own anonymized exports (iMazing SMS CSV, Facebook Messenger JSON, generic CSV/JSONL) are loaded on the owner's machine, outside the repo. Sender names are dropped, thread ids are salted hashes, and a second regex scrub replaces phones, emails, URLs, street addresses and unit/id numbers. Non-rental threads are dropped (keyword score; Lightning decides borderline threads).
+2. *Label.* Lightning, served locally on vLLM, labels every renter message with the reader schema using the reader's own prompt, every owner message with what it does (questions classified by the Gym's deterministic classifier), and every thread with its outcome (qualified, showing, applied, ghosted, no).
+3. *Rewrite.* For each thread Lightning writes a twin from the **label skeleton only**: the speaker of each turn, each renter message's statuses, intents and language, style hints (length, emoji, casing), timing gaps and the ending. It does not see the real wording. The renter is a Nemotron persona; dates are shifted into Oct 2026 to Feb 2027, the phone is a fictional 555-01xx number, and reason, job and details are invented. The prompt forbids reusing any 4-word phrase.
+4. *Verify.* Each twin renter message is re-labeled and must equal its target (statuses, dates, values, intents, language). Mismatches go back for a rewrite, up to 3 attempts. Twins that still fail are dropped. Gold labels are known by construction: the original's labels with the twin's own dates, phone and reason.
+5. *Privacy filter.* Every twin line is compared with every real line: character 8-gram containment (>= 0.5 of the twin line, or >= 0.6 of a real line), embedding cosine >= 0.90 (`paraphrase-multilingual-MiniLM-L12-v2`, local CPU; embedding models are outside the 33B budget), exact match, and PII regex. A flagged line is rewritten blind and re-verified, or the twin is dropped. Real phrases that occur in 3+ different threads count as common and are not protected. The filter asserts that the published set passes.
+
+**Privacy guarantees.** Real text never enters the repository and never leaves the owner's machine: the pipeline's only model client refuses non-local endpoints, so it reaches only the local vLLM servers. All intermediates holding real text stay in `~/rentus-private-data/work/`.
+
+**What is published.**
+- `stats_card.json`: aggregates of the real threads (counts, rates, quartiles), with cells under 5 suppressed.
+- `filter_report.json`: privacy filter counts and thresholds.
+- `twins.jsonl`, `reader_test.jsonl`: twin conversations with gold labels, and a reader test set in the `data/reader_schema.md` row format (`source: "twin"`).
+- `gym/tasks/v3/heldout.jsonl`: held-out Gym tasks (format in `contracts/tools.md` §10).
+
+Twins are released under CC BY 4.0, and their personas keep Nemotron-Personas-USA's CC BY 4.0 attribution.
+
+**Limits.** The regex scrub is a second layer and misses free-form identifiers, so the owner's anonymization comes first. Labels come from a model, so a mislabeled real message gives a twin whose shape is slightly off, but the twin's gold labels still match the twin's text. Thread outcomes are model judgements.

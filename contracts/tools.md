@@ -135,3 +135,12 @@ Additive and opt-in; v1 tasks (`gym/tasks/*.jsonl`) do not use them and replay u
 - **Counterpart lines.** `"reuse": true` marks a line that is never consumed (a fallback: a confirmation of an answer already given, or a generic reply). Reusable lines are tried after the one-shot lines for the same item; a reusable `"any"` line answers only a message that asks something. `when_asked` may be a list of items.
 - **Counterpart spec.** `"classifier": "v2"` counts an operator question about availability or a different date as a `move_in` question. `"name"` sets the renter's display name.
 - **Task.** `"version": "v2"`. `initial_state.rooms` may set a room's `available_from` or `max_occupants` for that task only.
+
+## 10. Task format v3: twin tasks (Oct 17)
+
+Additive. v3 = v2 plus two fields on a counterpart, written by `data/twins/to_tasks.py` into `gym/tasks/v3/heldout.jsonl` (held-out only, never tuned on). The v2 `script` is still present, so today's scripted counterparts run v3 tasks unchanged; a model-played renter can use the new fields instead.
+
+- **Task.** `"version": "v3"`, `"source": {"kind": "twin", "twin_id": "tw_..."}`, `subcategory` = `twin_<behaviour>` (hard_no, not_now, price_push, shorter_lease, ghosted, language_switch, vague_date, spanish, full).
+- **Counterpart `persona`** (string, the same field `llm_renter` reads) and **`persona_card`** `{name, age, sex, occupation, city, state, summary, source: "nvidia/Nemotron-Personas-USA", source_uuid, license: "CC BY 4.0"}`.
+- **Counterpart `opening`, `truth`, `behaviors`, `simulator`**: the twin expressed in the `llm_renter` spec (`gym/rentus_env/llm_renter.py`). No `mode` is set, so the task runs scripted; add `"mode": "llm_renter"` to the counterpart to run it with the model-played renter.
+- **Counterpart `twin_script`.** `{turns: [{i, role: renter|operator, text, ts, gold (renter: reader-schema labels) | acts (operator)}], gold_facts: {item: final status/value}, phone, ghosts_after_turn: int|null, ends_with: final stage, deviation_policy: text}`. A model-played renter follows the turns in order, may answer off-script questions in persona, never contradicts `gold_facts`, and goes silent after `ghosts_after_turn`.

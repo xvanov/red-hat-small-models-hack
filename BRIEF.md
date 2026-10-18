@@ -64,6 +64,7 @@ Simulated renters and vendors in the Gym are scripted from open datasets, not a 
 - 2026-10-18: `contracts/tools.md` §6, new actor `router` (triage router decisions are `verifier` events with `data.stage = "router"`, and its register writes / escalations are tool calls with actor `router`). Additive.
 - 2026-10-17: owner decisions D23. `contracts/tools.md` §5 malformed faults take `field`/`field_mode` (target one key, e.g. rent); §3 `gate.lease` takes optional `months` (accepting >= `lease_floor_months` passes the gate). Additive.
 - 2026-10-17: `contracts/tools.md` §9, task set v2 script fields (`reuse`, list `when_asked`, `classifier`, per-task room patches). Additive; v1 tasks unchanged.
+- 2026-10-17: `contracts/tools.md` §10, task format v3 (twin tasks: counterpart `persona` + `twin_script`), written by `data/twins/to_tasks.py`. Additive; v2 `script` kept.
 
 ## Milestones
 
