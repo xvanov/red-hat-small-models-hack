@@ -164,3 +164,12 @@ def test_adapter_not_running(root):
 def test_message_ids_distinguish_repeats():
     ids = C.message_ids("1", [{"dir": "in", "text": "ok"}, {"dir": "in", "text": "ok"}, {"dir": "out", "text": "ok"}])
     assert len(set(ids)) == 3
+
+
+def test_live_registry_factory_and_ids(browser, root, monkeypatch):
+    w = _worker(_page(browser), root)
+    w.poll_once()
+    p = A.make_live_provider()
+    assert p.channel == "messenger_personal" and callable(p.poll) and callable(p.send) and p.display
+    monkeypatch.setenv("LIVE_ALLOW_MESSENGER_NAMES", "Bob Example")
+    assert A.allowlisted_thread_ids(root) == {"222": "Bob Example"}

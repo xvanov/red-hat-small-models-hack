@@ -47,36 +47,23 @@ On a VNC desktop, prefix `login` with `DISPLAY=:2`. `serve` shows its browser wi
   (atomic rename), so it can never go out later without anyone seeing it.
 - Opening a thread to read it marks it as seen on Facebook, just as it would if the owner read it himself.
 
-## Registering in `channels/live` (for the live worker)
+## Registering in `channels/live`
 
-The contact is the Facebook thread id, and `renter_name` is the participant's display name.
+`channels/live/registry.py` loads it from the repo `.env`. No code changes are needed:
 
-```python
-# store.py
-CHANNEL_WORLD = {..., "messenger_personal": "marketplace"}
-
-# outbound.get_providers()
-from channels.messenger_web.adapter import MessengerPersonal
-_PROVIDERS = {..., "messenger_personal": MessengerPersonal()}
-
-# daemon.poll_all(): add the source, and keep EVERY messenger_personal item (all threads become drafts)
-sources += [(k, provs[k]) for k in ("email", "messenger", "messenger_personal") if provs.get(k) is not None]
-...
-            if it["channel"] != "messenger_personal" and not allow.allows(it["channel"], it["contact"]):
-                continue
-
-# config.Allowlist.allows(): the auto-send gate used by outbound._gate
-        if channel == "messenger_personal":
-            from channels.messenger_web.adapter import allows_autosend
-            return allows_autosend(contact)          # name in LIVE_ALLOW_MESSENGER_NAMES
-
-# outbound._provider_send()
-    if ch == "messenger_personal":
-        prov = p.get("messenger_personal")
-        return prov.send(t["contact"], text) if prov else {"ok": False, "status": "failed", "error": "not configured"}
-
-# api.status(): add "messenger_personal" to the ("email", "messenger") loop
+```bash
+LIVE_EXTRA_CHANNELS=messenger_personal=channels.messenger_web.adapter:make_live_provider
+LIVE_PERSONAL_DRAFTS=1                      # every non-allowlisted chat becomes a thread with replies held as drafts
+LIVE_ALLOW_MESSENGER_NAMES=Test Account     # names allowed to auto-send (empty by default)
+LIVE_ALLOW_MESSENGER_PERSONAL_IDS=...       # what channels/live actually checks: the thread ids of those names
 ```
+
+`channels/live` allowlists by contact id, which here is the Facebook thread id. After the worker has read the
+inbox, `python -m channels.messenger_web ids` prints the thread ids that match `LIVE_ALLOW_MESSENGER_NAMES`, along
+with the ready-made `LIVE_ALLOW_MESSENGER_PERSONAL_IDS=` line. `renter_name` is the participant's display name,
+and `meta` carries `listing_title`, `marketplace`, `thread_url` and `autosend` (whether the name is allowlisted).
+In code, the same registration is
+`registry.register_channel("messenger_personal", make_live_provider())`.
 
 `send()` blocks for up to `MESSENGER_WEB_SEND_WAIT` (120 s by default) while the worker types and verifies.
 The usual wait is 5 to 20 s. Statuses are `sent` (verified), `sent_unverified` (the box cleared but the bubble

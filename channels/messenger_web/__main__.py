@@ -7,6 +7,8 @@
                                                               runs approved sends; keep it running next to
                                                               `python -m channels.live`
   channels/.venv/bin/python -m channels.messenger_web read     one poll now, then print counts (no text)
+  channels/.venv/bin/python -m channels.messenger_web ids      thread ids of the names in LIVE_ALLOW_MESSENGER_NAMES
+                                                              (put them in LIVE_ALLOW_MESSENGER_PERSONAL_IDS)
   channels/.venv/bin/python -m channels.messenger_web test-send <thread_id> "<text>"
                                                               send once through the worker; refused unless the
                                                               thread's name is in LIVE_ALLOW_MESSENGER_NAMES
@@ -97,6 +99,12 @@ def main(argv: list[str]) -> int:
                 Worker(page).run()
             except KeyboardInterrupt:
                 pass
+        return 0
+    if cmd == "ids":
+        from .adapter import allowlisted_thread_ids
+        ids = allowlisted_thread_ids()
+        print(json.dumps({"names_set": len(C.allowed_names()), "matching_threads": ids,
+                          "env_line": "LIVE_ALLOW_MESSENGER_PERSONAL_IDS=" + ",".join(ids)}, ensure_ascii=False))
         return 0
     if cmd == "test-send":
         if len(argv) != 3:

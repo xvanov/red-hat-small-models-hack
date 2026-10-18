@@ -120,3 +120,15 @@ class MessengerPersonal:
                 return (C.read_json(done, {}) or {}).get("result") or fail("worker wrote no result", "no_result")
             self.sleep(0.5)
         return fail("send in progress but unconfirmed; check the thread before retrying", "unconfirmed")
+
+
+def make_live_provider() -> MessengerPersonal:
+    """Factory for channels/live/registry.py (LIVE_EXTRA_CHANNELS="messenger_personal=channels.messenger_web.adapter:make_live_provider")."""
+    return MessengerPersonal()
+
+
+def allowlisted_thread_ids(root: Path | None = None) -> dict[str, str]:
+    """Thread ids whose participant name is in LIVE_ALLOW_MESSENGER_NAMES -> name. channels/live allowlists extra
+    channels by contact id (LIVE_ALLOW_MESSENGER_PERSONAL_IDS); this maps the owner's names to those ids."""
+    return {tid: t.get("name") for tid, t in _threads(Path(root) if root else C.data_dir()).items()
+            if C.name_allowed(t.get("name"))}
