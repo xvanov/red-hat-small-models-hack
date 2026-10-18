@@ -267,6 +267,8 @@ def score(rows: list[dict], preds: list[dict]) -> dict:
     tp, fp, fn_ = Counter(), Counter(), Counter()
     vague_total = vague_trapped = 0
     groups: dict[str, list[int]] = {}
+    exact_primary = 0
+    per_row: dict[str, dict] = {}
     for r in rows:
         p = by_id.get(r["id"], {})
         pred = p.get("pred")
@@ -276,10 +278,14 @@ def score(rows: list[dict], preds: list[dict]) -> dict:
             schema_ok += 1
         gold = canonical(r["output"])
         all_fields = True
+        primary_fields = True   # Amendment 1: reason scored on STATUS only (its value is free text)
+        unscorable = set(((r.get("meta") or {}).get("unscorable")) or [])
         for f in FIELDS:
             gs, gv = field_parts(f, gold)
             ps, pv = field_parts(f, pred)
             s_ok, v_ok = ps == gs, pv == gv
+            if f not in unscorable:
+                primary_fields &= s_ok and (v_ok or f == "reason")
             fstat[f] += s_ok
             fval[f] += v_ok
             fboth[f] += s_ok and v_ok
@@ -294,7 +300,12 @@ def score(rows: list[dict], preds: list[dict]) -> dict:
         l_ok = (pred or {}).get("language") == gold["language"]
         lang_ok += l_ok
         em = all_fields and g_int == p_int and l_ok
+        em_p = primary_fields and g_int == p_int and l_ok
         exact += em
+        exact_primary += em_p
+        meta = r.get("meta") or {}
+        per_row[r["id"]] = {"em": bool(em), "em_primary": bool(em_p),
+                            "cluster": meta.get("twin_id") or meta.get("thread_id") or meta.get("dialogue_id") or r["id"]}
         if em and (((pred or {}).get("move_in") or {}).get("raw") or None) == gold["move_in"]["raw"]:
             exact_raw += 1
         if gold["move_in"]["status"] == "vague":
@@ -315,6 +326,9 @@ def score(rows: list[dict], preds: list[dict]) -> dict:
     return {
         "n": n,
         "exact_match": round(exact / n, 4),
+        "exact_match_primary": round(exact_primary / n, 4),
+        "exact_match_primary_def": "all field statuses + lease/move-in date/phone/occupants values + intents + language; "
+                                   "reason on status only; fields marked unscorable in meta skipped (Amendment 1)",
         "exact_match_with_raw_span": round(exact_raw / n, 4),
         "json_valid": round(valid_json / n, 4),
         "schema_valid": round(schema_ok / n, 4),
@@ -330,7 +344,34 @@ def score(rows: list[dict], preds: list[dict]) -> dict:
         "errors": sum(1 for p in preds if p.get("error")),
         "latency_s": {"p50": round(lat[len(lat) // 2], 3) if lat else None,
                       "p95": round(lat[int(len(lat) * 0.95)], 3) if lat else None},
+        "_per_row": per_row,
     }
+
+
+def _sha256(path) -> str | None:
+    import hashlib
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def provenance(data_path) -> dict:
+    """Leakage review #8: tie every metrics file to its commit, data file and reader checkpoint."""
+    import subprocess
+
+    def git(*a):
+        try:
+            return subprocess.check_output(["git", *a], cwd=REPO, text=True, stderr=subprocess.DEVNULL).strip()
+        except Exception:  # noqa: BLE001
+            return None
+    ckpt = os.environ.get("READER_CHECKPOINT")   # path to model.safetensors of the served reader, if local
+    return {"commit": git("rev-parse", "HEAD"), "describe": git("describe", "--always", "--dirty"),
+            "data_path": str(data_path), "data_sha256": _sha256(data_path),
+            "prompt_sha256": _sha256(REPO / "reader" / "prompt.py"),
+            "checkpoint_sha256": _sha256(ckpt) if ckpt else None,
+            "checkpoint_note": None if ckpt else "set READER_CHECKPOINT to hash the served weights; release reader-v1 "
+                                                 "model.safetensors = 877c8843... (protocol 6.1)"}
 
 
 def main():
@@ -355,6 +396,7 @@ def main():
     load_env()
 
     rows = load_rows(a.split)
+    data_path = DATA / f"{a.split}.jsonl" if (DATA / f"{a.split}.jsonl").exists() else PUBLISHED / f"{a.split}.jsonl"
     if a.limit:
         rows = rows[:a.limit]
     if a.sample:
@@ -385,6 +427,8 @@ def main():
         label = a.label or re.sub(r"[^\w.-]", "_", a.model)
         info = {"backend": "endpoint", "model": a.model, "no_thinking": a.no_thinking, "json_mode": a.json_mode}
     m = {"label": label, "split": a.split, **info, "wall_s": round(time.time() - t0, 1), **score(rows, preds)}
+    per_row = m.pop("_per_row")
+    m["provenance"] = provenance(data_path)
     if a.sample:
         m["sample"] = {"n": len(rows), "seed": a.seed, "strata": "source x language x gold move_in status",
                        "ids": [r["id"] for r in rows]}
@@ -395,7 +439,7 @@ def main():
     Path(f"{stem}.metrics.json").write_text(json.dumps(m, indent=1, ensure_ascii=False) + "\n")
     with open(f"{stem}.preds.jsonl", "w") as fh:
         for p in preds:
-            fh.write(json.dumps(p, ensure_ascii=False) + "\n")
+            fh.write(json.dumps({**p, **per_row.get(p.get("id"), {})}, ensure_ascii=False) + "\n")
     short = {k: m[k] for k in ("exact_match", "json_valid", "intent_f1_micro", "language_acc")}
     short["vague_date_trap"] = m["vague_date_trap"]["rate"]
     short.update({f: m["fields"][f]["status_and_value_acc"] for f in FIELDS})
