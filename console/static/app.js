@@ -114,12 +114,18 @@ async function startDemo() {
 }
 
 // ================================================================ evidence panels
+function wilson(p, n) {  // 95% Wilson interval for a proportion measured on n items
+  if (p == null || !n) return null;
+  const z = 1.959964, d = 1 + z * z / n, c = (p + z * z / (2 * n)) / d, h = (z * Math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))) / d;
+  return [Math.max(0, c - h), Math.min(1, c + h)];
+}
+
 function ciBar(est, ci, cls = "", digits = 3, asPct = false) {
   const lo = ci ? ci[0] : est, hi = ci ? ci[1] : est;
   const f = (x) => (asPct ? pct(x, 0) : fix(x, digits));
   return `<div class="ci ${cls}" title="95% CI ${f(lo)} to ${f(hi)}"><span class="lbl">${asPct ? pct(est, 1) : fix(est, digits)}</span>
     <span class="trk"><span class="rng" style="left:${(100 * lo).toFixed(1)}%;width:${Math.max(0.6, 100 * (hi - lo)).toFixed(1)}%"></span>
-    <span class="pt" style="left:${(100 * est).toFixed(1)}%"></span></span><span class="cit">${f(lo)} to ${f(hi)}</span></div>`;
+    <span class="pt" style="left:${(100 * est).toFixed(1)}%"></span></span><span class="cit">${ci ? f(lo) + " to " + f(hi) : ""}</span></div>`;
 }
 
 async function loadTrust() {
@@ -153,11 +159,11 @@ async function loadTrust() {
         <div class="rd" style="width:${Math.max(0.8, 100 * rdB / lim).toFixed(1)}%" title="reader ${rdB}B"></div></div>
         <div class="lab"><span>operator ${opB}B + reader ${rdB}B = ${t.budget.used_b}B</span><span>limit ${lim}B</span></div></div>
       <div class="h3">Reader on the same ${R.sample_n || "?"} held-out messages <span class="muted">(exact match = every field right)</span></div>
-      <table class="t"><tr><th></th><th>exact match</th><th class="r">latency p50</th><th class="r">cost / read</th></tr>
-        <tr class="ours"><td>rentus-reader 0.6B, fine-tuned</td><td>${ciBar(R.sample.finetuned || 0, null, "", 3, true)}</td><td class="r">${fix(R.latency_p50_s, 2)} s</td><td class="r">$0</td></tr>
-        <tr><td>Claude Opus 5.5, prompted</td><td>${ciBar(R.opus_exact_match || 0, null, "base", 3, true)}</td><td class="r">${fix(R.opus_latency_p50_s, 1)} s</td><td class="r">$${fix(R.opus_cost_per_read_usd, 3)}</td></tr>
-        <tr><td>Lightning 30B, prompted</td><td>${ciBar(R.sample.lightning || 0, null, "base", 3, true)}</td><td></td><td></td></tr>
-        <tr><td>Rule-based fallback</td><td>${ciBar(R.sample.fallback || 0, null, "base", 3, true)}</td><td></td><td></td></tr>
+      <table class="t"><tr><th></th><th>exact match, 95% CI</th><th class="r">latency p50</th><th class="r">cost / read</th></tr>
+        <tr class="ours"><td>rentus-reader 0.6B, fine-tuned</td><td>${ciBar(R.sample.finetuned || 0, wilson(R.sample.finetuned, R.sample_n), "", 3, true)}</td><td class="r">${fix(R.latency_p50_s, 2)} s</td><td class="r">$0</td></tr>
+        <tr><td>Claude Opus 5.5, prompted</td><td>${ciBar(R.opus_exact_match || 0, wilson(R.opus_exact_match, R.sample_n), "base", 3, true)}</td><td class="r">${fix(R.opus_latency_p50_s, 1)} s</td><td class="r">$${fix(R.opus_cost_per_read_usd, 3)}</td></tr>
+        <tr><td>Lightning 30B, prompted</td><td>${ciBar(R.sample.lightning || 0, wilson(R.sample.lightning, R.sample_n), "base", 3, true)}</td><td></td><td></td></tr>
+        <tr><td>Rule-based fallback</td><td>${ciBar(R.sample.fallback || 0, wilson(R.sample.fallback, R.sample_n), "base", 3, true)}</td><td></td><td></td></tr>
       </table>
       <div class="note">${fin ? `Reliability is the weak spot: <b>${pct(fin.pass_all_runs, 0)}</b> of tasks pass in all ${fin.runs} runs, ${pct(fin.pass_any_run, 0)} in at least one. ` : ""}
         Reader trained on ${R.train_rows?.toLocaleString() || "?"} open and synthetic EN/ES messages in ${R.train_minutes || "?"} min; full test set (${R.test_rows} rows) ${pct(R.exact_match_full, 1)}.

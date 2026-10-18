@@ -51,10 +51,11 @@ The bar on top shows the step, a plain-language line for narration and the elaps
 
 `/approve` is a phone-sized page listing open escalations (who, their last message, the reason, the drafted reply) with **Approve / Edit / Deny**. Edit lets the owner rewrite the reply; the operator is told to send that exact text. Decisions are tagged `via phone` in the trace and the side panel. The console listens on 127.0.0.1 only; `scripts/tailnet_forward.py` (started by `scripts/demo.sh`) relays it to this machine's Tailscale address, so the phone opens `http://<tailscale-ip>:8080/approve` and nothing is exposed on the LAN. There is no login: the tailnet is the access control.
 
-## Evidence panels (bottom right, ⤢ makes them big)
+## Evidence panels (bottom right, ⤢ opens them full screen for the projector)
 
-- **Why trust it**: held-out operator score (ours vs baseline vs the Claude Opus 5.5 reference, with cost and time per task), reader exact match on the same 400 messages, who does what and the parameter budget, the published reader link. All numbers are read at request time from `gym/results/*/summary.json`, `per_task.jsonl` and `reader/results/*.metrics.json` (`console/panels.py`).
-- **Scoreboard**: the held-out ablation ladder, baseline → each change → final, plus the NeMo Gym `simple_agent` rows and the Opus reference.
+- **Why trust it**: held-out reward and pass rate with 95% intervals (final vs baseline), tasks better/worse with the Holm p-value, who does what and the parameter budget, the reader's exact match on the same 400 held-out messages (Wilson intervals) against Claude Opus 5.5 and Lightning prompted.
+- **Results**: every v2 held-out config (`gym/results/v2-heldout-<name>-s<seed>/`, discovered by name) with reward and pass-rate intervals drawn as whiskers, pass in every run, time per task; paired tests (Holm-corrected); per category baseline vs final. All computed at request time by `gym/stats.py` from `per_task.jsonl` (`/api/results`), so the panel matches `docs/results.md`. The superseded v1 ladder sits folded below it.
+- **Performance**: vLLM numbers from `serving/results/serve_bench.jsonl` (`/api/performance`): peak throughput, prefix caching on vs off (paired), reasoning off vs on, reader latency under operator load, request and error totals, with two small bar charts. Method in `docs/vllm.md`.
 - **Real world**: the live Facebook Page post (permalink parsed from docs/DECISIONS.md D20, thumbnail cached by `scripts/pilot_thumb.py`, a read-only Graph GET) and the shadow inbox counters from `runs/pilot/stats.json` (counts only; renter text is never read here).
 
 ## Verification
@@ -63,11 +64,14 @@ The bar on top shows the step, a plain-language line for narration and the elaps
 
 ## Page
 
-- **Owner** (left): chat. The first message starts a run; later messages go to the running operator.
-- **Channels** (middle): one lane each for marketplace, roomies, craigslist, padsplit, sms, email. Listing cards on top (with a screenshot thumbnail when a live adapter returns `screenshot`), threads below as messages arrive.
-- **Right**: demand register with gate ticks (lease, move-in, phone, reason, occupants: ✓ answered, ~ vague, ✗ no), owner escalations with Approve / Deny, ops jobs, quotes and spend vs limit.
-- **Bottom**: live trace, color-coded by kind, each row labeled with who acted (operator + model, reader, verifier = code, scripted renter, owner); scoreboard from `results/*/summary.json` and `gym/results/*/summary.json` (baseline vs improved, with delta).
-- **Header**: model badges, **Demo run**, speed (0.5× to 10×, paces tool calls, renter arrivals and demo pauses), Gym scenario picker, **Break something** (page changed and login wall hit the next `publish_listing`, rate limited the next `send_message`, malformed the next `read_reply`, timeout the next `request_quote`; any tool can be picked) which appends a contract §5 fault to the running world's `faults`, and **Reset**.
+Light and dark themes (follows the system, ◐ toggles). Built for a 1920×1080 recording; works at 1680 and stacks on narrow screens.
+
+- **Top bar**: product name, live model badges (operator Lightning on vLLM, reader 0.6B; grey when the endpoint is down), parameters used of 33B, spend of the owner's limit, run state; **▶ Demo run**, speed, **Gym ▾** (scenario picker), **Break something ▾**, **Reset**.
+- **Demo bar** (while a demo plays): five-step progress, the current step's title and narration line, elapsed time, and the phone URL with a QR code (it pulses when the owner's decision is waiting).
+- **Left**: the owner conversation (instructions, the operator's reports per turn) and **Needs you**: open escalations with the renter's last message, the drafted reply and Approve / Edit / Deny, plus proposed showings waiting for confirmation.
+- **Center**: the leasing pipeline. A channel strip (listing, then each channel live / not posted / failed with its thread count), then renter cards in Inquiries → Qualified → Showing → Application by register status. Each card shows the five gate items as a progress bar (green exact, striped amber vague, red no), key facts and the last two messages. **Maintenance** appears under it once a tenant writes or a job opens: quotes (the booked one highlighted), spend vs limit, the tenant thread.
+- **Right**: the demand register (everyone who wrote, status, what they want, reconnect dates) and **Supply signals**: demand clusters by area, type and $150 budget band (docs/spec/concierge.md 5.3), WATCH at 3 active, SUPPLY SIGNAL at 5 qualified. When a person stated no criteria, the room they asked about stands in and the cluster says so. Any `supply_signals` the tools write into the world are listed too.
+- **Bottom**: the live trace, grouped per turn (each group opens on an owner instruction or a renter message and counts steps and recoveries). A tool call and its result share one row; the reasoning behind a call is in the row's tooltip. Actors are color-coded: operator (Lightning), reader (0.6B), router, verifier (code), tools, scripted renters and vendors. Errors, retries, verifier catches, fallbacks and injected faults are highlighted; **recoveries only** filters to them. Older groups fold unless they hold a recovery. The ▾ button collapses trace and evidence.
 
 ## API
 
@@ -77,6 +81,8 @@ The bar on top shows the step, a plain-language line for narration and the elaps
 | GET | `/api/scenarios` | gym tasks |
 | GET | `/api/scoreboard` | held-out ladder from `gym/results/*/summary.json` |
 | GET | `/api/trust` `/api/realworld` | evidence panels (`console/panels.py`) |
+| GET | `/api/results` | v2 held-out configs with 95% CIs, paired Holm tests, per category (`gym/stats.py`) |
+| GET | `/api/performance` | vLLM serving benchmarks (`serving/results/serve_bench.jsonl`) |
 | POST | `/api/demo` `/api/demo/speed` `/api/reset` | demo run, its speed, stop and clear |
 | GET | `/approve`, `/api/approvals` | phone view and its data (open escalations first) |
 | GET/POST | `/api/runs` | list / start `{goal?, scenario_id?, speed?}` |
