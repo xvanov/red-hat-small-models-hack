@@ -114,22 +114,26 @@ def poll_all(store: Store, provs: dict | None = None, allow: config.Allowlist | 
     since = datetime.fromisoformat(st["started"])
     seen_all = st.setdefault("seen", {})
     sources = [(f"sms:{n}", p) for n, p in (provs.get("sms") or {}).items()]
-    sources += [(k, provs[k]) for k in ("email", "messenger") if provs.get(k) is not None]
+    sources += [(k, provs[k]) for k in ("email", "email_zoho", "messenger") if provs.get(k) is not None]
     registry.load_from_env()
     sources += [(name, spec.provider) for name, spec in registry.EXTRA.items()]
     touched: list[str] = []
     errors = st.setdefault("errors", {})
     demo_on = demo.enabled()
+    src_start = st.setdefault("source_started", {})
     for key, prov in sources:
         seen = set(seen_all.get(key, []))
+        # a source added later (e.g. the Zoho info@ inbox) only answers mail that arrives after it was added
+        src_start.setdefault(key, now_iso())
+        since_k = max(since, datetime.fromisoformat(src_start[key])) if key == "email_zoho" else since
         try:
-            if demo_on and key.split(":")[0] in ("sms", "email", "messenger"):
+            if demo_on and key.split(":")[0] in ("sms", "email", "email_zoho", "messenger"):
                 kw = {"include_unlisted": True}
                 if key == "email":
                     kw["demo_to"] = demo.email_to()
-                items = prov.poll(allow, since, seen, **kw)
+                items = prov.poll(allow, since_k, seen, **kw)
             else:
-                items = prov.poll(allow, since, seen)
+                items = prov.poll(allow, since_k, seen)
             errors.pop(key, None)
         except Exception as e:
             errors[key] = f"{type(e).__name__}: {str(e)[:150]}"
@@ -163,6 +167,8 @@ def poll_all(store: Store, provs: dict | None = None, allow: config.Allowlist | 
                             s = s.split(":", 1)[1].strip()
                         em["subject"] = s
                     em["references"] = (meta.get("references") or []) + [meta.get("message_id")]
+                    if meta.get("inbox") == "zoho" and not listed:  # strangers to info@: keep the conversation on info@
+                        em["reply_to"] = "info@rentus.homes"
                 if providers.is_opt_out(it["text"]) and (it["channel"] == "sms" or t.get("demo")):
                     t["opted_out"] = True
                     t["pending_turn"] = False
@@ -177,6 +183,7 @@ def poll_all(store: Store, provs: dict | None = None, allow: config.Allowlist | 
     with store.locked():
         cur = store.state()
         cur["seen"] = {**cur.get("seen", {}), **seen_all}
+        cur["source_started"] = {**src_start, **cur.get("source_started", {})}
         cur["errors"] = errors
         cur["last_poll"] = now_iso()
         store.save_state(cur)
@@ -330,7 +337,11 @@ def flush(store: Store, thread_id: str, channel: str, renter_text: str) -> dict 
     with store.locked():
         tt = store.get_thread(thread_id) or {}
     if tt.get("demo") and not tt.get("disclosed") and parts:
-        parts[0] = demo.disclosure() + ("\n\n" if channel == "email" else " ") + parts[0]
+        d = demo.disclosure()
+        if channel == "email":  # the email already opens with "Hi <name>,"
+            d = d.removeprefix("Hi, ")
+            d = d[:1].upper() + d[1:]
+        parts[0] = d + ("\n\n" if channel == "email" else " ") + parts[0]
     results = [outbound.deliver(store, thread_id, p, origin="operator") for p in parts]
     ok = all(r.get("status") in ("sent", "awaiting_approval") for r in results)
     if tt.get("demo") and any(r.get("status") == "sent" for r in results):

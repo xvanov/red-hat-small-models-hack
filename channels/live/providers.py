@@ -151,6 +151,145 @@ def body_text(msg) -> str:
     return txt
 
 
+PLATFORM_DOMAINS = ("zillow.com", "furnishedfinder.com", "facebook.com", "facebookmail.com", "padsplit.com",
+                    "roomies.com", "craigslist.org", "resend.com", "resend.dev", "sendgrid.net", "sendgrid.com",
+                    "twilio.com", "google.com", "accounts.google.com", "zoho.com", "zohocorp.com", "apartments.com",
+                    "hotpads.com", "trulia.com", "rent.com", "stripe.com", "intuit.com")
+AUTO_LOCAL = re.compile(r"^(no-?reply|do-?not-?reply|mailer-daemon|postmaster|bounces?|notifications?|notify|"
+                        r"alerts?|news(letter)?|marketing|support|billing|calendar|invitations?|team|hello)([+._-].*)?$")
+
+
+def is_automated_email(msg) -> bool:
+    """Bot-loop guard for inbound mail: auto-replies, lists, bulk, no-reply / platform notification senders,
+    calendar invites."""
+    auto = str(msg.get("Auto-Submitted", "no")).strip().lower()
+    if auto not in ("", "no"):
+        return True
+    if any(msg.get(h) for h in ("List-Id", "List-Unsubscribe", "List-Post", "X-Autoreply", "X-Autorespond",
+                                "X-Auto-Response-Suppress")):
+        return True
+    if str(msg.get("Precedence", "")).strip().lower() in ("bulk", "junk", "list", "auto_reply"):
+        return True
+    frm = [a.lower() for _, a in getaddresses(msg.get_all("From", []))]
+    if frm:
+        local, _, dom = frm[0].partition("@")
+        if AUTO_LOCAL.match(local) or any(dom == d or dom.endswith("." + d) for d in PLATFORM_DOMAINS):
+            return True
+    if any(p.get_content_type() == "text/calendar" for p in msg.walk()):
+        return True
+    subj = str(msg.get("Subject", "")).lower()
+    return subj.startswith(("invitation:", "updated invitation", "accepted:", "declined:", "automatic reply",
+                            "out of office", "undeliverable", "delivery status notification"))
+
+
+def parse_inbox_message(raw: bytes, *, ours: set, internal_ts: datetime | None = None) -> dict | None:
+    """Raw RFC 822 bytes -> inbound item for the email channel, or None for our own mail. `ours` = lowercase
+    addresses that are us (info@rentus.homes, the Gmail login, ...). meta.automated flags bot mail."""
+    msg = email.message_from_bytes(raw, policy=email.policy.default)
+    frm = getaddresses(msg.get_all("From", []))
+    if not frm or not frm[0][1]:
+        return None
+    addr = frm[0][1].lower()
+    if addr in ours:
+        return None
+    mid = str(msg.get("Message-ID", "")).strip()
+    if not mid:
+        return None
+    ts = internal_ts or _dt(str(msg.get("Date", "")))
+    return {"channel": "email", "contact": addr, "text": strip_quoted(body_text(msg)), "ext_id": mid,
+            "ts": ts.isoformat() if ts else None, "line": "info@rentus.homes", "line_last4": None,
+            "renter_name": frm[0][0] or None,
+            "meta": {"subject": str(msg.get("Subject", "")), "message_id": mid,
+                     "references": str(msg.get("References", "")).split(), "automated": is_automated_email(msg),
+                     "in_reply_to": str(msg.get("In-Reply-To", "")).strip(), "inbox": "zoho"}}
+
+
+class ZohoInbox:
+    """Read-only IMAP poller for info@rentus.homes (Zoho). SELECT ... READONLY + BODY.PEEK: nothing is marked
+    seen, moved or deleted. Creds: ZOHO_IMAP_USER / ZOHO_IMAP_PASSWORD in the repo .env (never printed)."""
+    channel = "email"
+    HOST = "imappro.zoho.com"
+
+    def __init__(self, user: str, password: str, ours: set, imap_factory=None):
+        self.user, self.password = user, password
+        self.ours = {a.lower() for a in ours} | {user.lower()}
+        self.imap_factory = imap_factory or (lambda: imaplib.IMAP4_SSL(self.HOST, 993))
+        self.display = user
+
+    def __repr__(self) -> str:
+        return "ZohoInbox(<set>)"
+
+    def connected(self) -> tuple[bool, str]:
+        try:
+            c = self.imap_factory()
+            c.login(self.user, self.password)
+            typ, data = c.select("INBOX", readonly=True)
+            c.logout()
+        except Exception as e:
+            return False, "Zoho IMAP login failed: " + type(e).__name__
+        return typ == "OK", f"info@ inbox readable (read-only, {int(data[0] or 0)} messages)"
+
+    def stats(self) -> dict:
+        """Count and newest UIDs only (no content)."""
+        c = self.imap_factory()
+        try:
+            c.login(self.user, self.password)
+            typ, data = c.select("INBOX", readonly=True)
+            typ, uids = c.uid("SEARCH", None, "ALL")
+            u = (uids[0] or b"").split()
+            return {"messages": int(data[0] or 0), "last_uids": [x.decode() for x in u[-5:]]}
+        finally:
+            try:
+                c.logout()
+            except Exception:
+                pass
+
+    def poll(self, allow: config.Allowlist, since: datetime, seen: set, include_unlisted: bool = False) -> list[dict]:
+        out = []
+        c = self.imap_factory()
+        try:
+            c.login(self.user, self.password)
+            if c.select("INBOX", readonly=True)[0] != "OK":
+                return []
+            typ, data = c.uid("SEARCH", None, "SINCE", since.strftime("%d-%b-%Y"))
+            for uid in ((data[0] or b"").split() if typ == "OK" else [])[-60:]:
+                try:
+                    typ, parts = c.uid("FETCH", uid, "(INTERNALDATE BODY.PEEK[])")
+                    raw = next((p[1] for p in parts or [] if isinstance(p, tuple) and len(p) > 1), None)
+                    if typ != "OK" or raw is None:
+                        continue
+                    head = b" ".join(p[0] for p in parts if isinstance(p, tuple))
+                    its = None
+                    m = re.search(rb'INTERNALDATE "([^"]+)"', head)
+                    if m:
+                        its = datetime.strptime(m.group(1).decode().strip(), "%d-%b-%Y %H:%M:%S %z")
+                    item = parse_inbox_message(raw, ours=self.ours, internal_ts=its)
+                except Exception:
+                    continue
+                if not item or item["ext_id"] in seen:
+                    continue
+                if item["ts"] and _dt(item["ts"]) < since:
+                    continue
+                if not include_unlisted and item["contact"] not in allow.emails:
+                    continue
+                out.append(item)
+        finally:
+            try:
+                c.logout()
+            except Exception:
+                pass
+        return sorted(out, key=lambda x: x["ts"] or "")
+
+
+def zoho_inbox() -> "ZohoInbox | None":
+    u, pw = config.env("ZOHO_IMAP_USER"), config.env("ZOHO_IMAP_PASSWORD")
+    if not (u and pw):
+        return None
+    ec = config.email_cfg()
+    ours = {"info@rentus.homes"} | ({ec.from_addr, ec.imap_user, ec.reply_to} if ec else set())
+    return ZohoInbox(u, pw, ours)
+
+
 class ResendGmailEmail:
     channel = "email"
     FOLDER = '"[Gmail]/All Mail"'
@@ -175,9 +314,9 @@ class ResendGmailEmail:
 
     def send(self, to: str, text: str, *, subject: str, in_reply_to: str | None = None,
              references: list[str] | None = None, html: str | None = None,
-             extra_headers: dict | None = None) -> dict:
+             extra_headers: dict | None = None, reply_to: str | None = None) -> dict:
         payload = {"from": f"{self.cfg.from_name} <{self.cfg.from_addr}>", "to": [to], "subject": subject,
-                   "text": text, "reply_to": self.cfg.reply_to}
+                   "text": text, "reply_to": reply_to or self.cfg.reply_to}
         if html:
             payload["html"] = html
         headers = dict(extra_headers or {})
@@ -264,10 +403,7 @@ class ResendGmailEmail:
             return None
         subj = str(msg.get("Subject", ""))
         refs = str(msg.get("References", "")).split()
-        auto = str(msg.get("Auto-Submitted", "no")).strip().lower()
-        automated = (auto not in ("", "no") or any(msg.get(h) for h in ("List-Id", "List-Unsubscribe", "X-Autoreply",
-                                                                         "X-Autorespond"))
-                     or str(msg.get("Precedence", "")).strip().lower() in ("bulk", "junk", "list", "auto_reply"))
+        automated = is_automated_email(msg)
         return {"channel": "email", "contact": addr, "text": strip_quoted(body_text(msg)),
                 "ext_id": mid, "ts": ts.isoformat() if ts else None, "line": self.cfg.from_addr,
                 "line_last4": None, "renter_name": (getaddresses(msg.get_all("From", []))[0][0] or None),

@@ -53,7 +53,7 @@ def is_automated(channel: str, contact: str, meta: dict | None = None) -> bool:
         if re.search(r"(^|[._+-])(no-?reply|do-?not-?reply|mailer-daemon|postmaster|bounce[s]?|notifications?)"
                      r"([._+-]|@)", c):
             return True
-        return bool(meta.get("automated"))
+        return bool(meta.get("automated")) or c.endswith("@rentus.homes")
     return False
 
 

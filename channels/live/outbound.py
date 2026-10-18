@@ -27,6 +27,7 @@ def get_providers() -> dict:
         ec = config.email_cfg()
         _PROVIDERS = {"sms": {ln.name: providers.TwilioSms(ln) for ln in config.sms_lines()},
                       "email": providers.ResendGmailEmail(ec) if ec else None,
+                      "email_zoho": providers.zoho_inbox(),
                       "messenger": providers.Messenger()}
     return _PROVIDERS
 
@@ -92,7 +93,8 @@ def _provider_send(t: dict, text: str) -> dict:
         plain, html = compose.email_body(t, text, signoff=config.env("LIVE_EMAIL_SIGNOFF") or "Kalin\nRentus Homes")
         return prov.send(t["contact"], plain, subject=email_subject(t), html=html,
                          in_reply_to=last_in["ext_id"] if last_in else None, references=em.get("references"),
-                         extra_headers={"X-Rentus-Ref": f"{email_ref(t)}-{t.get('_send_id', '')}".rstrip("-")})
+                         extra_headers={"X-Rentus-Ref": f"{email_ref(t)}-{t.get('_send_id', '')}".rstrip("-")},
+                         reply_to=em.get("reply_to"))
     from . import registry
     if ch in registry.EXTRA:
         try:

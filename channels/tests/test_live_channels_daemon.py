@@ -66,9 +66,10 @@ class FakeEmail:
     def poll(self, allow, since, seen):
         return [m for m in self.inbox if m["ext_id"] not in seen]
 
-    def send(self, to, text, *, subject, in_reply_to=None, references=None, html=None, extra_headers=None):
+    def send(self, to, text, *, subject, in_reply_to=None, references=None, html=None, extra_headers=None,
+             reply_to=None):
         self.sent.append({"to": to, "text": text, "subject": subject, "in_reply_to": in_reply_to,
-                          "references": references, "html": html, "headers": extra_headers})
+                          "references": references, "html": html, "headers": extra_headers, "reply_to": reply_to})
         return {"ok": True, "provider_id": f"em{len(self.sent)}", "status": "accepted"}
 
 
@@ -82,6 +83,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("LIVE_ALLOW_MESSENGER_PSIDS", "")
     monkeypatch.setenv("LIVE_SEND_ENABLED", "1")
     monkeypatch.setenv("LIVE_MAX_PER_HOUR", "30")
+    for k in ("LIVE_PUBLIC_MODE", "LIVE_PUBLIC_DEMO", "LIVE_ROLE_SMS", "LIVE_ROLE_EMAIL", "LIVE_ROLE_MESSENGER",
+              "LIVE_LEASE_LINK_URL", "LIVE_DEMO_EMAIL_TO"):
+        monkeypatch.setenv(k, "")
     tf, loc, em = FakeSms("tollfree", "+18885550001"), FakeSms("local", "+19105550002"), FakeEmail()
     outbound.set_providers({"sms": {"tollfree": tf, "local": loc}, "email": em, "messenger": None})
     yield {"store": Store(), "tf": tf, "loc": loc, "email": em, "dir": tmp_path / "live"}
@@ -744,3 +748,97 @@ def test_open_mode_owner_contacts_keep_their_role(open_env, monkeypatch):
     daemon.poll_all(open_env["store"])
     s = api.list_threads()[0]
     assert s["role"] == "tenant" and not s["demo"]
+
+
+# ---------------------------------------------------------------- Zoho info@ inbox (read-only) + skip rules
+
+def _raw(frm, subject="Room on Appling Way", body="Hi, is the room still available?", **headers):
+    from email.message import EmailMessage
+    m = EmailMessage()
+    m["From"], m["To"], m["Subject"] = frm, "info@rentus.homes", subject
+    m["Message-ID"] = f"<{abs(hash((frm, subject)))}@mail.example>"
+    m["Date"] = "Sun, 18 Oct 2026 08:30:00 -0400"
+    for k, v in headers.items():
+        m[k.replace("_", "-")] = v
+    m.set_content(body)
+    return m
+
+
+def test_zoho_parse_and_skip_rules():
+    from channels.live import providers as pv
+    ours = {"info@rentus.homes"}
+    human = pv.parse_inbox_message(bytes(_raw("Jane Doe <jane@example.com>")), ours=ours)
+    assert human["contact"] == "jane@example.com" and not human["meta"]["automated"]
+    assert human["renter_name"] == "Jane Doe" and human["meta"]["inbox"] == "zoho"
+    assert pv.parse_inbox_message(bytes(_raw("Rentus Homes <info@rentus.homes>")), ours=ours) is None
+    bots = [_raw("Jane <jane@example.com>", Auto_Submitted="auto-replied"),
+            _raw("News <jane@example.com>", List_Unsubscribe="<mailto:x@y>"),
+            _raw("Jane <jane@example.com>", Precedence="bulk"),
+            _raw("No Reply <no-reply@example.com>"),
+            _raw("Zillow <notifications@zillow.com>"),
+            _raw("FF <leads@furnishedfinder.com>"),
+            _raw("Jane <jane@example.com>", subject="Invitation: Showing @ Sat"),
+            _raw("Jane <jane@example.com>", subject="Automatic reply: Room")]
+    cal = _raw("Jane <jane@example.com>")
+    cal.add_attachment(b"BEGIN:VCALENDAR", maintype="text", subtype="calendar", filename="invite.ics")
+    bots.append(cal)
+    for b in bots:
+        assert pv.parse_inbox_message(bytes(b), ours=ours)["meta"]["automated"], b["From"]
+    assert demo.is_automated("email", "jane@example.com", {"automated": True})
+
+
+class FakeImap:
+    def __init__(self, msgs):
+        self.msgs, self.calls = msgs, []
+
+    def login(self, u, p):
+        pass
+
+    def select(self, box, readonly=False):
+        assert readonly is True
+        return "OK", [str(len(self.msgs)).encode()]
+
+    def uid(self, cmd, *args):
+        self.calls.append((cmd, args))
+        if cmd == "SEARCH":
+            return "OK", [" ".join(str(i + 1) for i in range(len(self.msgs))).encode()]
+        assert "BODY.PEEK[]" in args[1] and "INTERNALDATE" in args[1]
+        idate, raw = self.msgs[int(args[0]) - 1]
+        return "OK", [(f'{args[0].decode()} (INTERNALDATE "{idate}" BODY[] {{1}}'.encode(), raw), b")"]
+
+    def logout(self):
+        pass
+
+
+def test_zoho_poll_is_read_only_and_skips_backlog():
+    from datetime import datetime, timezone
+    from channels.live import providers as pv
+    imap = FakeImap([("18-Oct-2026 07:00:00 -0400", bytes(_raw("Old <old@example.com>", subject="old"))),
+                     ("18-Oct-2026 08:30:00 -0400", bytes(_raw("Jane <jane@example.com>"))),
+                     ("18-Oct-2026 08:31:00 -0400", bytes(_raw("Rentus <info@rentus.homes>", subject="copy")))])
+    z = pv.ZohoInbox("info@rentus.homes", "pw", {"info@rentus.homes"}, imap_factory=lambda: imap)
+    since = datetime(2026, 10, 18, 12, 0, tzinfo=timezone.utc)  # 08:00 ET
+    items = z.poll(config.Allowlist(), since, set(), include_unlisted=True)
+    assert [i["contact"] for i in items] == ["jane@example.com"]
+    assert z.poll(config.Allowlist(), since, set(), include_unlisted=False) == []
+    assert all(c[0] in ("SEARCH", "FETCH") for c in imap.calls)
+
+
+def test_zoho_stranger_reply_stays_on_info(open_env):
+    from datetime import datetime, timezone
+    item = {"channel": "email", "contact": "jane@example.com", "text": "Is the room available?",
+            "ext_id": "<j1@mail>", "ts": datetime.now(timezone.utc).isoformat(), "line": "info@rentus.homes",
+            "line_last4": None, "renter_name": "Jane Doe",
+            "meta": {"subject": "Room on Appling Way", "message_id": "<j1@mail>", "references": [],
+                     "automated": False, "inbox": "zoho"}}
+
+    class Z:
+        def poll(self, allow, since, seen, include_unlisted=False):
+            return [item] if include_unlisted and item["ext_id"] not in seen else []
+
+    outbound.get_providers()["email_zoho"] = Z()
+    _tick(open_env)
+    sent = open_env["email"].sent[-1]
+    assert sent["to"] == "jane@example.com" and sent["reply_to"] == "info@rentus.homes"
+    assert sent["subject"] == "Re: Room on Appling Way" and sent["in_reply_to"] == "<j1@mail>"
+    assert sent["text"].startswith("Hi Jane,\n\nYou're chatting with Rentus Homes' AI assistant.")

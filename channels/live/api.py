@@ -39,6 +39,9 @@ def status() -> dict:
     for name, p in (provs.get("sms") or {}).items():
         ok, detail = _connected(p)
         chans.append({"channel": "sms", "line": p.display, "line_name": name, "connected": ok, "detail": detail})
+    if provs.get("email_zoho") is not None:
+        ok, detail = _connected(provs["email_zoho"])
+        chans.append({"channel": "email", "line": "info@rentus.homes (inbox)", "connected": ok, "detail": detail})
     for key in ("email", "messenger"):
         p = provs.get(key)
         if p is None:
