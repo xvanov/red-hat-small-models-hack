@@ -14,6 +14,8 @@
 # Env: FRONTIER_MODEL (claude-opus-5-5 | claude-fable-5-1, default claude-opus-5-5), FRONTIER_EFFORT
 #      (default high), FRONTIER_WORKERS (default 3, max 3), FREEZE_COMMIT (if set, refuse when anything
 #      under gym/frozen_paths.txt differs from it), PREFIX (default <taskset>-<split>-frontier-cc-),
+#      OPERATOR_CONFIG (JSON RunConfig overrides passed as --operator-config, e.g. the Amendment 6 final config
+#      '{"prompt_version":"v4","tool_descriptions":"concierge","guard_stand_down":true}'),
 #      PRINT_RUN_NAMES=1 (print the run names this call would write, one per line, and exit: no setup, no calls).
 # Run names for the confirmatory plan: `scripts/frontier_ref.sh gym/tasks/v3/heldout.jsonl 1,2,3,4,5` writes
 # v3-heldout-frontier-cc-guard+prompt3+style+rhist+readermodel-s1..s5, the names gym/confirmatory_v3.json lists
@@ -70,8 +72,9 @@ EOF
   fi
 fi
 
-echo "frontier reference: $MODEL effort=$EFFORT via $(claude --version 2>/dev/null) | tasks $TASKS | variant $VARIANT | repeats $SEEDS | workers $WORKERS"
+echo "frontier reference: $MODEL effort=$EFFORT operator_config=${OPERATOR_CONFIG:-none} via $(claude --version 2>/dev/null) | tasks $TASKS | variant $VARIANT | repeats $SEEDS | workers $WORKERS"
 for s in ${SEEDS//,/ }; do
   "$PY" gym/ablate.py --run-name _ --tasks-file "$TASKS" --variants "$VARIANT" --api claude_code \
-    --model "$MODEL" --effort "$EFFORT" --prefix "$PREFIX" --seed-tag="-s$s" --workers "$WORKERS" --retry-errors 3
+    --model "$MODEL" --effort "$EFFORT" --prefix "$PREFIX" --seed-tag="-s$s" --workers "$WORKERS" --retry-errors 3 \
+    ${OPERATOR_CONFIG:+--operator-config "$OPERATOR_CONFIG"}
 done

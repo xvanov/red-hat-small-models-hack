@@ -469,3 +469,39 @@ Made before `data/published/twins/reader_test.jsonl` exists, so before anyone (p
 | 12 × 6 = 72 | not reachable | 0.18 / 0.20 |
 
   Reading: at the observed 19% disagreement between the fine-tuned reader and Opus (synthetic set), H2a/H2b detect only a true difference of about **15 to 20 points**; if the systems disagree on 10% of rows or fewer, H2 cannot reach 80% power at all. H2a and H2b stay in the family (m = 5 unchanged); a non-rejection is reported as "not shown", never as "no difference". The report states the realized thread count and rows per thread.
+
+## Amendment 6 (2026-10-18 ~06:20 ET): configurations, frontier repeats and power at the realized v3 size; written before any model has run on `gym/tasks/v3/heldout.jsonl`
+
+Made after the v3 held-out set was built and hashed (`data/twins/splits.json` `frozen_sha256`, verified and committed in `4dd0362`) and **before any model run on it**. Nobody has read a v3 held-out task's model output; no v3 result exists. Where this and earlier sections disagree, this section wins.
+
+**Configurations (replaces §4.1's `final` / `final+router` / frontier rows).** The confirmatory `final` configuration is the one chosen on development data only (`docs/results.md`, "Development iterations (not confirmatory)": Messenger conformance scenarios, concierge train, v2 TRAIN; no v2/v3 held-out file or result was opened):
+
+| name | variant + overrides | what it is |
+|---|---|---|
+| baseline | `base` (unchanged) | v1 settings: `RunConfig()`, prompt v1, verbose tool descriptions, rule-based reader fallback |
+| final | `guard+prompt3+style+rhist+readermodel` with `--operator-config '{"prompt_version":"v4","tool_descriptions":"concierge","guard_stand_down":true}'` | prompt v4 (`operator/prompts/system_v4.md`), concierge tool descriptions, renter guard (3 rounds) with stand-down on owner-held threads, deterministic verifier, style pre-check, reasoning kept in history, fine-tuned 0.6B reader; `burst_guard` off |
+| final+router | the same + `router` | final with the triage router |
+| frontier (reference) | `scripts/frontier_ref.sh` with `OPERATOR_CONFIG` = the same overrides | Claude Opus 5.5 through the owner's local Claude Code (D26), effort high, the same prompt v4, concierge tools, verifier, guard and fine-tuned reader. `guard_stand_down` is a no-op on v3 (no v3 held-out task has an owner-held thread) and the Claude Code path does not implement it, so the two harnesses do not differ on this set |
+
+The variant spec still reads `prompt3` because the overrides are applied after it (`run_eval.evaluate` applies `--operator-config` last); every `summary.json` records the resolved `config` (`prompt_version: v4`), and the analysis checks it. `gym/confirmatory_v3.json` holds the exact launch commands and `final_operator_config`. H1b (prompt v4 as a separate candidate) is dropped: v4 **is** `final` now. The L-6 caveat still applies to H1: prompt v4 was written from `docs/spec/concierge.md`, which comes from the owner's Oct 4 to 18 sessions inside the held-out window, so H1 is "informed by the held-out window's rules" (not its threads); H1 without the two tasks tagged `rules_period >= 2026-10-04` is reported as secondary.
+
+**Seeds and repeats.** Lightning configs: operator seeds 1 to 5 (unchanged). **Frontier: 2 repeats** (was 5): about 22 tasks × 2 at ≤ 3 concurrent Claude Code sessions is what fits before the 08:30 cut-off. Decided now, before any run; not revisited after seeing results.
+
+**Concurrency.** Up to 15 concurrent operator rollouts on the GPU (three Lightning configs × `--workers 5` in parallel, ≤ 16 as allowed by the coordinator); the frontier at 3. Latencies stay indicative only.
+
+**Owner sign-offs.** At freeze time the owner has finished the blind H2 labels and adjudicated the two rule-based audit flags (relayed by the coordinating session; `FREEZE-SIGNOFF blind-labels` in `docs/DECISIONS.md`). The other sign-offs (`realism-7.1`, `label-check-7.2`, `playbooks-7.4`, `protocol-7.5`, `cutoff-N12`) are **not** recorded. The freeze proceeds anyway (`scripts/freeze.py --write --record-missing-signoffs`, which lists them in the manifest as `missing_signoffs_at_freeze`), and the consequences in `docs/FREEZE.md` §1 apply to each: v3 is reported as "synthetic, realism not confirmed"; the 7.2 label check is not done, so task-deciding labels are unverified by the owner; the playbooks and the 45-day showing window are not owner-approved as scoring sources, so the showing-required check is reported both with and without; the protocol is not owner-signed. These are reported next to every v3 result.
+
+**Size and honest power.** The realized v3 held-out set is small: **22 leasing tasks** (`gym/tasks/v3/heldout.jsonl`) plus **1 experimental ops task** (`heldout_ops.jsonl`, never pooled, outside the family). The H2 owner gold is 61 rows from 22 threads (2.8 rows per thread). Power by simulation of the exact decision rules (`gym/stats.py` `detectable` / `simulate_power`, v2 variance components from `gym/results/power-amendment1.txt`, 200 simulated studies × 500 bootstrap resamples), true difference needed for 80% power at n = 22:
+
+| hypothesis | seeds (a/b) | α = 0.025 (Holm last) | α = 0.005 (Holm first) |
+|---|---|---|---|
+| H1 superiority | 5/5 | +0.135 | +0.175 |
+| H3(ii) non-inferiority, δ = 0.05 | 5/5 | +0.013 | +0.030 |
+| H4 non-inferiority, δ = 0.05 (frontier 2 repeats) | 5/2 | +0.029 | +0.052 |
+| (H4 with 1 repeat, for comparison) | 5/1 | +0.052 | +0.081 |
+
+Reading: H1 is powered only for a large effect (v2 showed +0.36, so it remains testable). **H3(ii) and H4 need the true difference to be positive** (local at least as good as the comparator, by about 0.01 to 0.05) to reach 80% power; a failure is "not shown", never "inferior". For H2 (22 threads × 2.8 rows), the Amendment 5 table applies (nearest row 18 × 4): with 20% disagreement only a true exact-match difference of about 15 to 20 points is detectable; with 10% disagreement 80% power is not reachable. The family stays m = 5, one-sided, familywise α = 0.025, Holm, untested = p 1.
+
+**Commands** are those in `gym/confirmatory_v3.json` `"launch"`, run from a clean git worktree at the freeze commit (so other lanes' uncommitted edits cannot dirty frozen paths during the runs), with result directories copied back into `gym/results/` and committed. Reader H2: `reader/eval.py --rows-file data/published/twins/owner_gold.jsonl --label {finetuned,lightning,frontier}-twin` (confirmatory), the same on `reader_test.jsonl` (secondary, reader-made gold) and on the 29-row pilot (`data/twins/fixtures/out/reader_test.jsonl` with the owner's pilot labels; Amendment 4, descriptive only).
+
+**Secondary, exploratory, if time remains:** the final config on v2 held-out, 3 seeds (contaminated set, §0).

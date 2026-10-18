@@ -51,6 +51,7 @@ ARTIFACTS: list[tuple[str, str, bool]] = [
     ("gym/rentus_env/v3_rules.py", "scorer: v3 rules", True),
     ("tools/rentus_tools/impl/inbox.py", "sandbox inbox tool", True),
     ("operator/prompts/system_v3.md", "operator prompt (prompt3)", True),
+    ("operator/prompts/system_v4.md", "operator prompt v4 (final config, Amendment 6)", True),
     ("reader/prompt.py", "reader prompt", True),
     ("docs/eval-protocol.md", "protocol incl. amendments", True),
     ("gym/results/v3-floors.json", "trivial-agent floors (gym/floors.py --tasks-file gym/tasks/v3/heldout.jsonl --json)", True),
@@ -165,10 +166,15 @@ def main(argv=None) -> int:
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--check", action="store_true", help="default: report only, write nothing")
     g.add_argument("--write", action="store_true", help="write docs/freeze-manifest.json if freezable")
+    ap.add_argument("--record-missing-signoffs", action="store_true",
+                    help="Amendment 6: freeze although owner sign-offs are missing; they are recorded in the manifest as "
+                         "missing_signoffs_at_freeze and the consequence in docs/FREEZE.md section 1 applies to each. "
+                         "Artifacts and problems still block.")
     a = ap.parse_args(argv)
     c = collect()
     print(report(c))
-    ready = not (c["missing_required"] or c["missing_signoffs"] or c["problems"])
+    blocking_signoffs = [] if a.record_missing_signoffs else c["missing_signoffs"]
+    ready = not (c["missing_required"] or blocking_signoffs or c["problems"])
     if not a.write:
         return 0 if ready else 1
     if not ready:
@@ -180,7 +186,8 @@ def main(argv=None) -> int:
     man = {"_note": "Freeze manifest (docs/FREEZE.md). The commit that adds this file is the freeze commit.",
            "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "parent_commit": git("rev-parse", "HEAD"),
            "artifacts": c["artifacts"], "absent_optional": c["missing_optional"],
-           "frozen_paths": frozen_paths(), "frozen_path_trees": c["frozen_path_trees"], "signoffs": c["signoffs"]}
+           "frozen_paths": frozen_paths(), "frozen_path_trees": c["frozen_path_trees"], "signoffs": c["signoffs"],
+           "missing_signoffs_at_freeze": c["missing_signoffs"]}
     MANIFEST.write_text(json.dumps(man, indent=1, ensure_ascii=False) + "\n")
     print(f"wrote {MANIFEST.relative_to(REPO)}; now commit it (and nothing else) as the freeze commit")
     return 0
