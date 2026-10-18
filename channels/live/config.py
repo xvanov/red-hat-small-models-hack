@@ -11,7 +11,8 @@ Env vars (repo .env or process env; all optional):
   LIVE_ALLOW_PHONES              extra allowlisted phones, comma separated (DEMO_TEST_PHONE always included)
   LIVE_ALLOW_EMAILS              extra allowlisted emails (DEMO_TEST_EMAIL always included)
   LIVE_ALLOW_MESSENGER_PSIDS     allowlisted Messenger PSIDs (the owner's personal account on the Page)
-  LIVE_SMS_LINES                 which SMS lines to run, comma separated (default "tollfree,local")
+  LIVE_SMS_LINES                 which SMS lines to run, comma separated (default "tollfree"; add ",local" to opt in
+                                 to the 910 10DLC line, which belongs to another business's campaign)
   LIVE_SMS_LOCAL_ENV             env file of the local 10DLC line (default ~/ivanovstroy/.env.sms)
   LIVE_SMS_TOLLFREE_ENV          env file of the 888 line (default ~/rental-management/.env.production)
   LIVE_EMAIL_ENV                 env file with RESEND_KEY / RESEND_FROM_EMAIL / GMAIL_USER / GMAIL_PASS
@@ -130,7 +131,8 @@ class SmsLine:
 
 def sms_lines() -> list[SmsLine]:
     out = []
-    for name in _csv(env("LIVE_SMS_LINES", "tollfree,local")):
+    # The 910 local line is another business's 10DLC campaign: opt-in only (LIVE_SMS_LINES=tollfree,local).
+    for name in _csv(env("LIVE_SMS_LINES", "tollfree")):
         if name == "tollfree":
             e = _file_env(env("LIVE_SMS_TOLLFREE_ENV") or HOME / "rental-management" / ".env.production")
             num = e.get("TWILIO_PHONE_NUMBER")

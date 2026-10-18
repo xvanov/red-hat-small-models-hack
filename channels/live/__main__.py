@@ -6,6 +6,7 @@
   .venv/bin/python -m channels.live start sms|email|messenger <to> "<text>" [--line tollfree|local]
   .venv/bin/python -m channels.live deliveries               provider delivery status of recent sends
   .venv/bin/python -m channels.live messenger-whoami [--hours 2]   names + PSIDs in recently updated Page chats
+  .venv/bin/python -m channels.live archive <thread_id|all>   hide threads (kept on disk); unarchive <thread_id>
   .venv/bin/python -m channels.live stop | resume            kill switch file runs/live/STOP
 """
 from __future__ import annotations
@@ -58,6 +59,13 @@ def main(argv=None) -> int:
     if a.cmd == "messenger-whoami":
         for p in outbound.get_providers()["messenger"].recent_participants(a.hours):
             print(json.dumps(p, ensure_ascii=False))
+        return 0
+    if a.cmd in ("archive", "unarchive"):
+        if len(a.args) != 1:
+            print(__doc__)
+            return 2
+        fn = api.archive_thread if a.cmd == "archive" else api.unarchive_thread
+        print(json.dumps(fn(a.args[0])))
         return 0
     if a.cmd in ("stop", "resume"):
         f = config.live_dir() / "STOP"

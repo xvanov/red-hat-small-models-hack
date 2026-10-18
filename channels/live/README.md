@@ -7,7 +7,7 @@ verifier + reader) on:
 | Channel | Out | In (polling only, no webhook or provider setting is changed) |
 |---|---|---|
 | `sms`, line `tollfree` (888) | Twilio Messages API, creds from `~/rental-management/.env.production` | Twilio Messages list, `To=<line>&From=<allowlisted phone>` |
-| `sms`, line `local` (910, 10DLC) | Twilio, creds + messaging service from `~/ivanovstroy/.env.sms` | same |
+| `sms`, line `local` (910, 10DLC; opt-in: `LIVE_SMS_LINES=tollfree,local`, another business's campaign) | Twilio, creds + messaging service from `~/ivanovstroy/.env.sms` | same |
 | `email` | Resend, From `info@rentus.homes`, Reply-To `<GMAIL_USER>+rentus@gmail.com` | Gmail IMAP (read-only, `[Gmail]/All Mail`): mail FROM an allowlisted address addressed to `info@` / the Reply-To, or whose subject carries the thread's `[ref xxxxxx]` tag |
 | `messenger` | Graph Send API `POST /{page-id}/messages`, `messaging_type=RESPONSE` (24 h window) | Graph `/{page-id}/conversations`; conversations without an allowlisted participant are skipped before any message text is read |
 | extra channels | `registry.register_channel(...)` (e.g. `messenger_personal`, see `registry.py`) | provider's `poll()` |
@@ -88,3 +88,16 @@ separate processes. Sends from the API go out immediately with the same gates.
 - `start_conversation(channel, to, text, line=None) -> dict`: first outbound message to an allowlisted contact
   (`channel` = `sms|email|messenger|<extra>`; `line` = `tollfree|local` for SMS). Returns the send result plus
   `"thread_id"`.
+
+## Roles, lease link, archive (later additions)
+
+- Roles per channel from `.env`: `LIVE_ROLE_SMS` / `LIVE_ROLE_EMAIL` / `LIVE_ROLE_MESSENGER` = `prospect` (default) |
+  `tenant` | `lease_signing` (`roles.py`). Stage values: `inquiry|qualifying|qualified|showing|application|lost`
+  (prospect), `tenant`, `lease_signing` -> `lease_sent`. Threads also carry `role` and a short `context` string.
+- `send_lease_link` (live-only tool, registered in-process by `roles.install_lease_tool`; no file under tools/ or
+  operator/ changes): adds `LIVE_LEASE_LINK_URL` (a real signing link the owner made) or else
+  `https://app.rentus.homes/apply` to the turn's reply. See `lease_link.py` for why no link is minted here.
+- Each turn's send_message calls go out as one composed reply (`compose.py`).
+- `api.archive_thread(id|"all")`, `api.unarchive_thread(id)`, `api.dismiss_approval(id)`,
+  `list_threads(include_archived=False)`; CLI `python -m channels.live archive <thread_id|all>`. A new message from
+  an archived thread's contact starts a new thread `<id>:2` with fresh history in the same role.

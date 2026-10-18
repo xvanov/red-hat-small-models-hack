@@ -97,8 +97,13 @@ class Store:
 
     def ensure_thread(self, channel: str, contact: str, *, line: str | None = None, line_last4: str | None = None,
                       renter_name: str | None = None) -> dict:
-        """Get or create (caller holds the lock)."""
-        tid = make_thread_id(channel, contact, line_last4)
+        """Get or create (caller holds the lock). An archived thread is never reused: the contact's next message
+        starts a new thread (<id>:2, <id>:3, ...) with fresh history."""
+        base = make_thread_id(channel, contact, line_last4)
+        tid, n = base, 1
+        while (old := self.get_thread(tid)) is not None and old.get("archived"):
+            n += 1
+            tid = f"{base}:{n}"
         t = self.get_thread(tid)
         if t is None:
             if channel == "sms":

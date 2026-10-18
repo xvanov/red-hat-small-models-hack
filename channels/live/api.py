@@ -75,8 +75,8 @@ def _summary(t: dict) -> dict:
     return s
 
 
-def list_threads() -> list[dict]:
-    return sorted((_summary(t) for t in _store().all_threads()), key=lambda s: s["last_ts"] or "", reverse=True)
+def list_threads(include_archived: bool = False) -> list[dict]:
+    return sorted((_summary(t) for t in _store().all_threads() if include_archived or not t.get("archived")), key=lambda s: s["last_ts"] or "", reverse=True)
 
 
 def get_thread(thread_id: str, mark_read: bool = True) -> dict:
@@ -192,3 +192,49 @@ def start_conversation(channel: str, to: str, text: str, line: str | None = None
     res = outbound.deliver(st, t["thread_id"], text.strip(), origin="owner", approved=True)
     res["thread_id"] = t["thread_id"]
     return res
+
+
+def archive_thread(thread_id: str) -> dict:
+    """Hide a thread from list_threads (kept on disk; unarchive_thread restores it). thread_id "all" archives every
+    thread. The contact's next message starts a new thread with fresh history in the same role."""
+    st = _store()
+    with st.locked():
+        ts = [t for t in st.all_threads() if not t.get("archived")] if thread_id == "all" else \
+            [t for t in [st.get_thread(thread_id)] if t]
+        if not ts:
+            return {"ok": False, "error": f"unknown thread {thread_id}"}
+        for t in ts:
+            t["archived"] = now_iso()
+            st.save_thread(t)
+        ids = {t["thread_id"] for t in ts}
+        items = st.approvals()
+        for x in items:
+            if x["thread_id"] in ids and x.get("status") == "pending":
+                x["status"] = "dismissed"
+        st.save_approvals(items)
+    return {"ok": True, "archived": sorted(ids)}
+
+
+def unarchive_thread(thread_id: str) -> dict:
+    st = _store()
+    with st.locked():
+        t = st.get_thread(thread_id)
+        if t is None:
+            return {"ok": False, "error": f"unknown thread {thread_id}"}
+        t["archived"] = None
+        st.save_thread(t)
+    return {"ok": True, "thread_id": thread_id}
+
+
+def dismiss_approval(approval_id: str) -> dict:
+    """Close a pending approval without sending anything."""
+    st = _store()
+    with st.locked():
+        items = st.approvals()
+        a = next((x for x in items if x["id"] == approval_id), None)
+        if a is None or a.get("status") != "pending":
+            return {"ok": False, "error": "unknown or already decided approval"}
+        a["status"], a["decided"] = "dismissed", now_iso()
+        st.save_approvals(items)
+        _refresh_needs_owner(st, a["thread_id"])
+    return {"ok": True, "id": approval_id}

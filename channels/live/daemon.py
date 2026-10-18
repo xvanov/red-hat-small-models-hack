@@ -58,9 +58,9 @@ class LiveSendAdapter:
         from . import lease_link
         live_id = thread.get("live_id") or thread["thread_id"]
         if lease_link.link_kind() == "signing":
-            self.links[live_id] = f"Here is your lease to review and sign: {url}"
+            self.links[live_id] = f"Here's the link to review and sign your lease: {url}"
         else:
-            self.links[live_id] = f"Here is the link to complete your application and lease: {url}"
+            self.links[live_id] = f"Here's the link to complete your application and lease paperwork: {url}"
 
     def begin_turn(self) -> None:
         self.buffer = {}
@@ -264,13 +264,20 @@ def _config():
 
 
 IDS_RE = re.compile(r"\b(t_[a-z_]+_[0-9a-f_]+|(sms|email|messenger)[:_][0-9a-z:_]+|renter:[\w-]+|"
-                    r"(ESC|RPT)[-_]?\d+|R_[A-Z_]+|[0-9a-f]{10,})\b")
+                    r"(ESC|RPT)[-_]?\d+|R_[A-Z_]+|[0-9a-f]{10,})\b|[\w.+-]+@[\w-]+(?:\.[\w-]+)+|\+?1?\d{10,11}\b")
 
 
-def readable(text: str, n: int = 280) -> str:
-    """Owner-facing text without internal ids (thread ids, renter ids, ESC/RPT ids, hashes)."""
-    s = IDS_RE.sub("", text or "")
-    s = re.sub(r"\s*\(\s*\)|`\s*`|'\s*'|thread\s+(?=[,.;:])", "", s)
+def readable(text: str, n: int = 280, name: str | None = None) -> str:
+    """Owner-facing text without internal ids (thread ids, renter ids, ESC/RPT ids, hashes, raw emails/phones).
+    An id the sentence needs ("sent to <id>") becomes the contact's name; "on thread <id>" is dropped."""
+    s = IDS_RE.sub("§", text or "")
+    s = re.sub(r"\s*\(\s*§?\s*\)", "", s)
+    s = re.sub(r"[`'\"\[]?§[`'\"\]]?", "§", s)
+    s = re.sub(r"\s*\b(on|in|for|from)\s+(the\s+)?thread\s+§", "", s)
+    s = re.sub(r"\s*\b(thread|renter|ref|id)\s+§", "", s, flags=re.I)
+    s = s.replace("§", name or "the contact")
+    s = re.sub(r"\s+([,.;:!?])", r"\1", s)
+    s = re.sub(r"([,;:])(?=[.!?])", "", s)
     s = re.sub(r"\s{2,}", " ", s).strip(" ,;:")
     return s if len(s) <= n else s[:n - 1] + "…"
 
@@ -428,11 +435,12 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
         t["gate"] = gate
         if stage:
             t["stage"] = stage
+        disp = (t.get("renter_name") or "").split(" ")[0] or t.get("contact_display") or "the contact"
         for e in w.escalations[esc0:]:
-            store.add_approval(thread_id, readable(e.get("reason") or "") or "The assistant needs your decision",
+            store.add_approval(thread_id, readable(e.get("reason") or "", name=disp) or "The assistant needs your decision",
                                e.get("draft") or "", kind="escalation")
             t["needs_owner"] = True
-        reports = [readable(r.get("summary") or "") for r in w.owner_reports[rep0:]]
+        reports = [readable(r.get("summary") or "", name=disp) for r in w.owner_reports[rep0:]]
         reports = [r for r in reports if r]
         if reports:  # at most one report item per thread: it replaces the previous pending one
             items = store.approvals()
@@ -440,7 +448,7 @@ def run_turn(store: Store, thread_id: str, *, runner=None) -> dict:
                 if x["thread_id"] == thread_id and x.get("kind") == "report" and x.get("status") == "pending":
                     x["status"] = "superseded"
             store.save_approvals(items)
-            store.add_approval(thread_id, readable(" ".join(reports)), "", kind="report")
+            store.add_approval(thread_id, " ".join(reports), "", kind="report")
         t["last_turn"] = {"status": res.status, "at": now_iso(), "seconds": round(time.time() - t0, 1)}
         store.save_thread(t)
     print(time.strftime("%H:%M:%S"), f"turn done {thread_id} {res.status} in {time.time() - t0:.1f}s", flush=True)

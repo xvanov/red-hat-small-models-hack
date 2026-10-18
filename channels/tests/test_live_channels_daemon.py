@@ -539,13 +539,13 @@ def test_lease_signing_tool_adds_link_to_one_email(env, monkeypatch):
         assert next(r for r in w.register if inbound["thread_id"] in r["thread_ids"])["status"] == "applied"
         e = rt.call(w, "send_lease_link", {"thread_id": inbound["thread_id"]})
         assert e["ok"], e
-        assert rt.call(w, "send_message", {"thread_id": inbound["thread_id"], "text": "Great, the lease link is in this email."})["ok"]
+        assert rt.call(w, "send_message", {"thread_id": inbound["thread_id"], "text": "The lease link is included in this message."})["ok"]
         return _Res([])
 
     daemon.run_turn(env["store"], s["thread_id"], runner=runner)
     assert len(env["email"].sent) == 1
     body = env["email"].sent[0]["text"]
-    assert body.startswith("Here is your lease to review and sign: https://app.rentus.homes/sign/TESTTOKEN")
+    assert body == "Here's the link to review and sign your lease: https://app.rentus.homes/sign/TESTTOKEN"
     s = api.list_threads()[0]
     assert s["stage"] == "lease_sent" and "lease link sent" in s["context"]
 
@@ -563,3 +563,43 @@ def test_lease_link_falls_back_to_public_apply_page(env, monkeypatch):
     monkeypatch.delenv("LIVE_LEASE_LINK_URL", raising=False)
     monkeypatch.setenv("LIVE_LEASE_LINK_URL", "")
     assert lease_link.get_link().endswith("/apply") and lease_link.get_link().startswith("https://")
+
+
+
+# ---------------------------------------------------------------- round 5
+
+def test_readable_reasons_have_no_dangling_ids():
+    r = daemon.readable("Kalin is ready to sign the lease for room R100. Lease link sent to owner.test@example.com.",
+                        name="Kalin")
+    assert r.endswith("Lease link sent to Kalin.") and "@" not in r
+    r = daemon.readable("Tenant Kalin on thread t_sms_2046_633d2ea5d4 reported a leak (renter:kalin).", name="Kalin")
+    assert r == "Tenant Kalin reported a leak."
+
+
+def test_archive_hides_thread_and_next_message_starts_fresh(env):
+    env["tf"].push(OWNER_PHONE, "first", "SM-80")
+    daemon.poll_all(env["store"])
+    old = api.list_threads()[0]["thread_id"]
+    env["store"].add_approval(old, "x", "")
+    assert api.archive_thread("all")["archived"] == [old]
+    assert api.list_threads() == [] and api.list_approvals() == []
+    assert len(api.list_threads(include_archived=True)) == 1
+    env["tf"].push(OWNER_PHONE, "second", "SM-81")
+    daemon.poll_all(env["store"])
+    new = api.list_threads()
+    assert len(new) == 1 and new[0]["thread_id"] == old + ":2"
+    assert [m["text"] for m in api.get_thread(new[0]["thread_id"])["messages"]] == ["second"]
+    assert api.unarchive_thread(old)["ok"] and len(api.list_threads()) == 2
+
+
+def test_dismiss_approval(env, monkeypatch):
+    r, ap = _blocked_approval(env, monkeypatch)
+    assert api.dismiss_approval(ap["id"])["ok"] and api.list_approvals() == []
+    assert api.dismiss_approval(ap["id"])["ok"] is False and env["tf"].sent == []
+
+
+def test_local_910_line_is_opt_in(monkeypatch):
+    monkeypatch.delenv("LIVE_SMS_LINES", raising=False)
+    from channels.live import config as cfg
+    monkeypatch.setattr(cfg, "_repo_env", lambda: {})
+    assert all(l.name == "tollfree" for l in cfg.sms_lines())
