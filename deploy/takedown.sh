@@ -7,7 +7,7 @@ set -u
 cd "$(dirname "$0")/.."
 CFG="$HOME/.cloudflared/rentus-demo.yml"
 pid_on() { ss -ltnp 2>/dev/null | grep "127.0.0.1:$1 " | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u; }
-tunnel_pids() { pgrep -f "cloudflared .*--config $CFG" || true; }
+tunnel_pids() { pgrep -f "^cloudflared .*--config $CFG" || true; }  # ^ anchor: never match this script's own shell
 
 if [ "${1:-}" = "--all" ]; then
   for p in $(tunnel_pids); do kill "$p"; done
