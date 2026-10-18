@@ -134,7 +134,9 @@ async function pollStatus() {
       el.title = S.live.error || "";
     } else {
       el.title = `${S.live.send_enabled ? "Sending enabled" : "Drafts only, nothing is sent"} · allow-list ${S.live.allowlist_size}`;
-      el.innerHTML = (S.live.channels || []).map((c) => `<span class="stat" title="${esc(c.line || "")} ${esc(c.detail || "")}"><span class="dot ${c.connected ? "on" : "off"}"></span>${esc(chName(c.channel))}</span>`).join("") || "No channels";
+      const byCh = {};
+      (S.live.channels || []).forEach((c) => { const k = c.channel; byCh[k] = byCh[k] ? { ...byCh[k], connected: byCh[k].connected || c.connected, line: byCh[k].line + ", " + (c.line || "") } : { ...c }; });
+      el.innerHTML = Object.values(byCh).map((c) => `<span class="stat" title="${esc(c.line || "")} ${esc(c.detail || "")}"><span class="dot ${c.connected ? "on" : "off"}"></span>${esc(chName(c.channel))}</span>`).join("") || "No channels";
     }
   } catch { /* keep last */ }
 }
@@ -455,7 +457,7 @@ function renderActivity(trace) {
 }
 
 function newConversation() {
-  const chans = (S.live?.channels || []).map((c) => c.channel);
+  const chans = [...new Set((S.live?.channels || []).map((c) => c.channel))];
   const opts = (chans.length ? chans : ["messenger", "sms", "email"]).map((c) => `<option value="${esc(c)}">${esc(chName(c))}</option>`).join("");
   const bg = document.createElement("div");
   bg.className = "modal-bg";

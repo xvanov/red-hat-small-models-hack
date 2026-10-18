@@ -1,24 +1,31 @@
-r"""Verify every console demo path end to end on the LIVE models, and screenshot each into docs/img/.
+r"""Verify the console UI end to end with Playwright and screenshot each page into docs/img/.
 
     channels/.venv/bin/python scripts/console_verify.py all
-    channels/.venv/bin/python scripts/console_verify.py listing spanish faults ops panels demo
+    channels/.venv/bin/python scripts/console_verify.py tabs inbox approval model phone assistant
 
-Paths (each prints PASS/FAIL lines and saves a screenshot):
-  listing   owner instruction -> listing live in the channel lanes            docs/img/console-listing.png
-  spanish   Gym task lease-spanish-train-003: gate ticks fill, a showing is
-            proposed only after all five items are answered                   docs/img/console-spanish.png
-  faults    page changed + login wall on publish, rate limit on send, a
-            malformed reader result -> retry / verifier / fallback in trace   docs/img/console-faults.png
-  ops       Gym task ops-under_limit-heldout-001: vendor timeout, booking
-            under the limit, tenant notified                                  docs/img/console-ops.png
-  panels    scoreboard, why-trust-it and real-world tabs                      docs/img/console-{scoreboard,trust,realworld}.png
-  demo      one-click demo run; the owner approves on a phone-sized /approve  docs/img/console-demo.png, approve-phone.png
+Paths (each prints PASS/FAIL lines and saves screenshots):
+  tabs       every tab (Inbox, Assistant, Pipeline, Model) renders with no page errors,
+             light and dark                                                docs/img/console-{tab}.png, console-{tab}-dark.png
+  inbox      the live inbox lists threads (or a clean empty state); a thread opens with
+             messages, the qualification dots and the Activity drawer      docs/img/console-inbox-thread.png
+  approval   Approve / Edit / Deny on drafts, in the thread view and on the phone page. Runs on a
+             second console process with the in-memory fake channels (console/tests/fake_live.py), so
+             nothing reaches a real person                                 docs/img/console-approval.png, approve-phone.png
+  model      the Model tab shows the numbers the result endpoints serve (/api/results, /api/trust,
+             /api/performance), never hardcoded ones                       docs/img/console-model.png
+  phone      /approve on the real console at phone size                    docs/img/approve-phone-live.png
+  assistant  LIVE operator run (uses the GPU): the owner types a listing instruction in the Assistant,
+             the operator's reply and its tool calls appear, the listing card shows per-channel status
+                                                                           docs/img/console-assistant.png
 
-The console must be up (scripts/demo.sh) with the operator and reader endpoints live.
+The console must be up on 127.0.0.1:8080 (scripts/demo.sh). `all` runs every path.
 """
 from __future__ import annotations
 
-import json
+import os
+import re
+import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -26,10 +33,10 @@ from pathlib import Path
 import httpx
 
 REPO = Path(__file__).resolve().parent.parent
-API = "http://127.0.0.1:8080"
+API = os.environ.get("CONSOLE_URL", "http://127.0.0.1:8080")
 IMG = REPO / "docs" / "img"
 RESULTS: list[tuple[str, bool, str]] = []
-EDIT_TEXT = "Thanks for asking, the rent is firm at $750 a month."
+PY = REPO / ".venv" / "bin" / "python"
 
 
 def check(name: str, ok: bool, detail: str = ""):
@@ -37,311 +44,214 @@ def check(name: str, ok: bool, detail: str = ""):
     print(f"  {'PASS' if ok else 'FAIL'}  {name}" + (f"  ({detail})" if detail else ""), flush=True)
 
 
-def get(path):
-    return httpx.get(API + path, timeout=15).json()
+def get(path, base=API):
+    return httpx.get(base + path, timeout=30).json()
 
 
-def post(path, body=None):
-    r = httpx.post(API + path, json=body or {}, timeout=30)
-    r.raise_for_status()
-    return r.json()
-
-
-def events(run_id: str) -> list[dict]:
-    p = REPO / "runs" / run_id / "events.jsonl"
-    return [json.loads(l) for l in p.read_text().splitlines() if l.strip()] if p.exists() else []
-
-
-def notes(run_id: str) -> list[dict]:
-    p = REPO / "runs" / run_id / "console.jsonl"
-    return [json.loads(l) for l in p.read_text().splitlines() if l.strip()] if p.exists() else []
-
-
-def wait_idle(run_id: str, timeout: float, settle: float = 6.0) -> float:
-    t0, since = time.time(), None
-    while time.time() - t0 < timeout:
-        st = get(f"/api/runs/{run_id}").get("status")
-        if st in ("idle", "stopped", "error"):
-            since = since or time.time()
-            if time.time() - since >= settle:
-                return time.time() - t0
-        else:
-            since = None
-        time.sleep(2)
-    return -1
-
-
-def results_of(evs, tool):
-    return [e["data"] for e in evs if e["type"] == "tool_result" and e["data"].get("tool") == tool]
-
-
-def shoot(page, name: str, run_id: str | None = None, tab: str | None = None):
-    if tab:
-        page.click(f".tab[data-tab='{tab}']")
-    page.wait_for_timeout(2500)
-    out = IMG / name
-    page.screenshot(path=str(out))
-    print(f"  shot  {out.relative_to(REPO)}")
-
-
-def open_page(p, width=1680, height=1050):
+def open_page(p, url, width=1600, height=960, scheme="light", mobile=False):
     b = p.chromium.launch()
-    page = b.new_page(viewport={"width": width, "height": height})
-    page.goto(API + "/", wait_until="load")
-    page.wait_for_timeout(5000)  # status poll attaches to the active run, SSE replays its events
+    ctx = b.new_context(viewport={"width": width, "height": height}, color_scheme=scheme, is_mobile=mobile,
+                        device_scale_factor=2 if mobile else 1)
+    page = ctx.new_page()
+    page._errors = []
+    page.on("pageerror", lambda e: page._errors.append(str(e)))
+    page.goto(url)
     return b, page
 
 
-# ------------------------------------------------------------------------------------------ paths
-def path_listing(p):
-    print("listing: owner instruction -> listing in lanes")
-    r = post("/api/runs", {"goal": "Appling Way room free Nov 1, $750, private bath", "speed": 4})
-    rid = r["run_id"]
-    check("live operator mode", r["mode"] == "operator", r["mode"])
-    t = wait_idle(rid, 300, settle=3)
-    v = get(f"/api/runs/{rid}/view")
-    live = {ch: [x for x in L["posts"] if x["status"] == "live"] for ch, L in v["lanes"].items()}
-    lanes = [ch for ch, xs in live.items() if xs]
-    check("listing live in at least 3 lanes", len(lanes) >= 3, ", ".join(lanes))
-    evs = events(rid)
-    comp = results_of(evs, "check_listing_compliance")
-    created = [((d.get("result") or {}).get("data") or {}).get("compliance") or {} for d in results_of(evs, "create_listing")]
-    check("fair-housing compliance clean", created and all(c.get("ok", True) for c in created),
-          f"check_listing_compliance called {len(comp)}x; create_listing compliance {created[-1] if created else None}")
-    check("price 750 from the owner", any(x["price"] == 750 for xs in live.values() for x in xs))
-    print(f"  listing turn finished in {t:.0f}s")
-    b, page = open_page(p)
-    shoot(page, "console-listing.png")
-    b.close()
-    post("/api/reset")
+def shoot(page, name):
+    IMG.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(IMG / name))
+    print(f"        screenshot docs/img/{name}")
 
 
-def gate_ok_before_showing(evs) -> tuple[bool, str]:
-    shows = [i for i, e in enumerate(evs) if e["type"] == "tool_result" and e["data"].get("tool") == "propose_showing"
-             and (e["data"].get("result") or {}).get("ok")]
-    if not shows:
-        return False, "no showing proposed"
-    ups = [(i, (e["data"].get("result") or {}).get("data") or {}) for i, e in enumerate(evs)
-           if e["type"] == "tool_result" and e["data"].get("tool") == "upsert_renter" and i < shows[0]]
-    if not ups:
-        return False, "no upsert before showing"
-    missing = ups[-1][1].get("gate_missing")
-    return missing == [], f"gate_missing before showing = {missing}"
+# ------------------------------------------------------------------ paths
+def path_tabs(p):
+    for scheme in ("light", "dark"):
+        b, pg = open_page(p, API + "/#/inbox", scheme=scheme)
+        for tab, sel in (("inbox", "#thread-list"), ("assistant", "#ask"), ("pipeline", "#page-pipeline .page-head"),
+                         ("model", "#page-model .kpis")):
+            pg.goto(API + f"/#/{tab}")
+            try:
+                pg.wait_for_selector(sel, timeout=15000)
+                pg.wait_for_timeout(1800)
+                ok = pg.is_visible(sel)
+            except Exception:
+                ok = False
+            check(f"{tab} tab renders ({scheme})", ok and not pg._errors, "; ".join(pg._errors[:2]))
+            shoot(pg, f"console-{tab}{'-dark' if scheme == 'dark' else ''}.png")
+        st = pg.inner_text(".top .status")
+        check(f"top bar shows operator, reader and channel status ({scheme})",
+              "Operator" in st and "Reader" in st, st.replace("\n", " ")[:120])
+        b.close()
 
 
-def path_spanish(p):
-    print("spanish: leasing scenario in Spanish -> gate ticks -> showing only after all five")
-    r = post("/api/runs", {"scenario_id": "lease-spanish-train-003", "speed": 4})
-    rid = r["run_id"]
-    t = wait_idle(rid, 420, settle=4)
-    v = get(f"/api/runs/{rid}/view")
-    reg = v["register"]
-    check("renter registered", bool(reg), ", ".join(x["name"] for x in reg))
-    if reg:
-        g = reg[0]["gate"]
-        check("all five gate items ticked", all(g[k]["state"] == "ok" for k in g), json.dumps({k: g[k]["state"] for k in g}))
-    evs = events(rid)
-    ok, why = gate_ok_before_showing(evs)
-    check("showing proposed only after the gate was complete", ok, why)
-    refused = [d for d in results_of(evs, "propose_showing") if not (d.get("result") or {}).get("ok")]
-    print(f"  propose_showing refused {len(refused)}x before the gate was complete; turn {t:.0f}s")
-    msgs = [e["data"]["args"]["text"] for e in evs if e["type"] == "tool_call" and e["data"].get("tool") == "send_message"]
-    es = sum(1 for m in msgs if any(w in m.lower() for w in ("¿", "hola", "gracias", "mudanza", "contrato", "teléfono")))
-    check("operator replied in Spanish", msgs and es >= len(msgs) * 0.7, f"{es}/{len(msgs)} messages")
-    reads = results_of(evs, "read_reply")
-    backends = {((d.get("result") or {}).get("data") or {}).get("backend") for d in reads}
-    check("read_reply served by the fine-tuned reader", "model" in backends, f"backends={backends}")
-    b, page = open_page(p)
-    shoot(page, "console-spanish.png")
-    b.close()
-    post("/api/reset")
-
-
-def path_faults(p):
-    print("faults: page changed, login wall, rate limited, malformed -> visible recovery")
-    r = post("/api/runs", {"goal": "Appling Way room free Nov 1, $750, private bath. Post it on Marketplace, Roomies, "
-                                   "Craigslist and PadSplit.", "speed": 4})
-    rid = r["run_id"]
-    for f in ({"kind": "page_changed", "tool": "publish_listing", "match": {"channel": "craigslist"}},
-              {"kind": "login_required", "tool": "publish_listing", "match": {"channel": "padsplit"}},
-              {"kind": "rate_limited", "tool": "send_message"},
-              {"kind": "malformed", "tool": "read_reply"}):
-        post(f"/api/runs/{rid}/faults", f)
-    t = wait_idle(rid, 480, settle=8)
-    evs = events(rid)
-    fired = [d for e in evs if e["type"] == "tool_result" for d in [e["data"]] if d.get("fault")
-             or ((d.get("result") or {}).get("error") or {}).get("code") in ("PAGE_CHANGED", "LOGIN_REQUIRED", "RATE_LIMITED")]
-    codes = sorted({((d.get("result") or {}).get("error") or {}).get("code") or d.get("fault") for d in fired})
-    check("all four faults fired", len(codes) >= 4, ", ".join(map(str, codes)))
-    retries = [e["data"] for e in evs if e["type"] == "retry"]
-    check("rate limit retried", any(d.get("code") == "RATE_LIMITED" for d in retries))
-    vcatch = [e["data"] for e in evs if e["type"] == "verifier" and e["data"].get("stage") == "result" and e["data"].get("ok") is False]
-    check("verifier caught the malformed reader result", any(d.get("tool") == "read_reply" for d in vcatch))
-    fbs = [e["data"] for e in evs if e["type"] == "fallback"]
-    check("broken channels fell back", any(d.get("code") in ("PAGE_CHANGED", "LOGIN_REQUIRED") for d in fbs),
-          "; ".join(f"{d.get('tool')} {d.get('code')}" for d in fbs))
-    v = get(f"/api/runs/{rid}/view")
-    live = [ch for ch, L in v["lanes"].items() if any(x["status"] == "live" for x in L["posts"])]
-    check("other channels still went live", len(live) >= 2, ", ".join(live))
-    check("owner told about the broken channels", any("craigslist" in (e.get("reason") or "").lower()
-          or "padsplit" in (e.get("reason") or "").lower() or "page" in (e.get("reason") or "").lower()
-          for e in v["escalations"]) or any("craigslist" in json.dumps(e["data"]).lower() for e in evs
-                                             if e["type"] == "owner_message" and e["actor"] != "owner"))
-    print(f"  fault run idle after {t:.0f}s")
-    b, page = open_page(p)
-    page.uncheck("#followTrace")
-    # scroll the trace to the first recovery row so the screenshot shows it
-    page.evaluate("""() => { const r = [...document.querySelectorAll('#trace .row.retry, #trace .row.vfail, #trace .row.fb')][0];
-                      if (r) r.scrollIntoView({block: 'center'}); }""")
-    shoot(page, "console-faults.png")
-    b.close()
-    post("/api/reset")
-
-
-def path_ops(p):
-    print("ops: plumber job -> vendor timeout, booking under limit, tenant notified")
-    r = post("/api/runs", {"scenario_id": "ops-under_limit-heldout-001", "speed": 4})
-    rid = r["run_id"]
-    t = wait_idle(rid, 300, settle=4)
-    evs = events(rid)
-    q = results_of(evs, "request_quote")
-    check("a vendor timed out", any(((d.get("result") or {}).get("error") or {}).get("code") == "TIMEOUT" for d in q))
-    check("two or more quotes", sum(1 for d in q if (d.get("result") or {}).get("ok")) >= 2)
-    v = get(f"/api/runs/{rid}/view")
-    booked = [j for j in v["jobs"] if j.get("status") == "booked"]
-    lim = v["spend"]["limit"]
-    check("booked under the limit", booked and all(float(j["cost"]) <= lim for j in booked),
-          f"{[(j.get('vendor_id'), j.get('cost')) for j in booked]} limit {lim}")
-    quotes = [((d.get("result") or {}).get("data") or {}).get("quote", {}).get("amount") for d in q if (d.get("result") or {}).get("ok")]
-    check("cheapest quote booked", booked and float(booked[0]["cost"]) == min(quotes), f"quotes {quotes}")
-    sent = [e["data"] for e in evs if e["type"] == "tool_result" and e["data"].get("tool") == "send_message"
-            and (e["data"].get("result") or {}).get("ok")]
-    check("tenant notified", bool(sent))
-    print(f"  ops turn {t:.0f}s")
-    b, page = open_page(p)
-    shoot(page, "console-ops.png")
-    b.close()
-    post("/api/reset")
-
-
-def path_panels(p):
-    print("panels: scoreboard, trust, real world")
-    t = get("/api/trust")
-    o, ref = t["heldout"]["ours"], t["heldout"]["reference"]
-    check("trust: budget under 33B", t["budget"]["used_b"] <= 33, f"{t['budget']['used_b']}B")
-    check("trust: held-out numbers from result files", o and ref, f"ours {o['passed']}/{o['tasks']} {o['mean_reward']:.3f} vs "
-          f"Opus {ref['passed']}/{ref['tasks']} {ref['mean_reward']:.3f}")
-    rw = get("/api/realworld")
-    check("real world: live post link", bool(rw["post"] and rw["post"]["permalink"]), rw["post"]["permalink"] if rw["post"] else "")
-    check("real world: thumbnail cached", bool(rw["thumb"]))
-    sb = get("/api/scoreboard")
-    check("scoreboard: baseline and final rows", any(r["kind"] == "baseline" for r in sb) and any(r["kind"] == "final" for r in sb))
-    b, page = open_page(p)
-    for tab, name in (("score", "console-scoreboard.png"), ("trust", "console-trust.png"), ("real", "console-realworld.png")):
-        page.click(f".tab[data-tab='{tab}']")
-        page.wait_for_timeout(1500)
-        page.locator("footer .evidence").screenshot(path=str(IMG / name))
-        print(f"  shot  docs/img/{name}")
+def path_inbox(p):
+    th = get("/api/live/threads")
+    b, pg = open_page(p, API + "/#/inbox")
+    pg.wait_for_selector("#thread-list", timeout=15000)
+    pg.wait_for_timeout(2000)
+    if not th.get("items"):
+        check("inbox shows a clean empty state when there are no threads", pg.is_visible("#thread-list .empty"),
+              th.get("error") or "no threads")
+        shoot(pg, "console-inbox-thread.png")
+        b.close()
+        return
+    check("inbox lists every live thread", len(pg.query_selector_all(".titem")) == len(th["items"]),
+          f"{len(th['items'])} threads")
+    pg.click(".titem")
+    pg.wait_for_selector("#msgs .msg", timeout=15000)
+    pg.wait_for_timeout(1200)
+    check("thread opens with its messages", len(pg.query_selector_all("#msgs .msg")) >= 1)
+    check("qualification dots show all five items", len(pg.query_selector_all(".qual .gate i")) == 5)
+    if not pg.is_visible(".activity"):
+        pg.click("#toggle-act")
+    check("Activity drawer lists the thread's trace", pg.is_visible(".activity .act-list"))
+    check("no page errors", not pg._errors, "; ".join(pg._errors[:2]))
+    shoot(pg, "console-inbox-thread.png")
     b.close()
 
 
-def path_demo(p, speed: float = 1.0):
-    print("demo: one-click demo run, owner approves on the phone view")
-    b = p.chromium.launch()
-    page = b.new_page(viewport={"width": 1920, "height": 1080})
-    page.goto(API + "/", wait_until="load")
-    page.wait_for_timeout(2000)
-    page.select_option("#speed", str(int(speed)) if speed >= 1 else str(speed))
-    t0 = time.time()
-    page.click("#demoBtn")
-    page.wait_for_timeout(3000)
-    st = get("/api/status")
-    rid = st["active_run"]
-    check("demo started on the live operator", st["mode"] == "operator" and rid and rid.startswith("d_"), str(rid))
-    phone = b.new_page(viewport={"width": 390, "height": 844}, device_scale_factor=2, is_mobile=True, has_touch=True)
-    phone_url = st["approve_url"]
+def _free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def path_approval(p):
+    port = _free_port()
+    runs = REPO / "runs" / "_verify_fake"
+    runs.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "CONSOLE_LIVE_MODULE": "console.tests.fake_live", "CONSOLE_FORCE_STUB": "1",
+           "OPERATOR_BASE_URL": "", "CONSOLE_RUNS_DIR": str(runs)}
+    proc = subprocess.Popen([str(PY if PY.exists() else sys.executable), "-m", "uvicorn", "console.app:app",
+                             "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"], cwd=REPO, env=env)
+    base = f"http://127.0.0.1:{port}"
     try:
-        phone.goto(phone_url, wait_until="load")
-        via = "tailnet " + phone_url
-    except Exception:
-        phone.goto(API + "/approve", wait_until="load")
-        via = "localhost (tailnet unreachable from here)"
-    print(f"  phone view via {via}")
-    approved = edited = False
-    shots = {}
-    while time.time() - t0 < 600:
-        d = get("/api/status").get("demo") or {}
-        step = d.get("step")
-        if step and step not in shots and step in ("renters", "fault", "ops"):
-            shots[step] = True
-            page.wait_for_timeout(1500)
-            page.screenshot(path=str(IMG / f"console-demo-{step}.png"))
-        if step == "approve" and not approved and phone.locator(".card:not(.done) button.approve").count():
-            phone.wait_for_timeout(1500)
-            phone.screenshot(path=str(IMG / "approve-phone.png"))
-            page.screenshot(path=str(IMG / "console-demo-approve.png"))
-            print("  shot  docs/img/approve-phone.png")
-            card = phone.locator(".card:not(.done)").first
-            if card.locator("textarea").count():  # the owner rewrites the reply in his own words
-                card.locator("button.edit").tap()
-                card.locator("textarea").fill(EDIT_TEXT)
-                phone.wait_for_timeout(500)
-                phone.screenshot(path=str(IMG / "approve-phone-edit.png"))
-                edited = True
-            card.locator("button.approve").tap()
-            approved = True
-            phone.wait_for_timeout(2500)
-            phone.screenshot(path=str(IMG / "approve-phone-done.png"))
-        if d.get("finished"):
-            break
-        time.sleep(2)
-    d = get("/api/status").get("demo") or {}
-    check("demo reached the end", d.get("step") == "done" and not d.get("error"), f"{d.get('step')} {d.get('error') or ''}")
-    print(f"  demo took {d.get('elapsed')}s at {speed}x")
-    ns = notes(rid)
-    check("owner approved from the phone", any(n["type"] == "owner_decision" and n["data"].get("via") == "phone" for n in ns)
-          or not approved, "approved" if approved else "nothing was waiting for the owner")
-    page.wait_for_timeout(3000)
-    page.screenshot(path=str(IMG / "console-demo.png"))
-    print("  shot  docs/img/console-demo.png")
-    evs = events(rid)
-    if edited:
-        sent = [e["data"]["args"]["text"] for e in evs if e["type"] == "tool_call" and e["data"].get("tool") == "send_message"]
-        check("the owner's edited text reached the renter unchanged", EDIT_TEXT in sent,
-              f"last sends: {sent[-2:]}")
-    kinds = {e["type"] for e in evs}
-    check("demo trace shows retry and verifier catches", "retry" in kinds and any(
-        e["type"] == "verifier" and e["data"].get("ok") is False for e in evs))
+        for _ in range(60):
+            try:
+                if httpx.get(base + "/api/status", timeout=0.5).status_code == 200:
+                    break
+            except httpx.HTTPError:
+                time.sleep(0.25)
+        b, pg = open_page(p, base + "/#/inbox/t_test_sam")
+        pg.wait_for_selector(".pending", timeout=15000)
+        check("a draft waiting for approval shows Approve / Edit / Deny in the thread",
+              all(pg.is_visible(f'.pending button[data-act="{a}"]') for a in ("approve", "edit", "deny")))
+        shoot(pg, "console-approval.png")
+        pg.click('.pending button[data-act="edit"]')
+        pg.fill(".pending .edit-text", "Thanks Sam. The rent is $750 a month and it's firm.")
+        pg.click('.pending button[data-act="send-edit"]')
+        pg.wait_for_function("() => !document.querySelector('.pending')", timeout=10000)
+        pg.wait_for_timeout(2600)
+        last = pg.query_selector_all("#msgs .msg.out .b")[-1].inner_text()
+        check("Edit sends the owner's text, not the draft", "it's firm" in last, last[:60])
+        pg.goto(base + "/#/inbox/t_test_mp")
+        pg.wait_for_selector(".pending", timeout=15000)
+        check("Marketplace Messenger thread labeled", "Marketplace · Messenger" in pg.inner_text(".convo-head"))
+        b.close()
+
+        b, ph = open_page(p, base + "/approve", width=390, height=844, mobile=True)
+        ph.wait_for_selector(".card", timeout=15000)
+        n = len(ph.query_selector_all(".card[data-id]"))
+        check("phone /approve lists the open approvals", n >= 1, f"{n} open")
+        shoot(ph, "approve-phone.png")
+        ph.click('.card[data-id="ap_2"] button[data-act="approve"]')
+        ph.wait_for_selector(".done", timeout=10000)
+        check("Approve on the phone records the decision", not get("/api/live/approvals", base)["items"] or
+              all(a["id"] != "ap_2" for a in get("/api/live/approvals", base)["items"]))
+        check("no page errors", not (pg._errors or ph._errors))
+        b.close()
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+def path_model(p):
+    r, t = get("/api/results"), get("/api/trust")
+    b, pg = open_page(p, API + "/#/model")
+    pg.wait_for_selector("#page-model .kpis", timeout=20000)
+    pg.wait_for_timeout(1500)
+    text = pg.inner_text("#page-model")
+    fin = next((c for c in r.get("configs") or [] if c["kind"] == "final"), None)
+    base = next((c for c in r.get("configs") or [] if c["kind"] == "baseline"), None)
+    if fin and base:
+        want = [f"{fin['pass_rate'] * 100:.1f}%", f"{base['pass_rate'] * 100:.1f}%", f"{fin['mean_reward']:.3f}"]
+        check("held-out numbers match /api/results", all(w in text for w in want), ", ".join(want) + f" ({r.get('version')})")
+        check("charts with confidence intervals drawn", len(pg.query_selector_all(".chart svg .whisk")) >= 6)
+    else:
+        check("held-out section shows a clean empty state", "No held-out results yet" in text)
+    rd = t.get("reader") or {}
+    if rd.get("sample"):
+        check("reader exact match vs Lightning vs Opus shown",
+              f"{rd['sample']['finetuned'] * 100:.0f}%" in text and "Claude Opus 5.5" in text and "Lightning 30B" in text)
+    check("serving numbers shown (prefix caching, reasoning off)", "Prefix caching" in text and "Reasoning off" in text)
+    bud = t.get("budget") or {}
+    check("parameter budget shown", f"{bud.get('used_b', 0):.1f}B" in text and f"{bud.get('limit_b', 0):g}B" in text)
+    check("no page errors", not pg._errors, "; ".join(pg._errors[:2]))
+    shoot(pg, "console-model.png")
+    pg.set_viewport_size({"width": 1600, "height": 2600})
+    shoot(pg, "console-model-full.png")
     b.close()
 
 
-PATHS = {"listing": path_listing, "spanish": path_spanish, "faults": path_faults, "ops": path_ops,
-         "panels": path_panels, "demo": path_demo}
+def path_phone(p):
+    b, ph = open_page(p, API + "/approve", width=390, height=844, mobile=True)
+    ph.wait_for_selector("#list", timeout=10000)
+    ph.wait_for_timeout(2500)
+    ok = ph.is_visible("#list .card") or ph.is_visible("#list .empty")
+    check("live /approve renders at phone size", ok and not ph._errors)
+    shoot(ph, "approve-phone-live.png")
+    b.close()
+
+
+def path_assistant(p, timeout=240):
+    b, pg = open_page(p, API + "/#/assistant")
+    pg.wait_for_selector("#ask", timeout=15000)
+    pg.click("#new-chat")
+    pg.wait_for_timeout(1000)
+    pg.fill("#ask", "Appling Way room free Nov 1, $750, private bath. Post it on Marketplace, Roomies and Craigslist.")
+    pg.click("#ask-send")
+    t0 = time.time()
+    try:
+        pg.wait_for_selector(".turn-op .text", timeout=timeout * 1000)
+        pg.wait_for_function("() => !document.querySelector('.turn-op .working')", timeout=timeout * 1000)
+        done = True
+    except Exception:
+        done = False
+    check("operator answers the owner in the Assistant", done, f"{time.time() - t0:.0f}s")
+    pg.wait_for_timeout(3500)
+    if pg.query_selector(".steps-toggle"):
+        tog = pg.inner_text(".steps-toggle")
+        n = int(re.search(r"(\d+) tool call", tog).group(1)) if re.search(r"(\d+) tool call", tog) else 0
+        check("tool calls listed under the reply", n >= 2, tog.replace("\n", " "))
+        pg.click(".steps-toggle")
+    check("listing card with per-channel status", pg.is_visible(".listing-prev") and len(pg.query_selector_all(".listing-prev .rows > div")) >= 1)
+    check("no page errors", not pg._errors, "; ".join(pg._errors[:2]))
+    shoot(pg, "console-assistant.png")
+    b.close()
+
+
+PATHS = {"tabs": path_tabs, "inbox": path_inbox, "approval": path_approval, "model": path_model, "phone": path_phone,
+         "assistant": path_assistant}
 
 
 def main(argv) -> int:
-    names = list(PATHS) if not argv or argv == ["all"] else argv
-    st = get("/api/status")
-    print("badge:", st["badge"]["label"], "|", st["reader"]["label"], "| config:", st.get("operator_config"))
-    if not st["badge"]["live"]:
-        print("operator endpoint is not live; these checks are for the live models")
-        return 2
-    IMG.mkdir(parents=True, exist_ok=True)
     from playwright.sync_api import sync_playwright
+    names = list(PATHS) if not argv or argv == ["all"] else argv
     with sync_playwright() as p:
         for n in names:
+            print(f"== {n}", flush=True)
             try:
                 PATHS[n](p)
-            except Exception as e:  # keep going; report it
-                check(f"{n} crashed", False, f"{type(e).__name__}: {e}")
-                try:
-                    post("/api/reset")
-                except Exception:
-                    pass
+            except Exception as e:
+                check(f"{n} completed", False, f"{type(e).__name__}: {e}"[:200])
     bad = [r for r in RESULTS if not r[1]]
     print(f"\n{len(RESULTS) - len(bad)}/{len(RESULTS)} checks passed")
-    for name, _, detail in bad:
-        print(f"  FAIL {name}: {detail}")
+    for n, _, d in bad:
+        print(f"  FAIL {n} {d}")
     return 1 if bad else 0
 
 
