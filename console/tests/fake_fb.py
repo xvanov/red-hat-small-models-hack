@@ -12,6 +12,8 @@ def create_unpublished_post(text):
 
 
 def publish(text):
+    import time
+    time.sleep(0.5)  # a real publish takes seconds: wide enough for a double click to overlap
     pid = f"fake_{next(_IDS)}"
     POSTS[pid] = {"text": text, "is_published": True}
     return {"post_id": pid, "is_published": True, "permalink_url": f"https://example.invalid/posts/{pid}"}

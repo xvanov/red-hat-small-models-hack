@@ -5,10 +5,12 @@ Run from the repo root:  uvicorn console.app:app --port 8080
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import secrets
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -386,6 +388,17 @@ def run_posts(run_id: str):
     return {"live": bool(lc), "live_setup": lc, "mode": (world or {}).get("mode"), "listings": listings}
 
 
+FB_LOCKS: dict[str, threading.Lock] = {}
+FB_LOCKS_GUARD = threading.Lock()
+FB_RECENT: dict[str, tuple[float, dict]] = {}  # post text hash -> (time, published state): one post per text per 10 min
+FB_DEDUP_S = 600
+
+
+def _fb_lock(key: str) -> threading.Lock:
+    with FB_LOCKS_GUARD:
+        return FB_LOCKS.setdefault(key, threading.Lock())
+
+
 @app.post("/api/runs/{run_id}/listings/{listing_id}/facebook")
 def run_facebook(run_id: str, listing_id: str, body: dict = Body(...)):
     """Facebook Page: `prepare` creates an unpublished post; `publish` publishes it. Only from the owner's click."""
@@ -396,8 +409,18 @@ def run_facebook(run_id: str, listing_id: str, body: dict = Body(...)):
     listing = next((l for l in run.snapshot().get("listings") or [] if l.get("listing_id") == listing_id), None)
     if not listing:
         raise HTTPException(404, f"no listing {listing_id}")
+    key = hashlib.sha256(live_world.post_text(listing).encode()).hexdigest()
+    with _fb_lock(f"{run_id}:{listing_id}"), _fb_lock(key):  # concurrent clicks wait here, then see the first result
+        return _run_facebook_locked(run_id, listing_id, listing, action, key)
+
+
+def _run_facebook_locked(run_id: str, listing_id: str, listing: dict, action: str, key: str):
     fb = _fb_state(run_id)
     cur = fb.get(listing_id) or {}
+    recent = FB_RECENT.get(key)
+    if action == "publish" and recent and time.time() - recent[0] < FB_DEDUP_S:
+        fb[listing_id] = dict(recent[1])  # the same post was published moments ago: return it, never post twice
+        return {"ok": True, "deduplicated": True, **fb[listing_id]}
     try:
         if action == "prepare":
             if cur.get("state") in ("draft", "published"):
@@ -410,6 +433,8 @@ def run_facebook(run_id: str, listing_id: str, body: dict = Body(...)):
             r = live_world.fb_publish(listing, cur.get("post_id"))
             fb[listing_id] = {"state": "published" if r.get("is_published", True) else "failed",
                               "post_id": r.get("post_id"), "permalink": r.get("permalink_url")}
+            if fb[listing_id]["state"] == "published":
+                FB_RECENT[key] = (time.time(), dict(fb[listing_id]))
     except Exception as e:
         fb[listing_id] = {**cur, "state": cur.get("state") if action == "publish" and cur.get("state") else "failed",
                           "error": f"{type(e).__name__}: {e}"[:300]}

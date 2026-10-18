@@ -261,6 +261,11 @@ def test_posting_status_and_facebook_publish_on_click(base):
     assert r["state"] == "draft" and r["post_id"].startswith("fake_")
     r = httpx.post(base + f"/api/runs/{rid}/listings/{lid}/facebook", json={"action": "publish"}).json()
     assert r["state"] == "published" and r["permalink"].startswith("https://example.invalid/")
+    # a double click (two concurrent POSTs) and a later retry return the same post: one post on the Page
+    import concurrent.futures as cf
+    with cf.ThreadPoolExecutor(2) as ex:
+        rs = list(ex.map(lambda _: httpx.post(base + f"/api/runs/{rid}/listings/{lid}/facebook", json={"action": "publish"}, timeout=30).json(), range(2)))
+    assert {x["post_id"] for x in rs} == {r["post_id"]}
     httpx.post(base + f"/api/runs/{rid}/stop")
 
 
@@ -318,3 +323,16 @@ def test_public_readonly_mode(tmp_path):
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+def test_facebook_publish_concurrent_clicks_make_one_post(base):
+    base, _ = base
+    rid = httpx.post(base + "/api/runs", json={"goal": "Appling Way room free Nov 1, $750, private bath", "origin": "test"}).json()["run_id"]
+    ls = _wait(lambda: httpx.get(base + f"/api/runs/{rid}/posts").json()["listings"], 30)
+    lid = ls[0]["listing_id"]
+    import concurrent.futures as cf
+    with cf.ThreadPoolExecutor(3) as ex:
+        rs = list(ex.map(lambda _: httpx.post(base + f"/api/runs/{rid}/listings/{lid}/facebook", json={"action": "publish"}, timeout=30).json(), range(3)))
+    assert all(x["state"] == "published" for x in rs)
+    assert len({x["post_id"] for x in rs}) == 1, rs
+    httpx.post(base + f"/api/runs/{rid}/stop")

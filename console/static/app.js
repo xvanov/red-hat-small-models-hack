@@ -795,6 +795,7 @@ function postRow(lid, r) {
       ${pub ? "" : `<div class="fbprev"><div class="fbtext">${esc(r.preview || "")}</div>${pics ? `<div class="strip sm">${pics}</div>` : ""}</div>`}
       ${r.detail && !pub ? `<div class="flag">${esc(humanize(r.detail))}</div>` : ""}
       ${pub ? (r.url ? `<a class="btn ok fbbtn" href="${esc(r.url)}" target="_blank" rel="noopener">${I.check}Published · View post ↗</a>` : `<span class="muted small">Published</span>`)
+            : S.fbBusy?.[lid] ? `<button class="btn primary fbbtn" disabled><span class="spinner"></span>Publishing…</button>`
             : `<button class="btn primary fbbtn" data-fb="publish" data-lid="${esc(lid)}">Publish to Facebook Page</button>`}
     </div>`;
   }
@@ -809,7 +810,7 @@ function postRow(lid, r) {
 function renderSide() {
   const el = $("#side");
   if (!el || S.tab !== "assistant") return;
-  const key = JSON.stringify([S.runView, S.posts, (S.approvals || []).filter((a) => a.source === "assistant"), S.editing]);
+  const key = JSON.stringify([S.runView, S.posts, (S.approvals || []).filter((a) => a.source === "assistant"), S.editing, S.fbBusy]);
   if (key === el.dataset.key) return;
   if ($(".edit-text", el) && document.activeElement?.classList.contains("edit-text")) return; // don't clobber typing
   el.dataset.key = key;
@@ -842,15 +843,21 @@ function renderSide() {
   bindPending(el, () => { delete el.dataset.key; renderSide(); });
   $$("button[data-fb]", el).forEach((b) => (b.onclick = async () => {
     const lid = b.dataset.lid, action = b.dataset.fb;
+    S.fbBusy = S.fbBusy || {};
+    if (S.fbBusy[lid]) return; // one request at a time; the server also refuses to post twice
     if (action === "publish" && !confirm("Publish this listing on the Rentus Homes Facebook Page? It becomes visible to everyone.")) return;
     if (action === "prepare" && !confirm("Create an unpublished draft post on the Facebook Page? Nobody sees it until you publish.")) return;
-    b.disabled = true;
-    b.textContent = action === "publish" ? "Publishing…" : "Preparing…";
+    S.fbBusy[lid] = true;
+    delete el.dataset.key;
+    renderSide();
     try {
       await post(`/api/runs/${S.run}/listings/${encodeURIComponent(lid)}/facebook`, { action });
       toast(action === "publish" ? "Published on the Facebook Page" : "Unpublished Page post created");
     } catch (e) { toast("Facebook Page: " + e.message); }
+    S.fbBusy[lid] = false;
     await pollRunView();
+    delete el.dataset.key;
+    renderSide();
   }));
 }
 
