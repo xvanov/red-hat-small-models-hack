@@ -35,6 +35,8 @@ published openly. Ours are:
 
 ## Datasets
 
+**Datasets on Hugging Face:** [xvanov/rentus-reader-messages](https://huggingface.co/datasets/xvanov/rentus-reader-messages) (reader set, CC BY-SA 4.0) and [xvanov/rentus-leasing-twins](https://huggingface.co/datasets/xvanov/rentus-leasing-twins) (synthetic twins, owner gold labels, Gym tasks v1–v3, CC BY 4.0). Byte-identical to `data/published/` and `gym/tasks/` (checksums in each repo's `SHA256SUMS`, uploaded and verified by `data/hf/publish_datasets.py`).
+
 ### Google Schema-Guided Dialogue (SGD, DSTC8)
 - **URL:** https://github.com/google-research-datasets/dstc8-schema-guided-dialogue, pinned to commit `e852981ae34990f4358979625854259302feaa78` (`data/download.py` checks the commit in the archive's zip comment; derived `homes_dialogues.jsonl` sha256 `e0d67c28e876a4e947d7cbfa7c4b6d146d04145c7e2fd3b6191b752d0e4c0e3e`).
 - **License:** CC BY-SA 4.0 (`LICENSE.txt` in the repo).

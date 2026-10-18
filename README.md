@@ -188,6 +188,8 @@ The synthetic test is partly in-distribution (template overlap disclosed in `doc
 
 ## Datasets, provenance and licenses
 
+**Datasets on Hugging Face:** [xvanov/rentus-reader-messages](https://huggingface.co/datasets/xvanov/rentus-reader-messages) (reader set, CC BY-SA 4.0) and [xvanov/rentus-leasing-twins](https://huggingface.co/datasets/xvanov/rentus-leasing-twins) (synthetic twins, owner gold labels, Gym tasks v1–v3, CC BY 4.0). Byte-identical to `data/published/` and `gym/tasks/` (checksums in each repo's `SHA256SUMS`, uploaded and verified by `data/hf/publish_datasets.py`).
+
 Full details, transformations and rebuild commands: [docs/data-provenance.md](docs/data-provenance.md). License table: [LICENSES.md](LICENSES.md). No real tenant or renter text is published or sent to any third-party API.
 
 | Dataset | License | Used for |
