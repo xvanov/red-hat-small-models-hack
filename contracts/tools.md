@@ -38,7 +38,7 @@ rooms[]          room_id, area, zip, address_public, type, private_bath, rent, d
 listings[]       listing_id, room_id, status(draft|live|filled|removed), title, body, price, channels{channel: {post_id, status, url}}
 channels         marketplace | roomies | craigslist | padsplit | sms | email  (each: posts[], threads[])
 threads[]        thread_id, channel, renter_name, language, messages[{id, from(renter|operator), text, attachments[], ts}]
-register[]       renter_id, thread_ids[], name, phone, gate{lease, move_in, phone, reason, occupants}, wants{area, budget, type, private_bath}, status, listing_of_interest
+register[]       renter_id, thread_ids[], name, phone, gate{lease(+months?), move_in, phone, reason, occupants}, wants{area, budget, type, private_bath}, status, listing_of_interest
 calendar[]       event_id, title, start, end, status(available_block|proposed|confirmed), renter_id
 vendors[]        vendor_id, name, trade, phone, rating, service_area, responds(bool), quote_range[min,max]
 quotes[]         quote_id, vendor_id, job_id, amount, eta, status
@@ -83,7 +83,7 @@ Arguments are JSON. All return the envelope above; the `data` shape is listed.
 
 ## 5. Faults (for the Gym and the "break something" button)
 
-`world.faults` is a list of `{tool, kind, times, after?}` where `kind` is `timeout | rate_limited | malformed | login_required | page_changed | upstream_error | not_found`. `malformed` returns `ok: true` with a corrupted `data` (missing fields, wrong types) so the verifier has to catch it. `times` counts how many calls fail before the tool recovers.
+`world.faults` is a list of `{tool, kind, times, after?, match?, field?, field_mode?}` where `kind` is `timeout | rate_limited | malformed | login_required | page_changed | upstream_error | not_found`. `malformed` returns `ok: true` with a corrupted `data` (missing fields, wrong types) so the verifier has to catch it; with `field` (e.g. `"rent"`) it corrupts that key wherever it appears, as a wrong type (`field_mode: "wrong_type"`, default) or missing (`"drop"`). `times` counts how many calls fail before the tool recovers.
 
 ## 6. Events (what the console and scorers read)
 
