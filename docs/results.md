@@ -260,3 +260,26 @@ IDS=lease-full-train-001,lease-vague_date-train-001,lease-spanish-train-001,leas
 gym/.venv/bin/python gym/ablate.py --run-name _ --split train --tasks-version v2 --prefix train-v2-routersmoke- --workers 8 --ids $IDS \
     --variants guard+prompt3+style+rhist+readermodel,guard+prompt3+style+rhist+readermodel+router
 ```
+
+## Development iterations (not confirmatory)
+
+Prompt v4 / harness tuning on 2026-10-18, 04:45 to 06:30 ET, before the evaluation freeze. **Development data only**: the Messenger conformance scenarios (`gym/tasks/messenger/`), the concierge train tasks (`gym/tasks/concierge/train.jsonl`) and the v2 TRAIN split (`gym/tasks/v2/train.jsonl`). No v2/v3 held-out file or result was opened. Every number here is one run per item or per seed, on data the changes were made against, so it is a development signal, not a result.
+
+Config for every run: `guard+prompt3+style+rhist+readermodel` with `prompt_version=v4`, `tool_descriptions=concierge`; the "after" runs add `guard_stand_down=true`. "Before" = commit `a611355` (run from a clean worktree at that commit, so mid-run prompt edits could not leak in).
+
+| Change (commit) | What | Dev effect |
+|---|---|---|
+| 1 (`de5bd37`) prompt | Gate items recorded with `upsert_renter` before `find_showing_slots`/`propose_showing` (C19); stages 2 to 4 are one burst ending in the gate question, read the whole thread so a burst of renter messages counts (C56); phone ask ends with a question; small talk: one two-sentence woven re-ask, third non-answer escalates (C23, C25); a showing request while items are pending gets "a few details first" (C22) | 22 previously failing items rerun (`gym/results/conformance/dev-iter1/`): 17/22 pass. C19, C23, C56 pass |
+| 1 prompt | Tenant short on rent: a payment plan for the owner even with no ledger: escalate with a draft, one holding line (C67); owner-announced reconnect done even when `due_followups` is empty, two messages (C47) | C67, C47 pass in the item rerun |
+| 1 prompt | Owner lines name a renter: find the thread yourself; confirmation in two messages (full address, then the one-hour rule), reject leads to a new slot, no-show reported; an "After the tour" section (link once, order, applied stops, reply resets the cadence); hard no sets status lost; far-out move-in parked with a check-back draft; unconfirmed facts escalated; pet rules; proxy posters; below-6-month lease escalated; `match_renters` and an owner report before publishing; owner-held threads get nothing | C8, C18, C33 to C35, C39, C40, C42, C43, C48, C49, C54 pass in the item rerun |
+| 1 harness, `guard_stand_down` (RunConfig, default off) | The renter guard no longer bounces a run on a thread marked `owner_owned`/`stand_down`, where the prompt says to send nothing (otherwise the harness pushed the model to message the renter) | C54 passes with it on |
+| 1 harness, `burst_guard` (RunConfig, default off) | Bounces a renter run that ends with no pending question while gate items are missing. Unit-tested (`operator/tests/test_burst_guard.py`) but **not used** in any run below | not measured |
+| 2 (`f045c2e`) prompt | A showing request is never treated as small talk (C22); a room that does not fit is explained ("dogs are not allowed"), not called taken (C66) | in the full run below only |
+
+**Full conformance suite** (`gym/results/conformance/v4-dev2/`, commit `f045c2e`, one run per item): **50 of 61 testable items pass**, up from 33 of 61 for v4 at `0d45798` (`gym/results/conformance/v4/`). 18 items flipped to pass; 1 flipped to fail (C31: the model wrote gate fields as `number`/`count`/`text` instead of `value`, so `propose_showing` was refused; a gate-shape line in the prompt is the obvious next step, not done because the train runs were already reading the prompt). Still failing: C12, C23 and C47 (passed in the item rerun, failed here: run-to-run variance; C47 ended on an empty model response), C33, C42, C51/C52 (no tool lists only live listings, so the model offers every room), C53, C63 (tool gap, as for the reference player), C66.
+
+**Concierge train** (36 tasks, seed 1): pass rate 0.556 to **0.667**, mean reward 0.887 to **0.892** (`dev-concierge-before-s1` in the worktree, `gym/results/dev-concierge-after-s1/`).
+
+**v2 TRAIN** (54 tasks, prompt v4 + concierge tools, seeds 1 and 2): mean reward **0.746 to 0.831** (seed 1: 0.791 to 0.855; seed 2: 0.700 to 0.807), pass rate **0.315 to 0.435** (seed 1: 0.389 to 0.426; seed 2: 0.241 to 0.444). Runs: `gym/results/dev-v2train-v4-before-s1`, `dev-v2train-v4-before-p2-s2`, `dev-v2train-v4-after-s1`, `dev-v2train-v4-after-p2-s2` (summary and per-task rows; before runs copied from the worktree).
+
+Caveats: one run per conformance item; the item rerun (dev-iter1) started while the prompt was still being edited, so some of its scenarios read a partly edited prompt; seeds 1 and 2 of the v2 train runs ran concurrently with other runs on the same endpoint.
