@@ -207,8 +207,9 @@ elif container_up vllm-operator; then say "   vllm-operator already running, lef
 else rssh 'bash ~/serving/start_vllm.sh'; fi
 
 # ---------------------------------------------------------------- 6. wait for Lightning
-# The reader must start AFTER Lightning has taken its 80% of GPU memory (reader/serve.md).
-step "6. wait for Lightning /v1/models (first boot downloads ~20 GB of weights + 9 GB image)"
+# The reader must start AFTER Lightning has taken its 85% of GPU memory (reader/serve.md).
+# Lightning is the BF16 checkpoint since Oct 18 03:45 ET (NVFP4 crashed under load, docs/vllm.md "Stability").
+step "6. wait for Lightning /v1/models (first boot downloads ~63 GB BF16 weights + 9 GB image)"
 if [ "$DRY" = 1 ]; then echo "   + poll 127.0.0.1:8000/v1/models on the instance every 20 s (timeout 30 min)"
 else wait_models 8000 vllm-operator 1800; fi
 

@@ -17,11 +17,11 @@ Spend so far = (now − 11:26 ET) × $2.63.
 
 ## Model and vLLM config
 
-- Checkpoint: `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` (30B total / 3B active, card count). Served name: **`nemotron-3.5-lightning`**.
+- Checkpoint: **`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`** since Oct 18 03:45 ET (30B total / 3B active, card count). Served name: **`nemotron-3.5-lightning`**. The NVFP4 checkpoint crashed the engine every ~10 min under load (CUDA misaligned address / illegal memory access); BF16 ran a 15-min 48-way stress test with 0 errors at 20–38% lower decode throughput. Details: `docs/vllm.md` "Stability". `MODEL=...-NVFP4 GPU_UTIL=0.80` restores the old config.
 - Image: `vllm/vllm-openai:v0.27.1` (pinned by the model card; released 2026-08-11, inside the 2-week rule).
-- Flags (see `start_vllm.sh`): `--max-model-len 65536 --gpu-memory-utilization 0.80 --max-num-seqs 64 --enable-prefix-caching --async-scheduling --mamba-backend flashinfer --mamba-cache-mode align --mamba-ssm-cache-dtype float16 --enable-mamba-cache-stochastic-rounding --mamba-cache-philox-rounds 5 --reasoning-parser nemotron_v3 --tool-call-parser qwen3_coder --enable-auto-tool-choice`, API key via `VLLM_API_KEY`.
-- Memory: weights + overhead about 19.4 GB, KV cache 50.6 GB (≈14M tokens; 213 concurrent 64k-token requests). At 0.80 utilization about 19 GB of the 96 GB stays free for the ≤1.5B reader.
-- On this GPU (SM120) vLLM picks the **Marlin** NVFP4 kernels for linear and MoE layers (4-bit weights, 16-bit math), not native FP4 tensor cores. The card publishes no RTX Pro 6000 recipe.
+- Flags (see `start_vllm.sh`): `--max-model-len 65536 --gpu-memory-utilization 0.85 --max-num-seqs 64 --enable-prefix-caching --async-scheduling --mamba-backend flashinfer --mamba-cache-mode align --mamba-ssm-cache-dtype float16 --enable-mamba-cache-stochastic-rounding --mamba-cache-philox-rounds 5 --reasoning-parser nemotron_v3 --tool-call-parser qwen3_coder --enable-auto-tool-choice`, API key via `VLLM_API_KEY`.
+- Memory (BF16): weights 58.9 GiB, KV cache 15.2 GiB (2.3M tokens, peak 33% at 48 concurrent ~10k-token requests). At 0.85 the reader's 0.12 still fits (94.6 of 97.9 GB used). (NVFP4 was 19.4 GB weights + 50.6 GB KV at 0.80.)
+- With NVFP4 on this GPU (SM120) vLLM picks the **Marlin** NVFP4 kernels for linear and MoE layers (4-bit weights, 16-bit math), not native FP4 tensor cores. The card publishes no RTX Pro 6000 recipe.
 - **No speculative decoding.** DSpark/DFlash are separate draft models and would count toward the 33B budget. Built-in **MTP** (`--speculative-config '{"method":"mtp","num_speculative_tokens":3}'`) loads and accepts about 3 tokens per step, but it **crashed the engine** (CUDA illegal memory access in the FlashInfer attention metadata build) as soon as 4 requests ran together, with async scheduling on or off. It stays off (`MTP=on` in `start_vllm.sh` to retry).
 - The container runs with `--restart unless-stopped` and binds to `127.0.0.1:8000` on the instance, so it's reachable only through the tunnel.
 
@@ -37,7 +37,7 @@ serving/tunnel.sh stop
 # (re)start vLLM on the instance (key file ~/serving/vllm.env already there)
 scp serving/start_vllm.sh rentus-operator:serving/ && ssh rentus-operator 'bash ~/serving/start_vllm.sh'
 ssh rentus-operator 'sudo docker logs -f --tail 50 vllm-operator'
-# variants: PREFIX_CACHE=off, MTP=on, ASYNC=off, MAX_LEN=..., GPU_UTIL=...
+# variants: PREFIX_CACHE=off, MTP=on, ASYNC=off, MAX_LEN=..., GPU_UTIL=..., GRAPHS=piecewise|eager, KERNELS=triton, MODEL=...
 
 brev ls                      # instance status
 brev stop rentus-operator    # stop billing GPU (if the type supports stop); brev start to resume
@@ -66,9 +66,9 @@ It is idempotent: each step checks first and skips what is already done, so re-r
 | 2 | wait for `RUNNING` + ssh | usually 0–1 min after create |
 | 3 | install docker / nvidia-container-toolkit only if missing (the Brev image normally has both) | 0 s, or 3–5 min if installing |
 | 4 | write `~/serving/vllm.env` over ssh stdin (mode 600), copy `start_vllm.sh` and `reader/serve_reader.sh` | ~5 s |
-| 5–6 | start Lightning with the exact `start_vllm.sh` defaults, wait for `:8000/v1/models` | **5–8 min** on a fresh disk: ~9 GB vLLM image pull, ~20 GB NVFP4 weights, then load + CUDA graph capture (~2.5 min on its own) |
+| 5–6 | start Lightning with the exact `start_vllm.sh` defaults, wait for `:8000/v1/models` | **5–8 min** on a fresh disk: ~9 GB vLLM image pull, ~63 GB BF16 weights, then load + CUDA graph capture (~2.5 min on its own) |
 | 7 | reader checkpoint: `READER_SOURCE=auto` uses Hugging Face (`xvanov/rentus-reader-qwen3-0.6b`, 1.2 GB) when the repo is public, else rsyncs `reader/release/rentus-reader` (1.2 GB, limited by home upload speed) | HF: in step 8; rsync: 1–5 min |
-| 8–9 | start `vllm-reader` (0.12 GPU, after Lightning has its 80%), wait for `:8001/v1/models` | 1–2 min (image already cached) |
+| 8–9 | start `vllm-reader` (0.12 GPU, after Lightning has its 85%), wait for `:8001/v1/models` | 1–2 min (image already cached) |
 | 10 | tunnels `localhost:8000 → :8000` and `localhost:8011 → :8001` | ~10 s |
 | 11 | `watchdog.sh start` | <1 s |
 | 12 | `smoke_test.py --thinking off` (skip with `SKIP_SMOKE=1`) | ~5 s |
@@ -91,7 +91,11 @@ Notes for the operator loop (W2):
 - **The model sometimes writes IDs with Unicode hyphens** (`L‑1042` with U+2011). Normalize dashes before matching IDs or amounts in its text (`smoke_test.py` has `norm()`). Tool-call JSON arguments were plain ASCII in every run.
 - Sampling per the card: temperature 1.0, top_p 0.95.
 
-## Stability (checked 12:10 ET)
+## Stability
+
+Oct 18 03:45 ET: switched to BF16 after the NVFP4 engine crashed 4 times under load (misaligned address / illegal memory access); see `docs/vllm.md` "Stability" for the tests. Below is the Oct 17 check.
+
+### Oct 17, checked 12:10 ET
 
 - The one crash other workstreams saw (about 11:49 ET) was my second MTP test (CUDA illegal memory access), followed by my restart to the default config. The current container (created 11:49 ET) has `speculative_config=None`, 0 restarts, no OOM, no errors.
 - It held 16 concurrent agent requests from me plus ~16 from the gym with 0 errors. KV cache usage stays under 3% and the queue stays empty, so `--max-num-seqs 64` and `--gpu-memory-utilization 0.80` stay as they are.

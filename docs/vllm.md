@@ -94,7 +94,7 @@ Reasoning off answers 1.9x more turns per second and removes the long tail (p95 
 
 Dropped from scope with the owner (a restart would have broken others' jobs). The sweep shows what the cap does. At N=64 and N=128 the running count is pinned at 64, and the requests above it wait (47 and 100 at peak). Throughput only rises 11% from N=64 to N=128 while TTFT p50 nearly quadruples. Since KV usage peaks at 5%, raising the cap is the next thing to test on an idle server.
 
-### Ablation 4: precision (NVFP4 vs another) — skipped
+### Ablation 4: precision (NVFP4 vs another) — skipped on Oct 17, done on Oct 18 (see "Stability")
 
 The BF16 checkpoint is about 60 GB. Next to the 12 GB reader it would leave about 10 GB for the KV cache. It would also need a download and a restart, which other people's jobs could not absorb. Not feasible in the window, so it was not run.
 
@@ -121,6 +121,31 @@ The reader slows by about 60% at p50 when the operator is saturated, but it stay
 | Container restarts (whole day) | 4: two deliberate MTP experiments and their rollback, plus the crash above. The watchdog's 2 engine restarts are separate `docker restart` calls. |
 | Retries in the operator loop | the loop retries a failed model call up to 2 times with backoff, and the client SDK retries are off (`max_retries=0` in `agent_load.py`) so every failure is counted. The smoke run: 57 model calls, 0 errors, 0 retries. |
 
+## Stability (Oct 18, 03:10–04:05 ET): NVFP4 crashes under load, BF16 does not
+
+**Symptom.** The NVFP4 engine died intermittently with `CUDA error: misaligned address` in EngineCore (reported at `async_copy_ready_event.synchronize()`, native stack inside `cudaGraphLaunch`): 21:24 ET at N=128, 13:02 ET, then 02:48 and 03:05 ET under ~16 concurrent agent requests. Docker restarted it in ~40 s each time, but every in-flight request failed (52 of 99 eval rollouts had to be rerun) and the watchdog logged hangs.
+
+**Test.** `stress.py`-style load (kept out of the repo): 48 workers looping for 12–15 min, each request the real 6k-token system prompt + 26 tools plus 0–24 turns of synthetic history (average prompt 10.4–10.6k tokens), `tool_choice=auto`, thinking on for 40%, `max_tokens` 256–2048. Other team traffic was running at the same time. One change per run; crash signatures tailed from `docker logs`.
+
+| # | config (everything else as `start_vllm.sh`) | result | output tok/s (this load) |
+|---|---|---|---|
+| 1 | NVFP4, CUDA graphs `PIECEWISE` only (`GRAPHS=piecewise`) | **crashed at 11.5 min**: illegal memory access, 48 running, pure decode step, KV 6.5% | ~685 before the crash |
+| 2 | NVFP4, full graphs, Triton attention + Triton mamba, no FlashInfer kernels in the hot path (`KERNELS=triton`) | **crashed at 8.7 min**: illegal instruction | ~515 (incl. the outage) |
+| 3 | **BF16 checkpoint** (`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`), `--gpu-memory-utilization 0.85`, card's FlashInfer settings, full graphs | **0 errors, 0 restarts**: 2,567 requests in 15.5 min | 568 |
+
+Runs 1 and 2 rule out CUDA graph capture and the FlashInfer attention/mamba kernels. What is left in common is the NVFP4 path on SM120: Marlin W4A16 linear and MoE kernels, the FP8 linear layers (FlashInfer FP8 scaled-mm) and the FP8 KV cache the checkpoint asks for. BF16 removes all three, and it ran clean. `--enforce-eager` was not run separately, since PIECEWISE already put attention and mamba outside the graphs and still crashed; we did not isolate which NVFP4 kernel is at fault.
+
+**Chosen config:** BF16 checkpoint, `GPU_UTIL=0.85`, every other flag unchanged (served name `nemotron-3.5-lightning`, port 8000). Memory: weights 58.9 GiB, KV cache 15.2 GiB = 2.3M tokens (peak usage 33% under the 48-way stress), GPU 94.6 of 97.9 GB used with the reader. Engine init is ~2.3 min on a warm cache.
+
+**Throughput cost** (`serve_bench.py` decode, 256 tokens, same request shape as the Results table; a few foreign requests were running):
+
+| N | NVFP4 tok/s (Oct 17) | BF16 tok/s (Oct 18) | change | per-request tok/s | TTFT p50 |
+|---|---|---|---|---|---|
+| 32 | 1,412 | 880 | −38% | 72 → 31 | 2.2 → 1.0 s |
+| 64 | 1,579–1,822 | 1,286 | −19 to −29% | 43 → 29 | 2.8 → 1.4 s |
+
+Decode is slower (BF16 reads 4x the weight bytes per token), time to first token is faster (no dequantization in prefill), and nothing crashes. For overnight eval runs that is the right trade: one NVFP4 crash costs every in-flight rollout. `MODEL=nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 GPU_UTIL=0.80` restores the old config.
+
 ## Realistic workload: leads per hour and cost per qualified lead (PENDING)
 
 `serving/agent_load.py` runs N concurrent full operator conversations end to end: the real loop (final config: prompt v3, renter guard, style pre-check, reasoning kept in history, verifier on), sandbox tools, scripted renters, and `read_reply` on the reader server. It reports conversations per hour, tool calls/s, turn latency p50/p95, server TTFT, tokens/s, KV usage, errors and retries, scorer pass rate under load, and the lead economics (leads/hr, qualified leads/hr = leasing conversations whose renter finished the 5-item gate, cost per qualified lead = $2.63 ÷ qualified leads/hr).
@@ -132,7 +157,7 @@ To run it: `gym/.venv/bin/python serving/agent_load.py --levels 1,8,32,64,128 --
 ## What did not work, and what's next
 
 - **MTP speculative decoding** (built-in heads, free under the 33B budget) accepted about 3 tokens per step on single requests but crashed the engine at 4 concurrent requests (CUDA illegal memory access). It is off.
-- **Untested next steps**, each needing an idle-server restart: `--max-num-seqs 128` (KV peaks at 5%, so memory allows it), `--max-num-batched-tokens 16384` (should cut TTFT at N≥32, since prefill is the queue), and `ASYNC=off` to see whether the intermittent misaligned-address crash is tied to async scheduling.
+- **Untested next steps**, each needing an idle-server restart: `--max-num-seqs 128` (KV peaks at 5%, so memory allows it), `--max-num-batched-tokens 16384` (should cut TTFT at N≥32, since prefill is the queue), and `ASYNC=off` on NVFP4 (the misaligned-address crash is fixed by moving to BF16, see "Stability"; async scheduling was not isolated).
 - **Prompt layout**: a static prefix that ends exactly on a 2,128-token block boundary would raise the first-turn hit rate from 71% toward 100%.
 
 ## Reproduce
