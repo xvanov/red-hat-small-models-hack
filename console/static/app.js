@@ -7,13 +7,26 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const md = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>");
 function humanize(t) {
+  // strip internal ids only; keep the meaning ("thread_id 'sms:9f..' not found" -> "thread not found")
   return String(t ?? "")
-    .replace(/\b(thread_id|thread|approval_id|message_id|ref_id|esc_id)\s*[=:]?\s*['"]?[\w:.-]+['"]?/gi, "this conversation")
-    .replace(/\b(messenger_personal|messenger|sms|email|craigslist|roomies|padsplit|marketplace):[0-9a-f]{6,}\b/gi, "this conversation")
-    .replace(/\b[0-9a-f]{10,}\b/gi, "")
-    .replace(/\b(ESC|ap_|t_)\w+/g, "")
-    .replace(/(this conversation)(\s+this conversation)+/g, "$1")
+    .replace(/\bthread(?:_id)?\s*(?:[=:]\s*|(?=['"]))['"]?[\w:.@+-]+['"]?/gi, "thread")
+    .replace(/\b(?:approval_id|message_id|ref_id|esc_id|call_id|listing_id|room_id)\s*(?:[=:]\s*|(?=['"]))['"]?[\w:.@+-]+['"]?/gi, "")
+    .replace(/\b(?:messenger_personal|messenger|sms|email|craigslist|roomies|padsplit|marketplace):[0-9a-f]{6,}\b/gi, "")
+    .replace(/\b[0-9a-f]{12,}\b/gi, "")
+    .replace(/\s+([,.;:)])/g, "$1").replace(/,(\s*,)+/g, ",").replace(/\(\s*\)/g, "")
     .replace(/\s{2,}/g, " ").trim().replace(/^./, (c) => c.toUpperCase());
+}
+function shortSummary(s) {
+  // tool results often arrive as JSON: show a short plain line; the full text is one click away
+  const raw = String(s ?? "").trim();
+  if (!/^[{[]/.test(raw)) return humanize(raw);
+  try {
+    const o = JSON.parse(raw);
+    if (Array.isArray(o)) return `${o.length} item${o.length === 1 ? "" : "s"}`;
+    const parts = Object.entries(o).filter(([k, v]) => !/_id$|^id$/.test(k) && v != null && typeof v !== "object").slice(0, 4)
+      .map(([k, v]) => `${k.replace(/_/g, " ")}: ${v}`);
+    return humanize(parts.join(" · ")) || "done";
+  } catch { return humanize(raw.slice(0, 120)); }
 }
 const pct = (x, d = 0) => (x == null || isNaN(x) ? "–" : (x * 100).toFixed(d) + "%");
 const fix = (x, d = 2) => (x == null || isNaN(x) ? "–" : Number(x).toFixed(d));
@@ -102,13 +115,17 @@ function gateDots(g) {
   g = g || {};
   return `<span class="gate" title="${GATE.map(([k, l]) => `${l}: ${g[k] || "missing"}`).join(" · ")}">${GATE.map(([k]) => `<i class="${g[k] || "missing"}"></i>`).join("")}</span>`;
 }
-function gateFull(g) {
+function gateFull(g, channel) {
   g = g || {};
+  const items = /sms/i.test(channel || "") && (g.phone || "missing") === "missing" ? GATE.filter(([k]) => k !== "phone") : GATE; // the SMS number is the phone
   const word = { exact: "", vague: " (vague)", missing: " (missing)" };
-  return `<div class="gate-full">${GATE.map(([k, l]) => `<span class="${g[k] || "missing"}"><span class="gate"><i class="${g[k] || "missing"}"></i></span>${l}${word[g[k] || "missing"]}</span>`).join("")}</div>`;
+  return `<div class="gate-full">${items.map(([k, l]) => `<span class="${g[k] || "missing"}"><span class="gate"><i class="${g[k] || "missing"}"></i></span>${l}${word[g[k] || "missing"]}</span>`).join("")}</div>`;
 }
 const gateCount = (g) => GATE.filter(([k]) => (g || {})[k] === "exact").length;
 
+const ROLE = { prospect: "Prospect", tenant: "Tenant", lease_signing: "Lease signing" };
+const isProspect = (t) => !t.role || t.role === "prospect";
+const rolePill = (t) => (t.role && ROLE[t.role] ? `<span class="chip role-${esc(t.role)}">${ROLE[t.role]}</span>` : "");
 const STAGES = [["inquiry", "Inquiry"], ["qualifying", "Qualifying"], ["qualified", "Qualified"], ["showing", "Showing"], ["application", "Application"]];
 const STAGE_ALIAS = { new: "inquiry", escalated: "qualifying", showing_proposed: "showing", showing_confirmed: "showing", applied: "application", leased: "application" };
 const stageKey = (s) => STAGE_ALIAS[s] || s || "inquiry";
@@ -125,7 +142,7 @@ function emptyState(icon, title, text, detail) {
 // ------------------------------------------------------------------ global state + polling
 const S = {
   tab: "inbox", threadId: null, status: null, live: null, threads: null, threadsErr: null, approvals: [], approvalsErr: null,
-  thread: null, threadKey: "", filter: store.get("filter", "all"), activity: store.get("activity", true), actFilter: "all",
+  thread: null, threadKey: "", filter: store.get("filter", "all"), activity: store.get("activity", window.innerWidth > 1600), actFilter: "all",
   editing: {}, sending: {}, apErr: {}, run: null, runView: null, turns: [], es: null, results: null, trust: null, perf: null, pipeFilter: "all",
 };
 
@@ -134,7 +151,7 @@ async function pollStatus() {
     S.status = await j("/api/status");
     const b = S.status.badge || {}, r = S.status.reader || {};
     setStat("#st-op", b.backend_up, b.backend_up ? "Operator · Lightning on vLLM" : "Operator · offline");
-    setStat("#st-reader", r.live, r.live ? "Reader 0.6B" : "Reader · rules fallback", !r.live ? "warn" : null);
+    setStat("#st-reader", r.live, r.live ? "Reader · " + (S.status.reader_label || "0.6B").replace(/\s*\(vLLM\)/, "") : "Reader · rules fallback", !r.live ? "warn" : null);
   } catch { setStat("#st-op", false, "Console offline"); }
   try {
     S.live = await j("/api/live/status");
@@ -184,7 +201,7 @@ function badge(sel, n) {
 // ------------------------------------------------------------------ router
 function route() {
   const parts = (location.hash || "#/inbox").slice(2).split("/");
-  const tab = ["inbox", "assistant", "pipeline", "model"].includes(parts[0]) ? parts[0] : "inbox";
+  const tab = ["inbox", "assistant", "pipeline", "model", "data"].includes(parts[0]) ? parts[0] : "inbox";
   S.tab = tab;
   $$(".nav a[data-tab]").forEach((a) => a.classList.toggle("active", a.dataset.tab === tab));
   $$("main > .page").forEach((p) => (p.hidden = p.id !== "page-" + tab));
@@ -196,6 +213,7 @@ function route() {
   if (tab === "assistant") mountAssistant();
   if (tab === "pipeline") renderPipeline();
   if (tab === "model") renderModel();
+  if (tab === "data") renderData();
 }
 window.addEventListener("hashchange", route);
 
@@ -261,10 +279,10 @@ function renderThreadList() {
   el.innerHTML = shown.map((t) => `
     <div class="titem ${t.unread ? "unread" : ""} ${t.thread_id === S.threadId ? "sel" : ""}" data-id="${esc(t.thread_id)}">
       <div class="ch" title="${esc(chName(t.channel))}">${chIcon(t.channel)}</div>
-      <div class="name">${esc(t.renter_name || t.contact_display)}</div>
+      <div class="name">${esc(t.renter_name || t.contact_display)}${rolePill(t)}</div>
       <div class="time">${esc(ago(t.last_ts))}</div>
       <div class="last">${esc(t.last_text || "")}</div>
-      <div class="meta">${t.busy ? `<span class="chip accent">typing…</span>` : needsYou(t) ? `<span class="chip warn">Needs you</span>` : gateDots(t.gate)}</div>
+      <div class="meta">${t.busy ? `<span class="chip accent">typing…</span>` : needsYou(t) ? `<span class="chip warn">Needs you</span>` : isProspect(t) ? gateDots(t.gate) : ""}</div>
     </div>`).join("");
 }
 
@@ -274,6 +292,7 @@ async function openThread(id) {
   S.threadKey = "";
   S.editing = {};
   S.replyErr = "";
+  S.replyText = "";
   renderThreadList();
   renderConvo();
   if (id) await refreshThread();
@@ -310,7 +329,7 @@ function renderConvo() {
     return;
   }
   // keep composer text and scroll position across refreshes
-  const prevText = $("#reply-text")?.value || "";
+  if ($("#reply-text")) S.replyText = $("#reply-text").value;
   const msgsEl = $("#msgs");
   const stick = !msgsEl || msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 40;
   const prevScroll = msgsEl?.scrollTop;
@@ -323,14 +342,16 @@ function renderConvo() {
     <div class="convo-main">
       <div class="convo-head">
         <div>
-          <div class="who">${esc(t.renter_name || t.contact_display)}</div>
-          <div class="sub"><span class="chip">${chIcon(t.channel)}${esc(chName(t.channel))}</span>${t.renter_name && t.contact_display !== t.renter_name ? `<span>${esc(t.contact_display)}</span>` : ""}${stageBar(t.stage)}</div>
+          <div class="who">${esc(t.contact_display && t.renter_name && t.contact_display.toLowerCase().includes(t.renter_name.toLowerCase()) ? t.contact_display : t.renter_name || t.contact_display)}</div>
+          ${t.context ? `<div class="ctx">${esc(t.context)}</div>` : ""}
+          <div class="sub">${rolePill(t)}<span class="chip">${chIcon(t.channel)}${esc(chName(t.channel))}</span>${t.renter_name && t.contact_display && !t.contact_display.toLowerCase().includes(t.renter_name.toLowerCase()) && !t.renter_name.toLowerCase().includes(t.contact_display.toLowerCase()) ? `<span>${esc(t.contact_display)}</span>` : ""}${isProspect(t) ? stageBar(t.stage) : ""}</div>
         </div>
         <div class="right">
+          ${S.live?.can_archive ? `<button class="btn sm ghost" id="archive-thread" title="Archive this conversation">Archive</button>` : ""}
           <button class="btn sm ${S.activity ? "" : "ghost"}" id="toggle-act">${I.activity}Activity${(t.trace || []).length ? ` <span class="muted">${t.trace.length}</span>` : ""}</button>
         </div>
       </div>
-      <div class="qual">${gateFull(t.gate)}</div>
+      ${isProspect(t) ? `<div class="qual">${gateFull(t.gate, t.channel)}</div>` : ""}
       <div class="msgs" id="msgs">${renderMessages((t.messages || []).filter((m) => !(["awaiting_approval", "draft"].includes(m.status) && pend.some((a) => (a.draft_text || "").trim() === (m.text || "").trim()))))}</div>
       ${t.busy ? `<div class="typing" data-since="${esc(t.busy_since || "")}"><span class="dots"><i></i><i></i><i></i></span>Operator is typing… <span class="secs"></span></div>` : ""}
       ${pend.map(renderPending).join("")}
@@ -342,12 +363,20 @@ function renderConvo() {
     </div>
     ${S.activity ? `<aside class="activity">${renderActivity(t.trace || [])}</aside>` : ""}`;
   const ta = $("#reply-text");
-  ta.value = prevText;
+  ta.value = S.replyText || "";
+  ta.addEventListener("input", () => (S.replyText = ta.value));
+  if (S.replySending) { $("#reply-send").disabled = true; $("#reply-send").textContent = "Sending…"; }
   const m = $("#msgs");
   m.scrollTop = sameThread && !stick ? prevScroll : m.scrollHeight;
   if (sameThread && actScroll != null && $("#act-list")) $("#act-list").scrollTop = actScroll;
   $("#toggle-act").onclick = () => { S.activity = !S.activity; store.set("activity", S.activity); renderConvo(); };
   $("#reply-send").onclick = sendReply;
+  const arch = $("#archive-thread");
+  if (arch) arch.onclick = async () => {
+    if (!confirm("Archive this conversation? It leaves the inbox; nothing is sent.")) return;
+    try { await post(`/api/live/threads/${encodeURIComponent(t.thread_id)}/archive`); toast("Archived"); location.hash = "#/inbox"; await pollLive(); }
+    catch (e) { toast("Couldn't archive: " + e.message); }
+  };
   ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendReply(); });
   bindPending(root);
   $$("#act-filter button").forEach((b) => (b.onclick = () => { S.actFilter = b.dataset.f; renderConvo(); }));
@@ -406,7 +435,7 @@ function bindPending(root, after) {
       if (act === "edit") { S.editing[id] = a.draft_text || ""; return rerenderApprovals(after); }
       if (act === "cancel") { delete S.editing[id]; return rerenderApprovals(after); }
       if (act === "write") { const ta = $("#reply-text"); if (ta) ta.focus(); return; }
-      const body = act === "send-edit" ? { decision: "edit", text: S.editing[id] } : { decision: act === "dismiss" ? "approve" : act };
+      const body = act === "send-edit" ? { decision: "edit", text: S.editing[id] } : { decision: act };
       if (act === "send-edit" && !(S.editing[id] || "").trim()) return;
       delete S.apErr[id];
       if (act === "approve" || act === "send-edit") { S.sending[id] = true; rerenderApprovals(after); }
@@ -445,35 +474,40 @@ function setReplyErr(msg) {
 }
 async function sendReply() {
   const ta = $("#reply-text");
-  const text = ta.value.trim();
-  if (!text || !S.threadId) return;
-  $("#reply-send").disabled = true;
+  const text = (ta?.value || "").trim();
+  if (!text || !S.threadId || S.replySending) return; // one send at a time (button and Ctrl+Enter)
+  S.replySending = true;
+  const tid = S.threadId;
+  const b0 = $("#reply-send");
+  if (b0) { b0.disabled = true; b0.textContent = "Sending…"; }
   try {
-    const r = await post(`/api/live/threads/${encodeURIComponent(S.threadId)}/reply`, { text });
+    const r = await post(`/api/live/threads/${encodeURIComponent(tid)}/reply`, { text });
     if (r.ok && (r.sent || r.status === "sent")) {
-      ta.value = "";
+      S.replyText = "";
       setReplyErr("");
     } else {
       setReplyErr("Not sent: " + (r.error || r.status || "the channel did not confirm delivery"));
     }
-    S.threadKey = "";
-    await refreshThread();
   } catch (e) {
     setReplyErr("Not sent: " + e.message);
   } finally {
-    const b = $("#reply-send");
-    if (b) b.disabled = false;
+    S.replySending = false;
+    S.threadKey = "";
+    renderConvo();
+    await refreshThread();
   }
 }
 
 const ACTOR = { operator: "Operator", reader: "Reader", verifier: "Verifier", tool: "Tool" };
 function markRecoveries(trace) {
-  // a failed step followed later by a successful one is a recovery; label the first success after it
+  // a recovery = the same step succeeding after it failed, or an explicit retry / fallback event
   const out = trace.map((x) => ({ ...x }));
   for (let i = 0; i < out.length; i++) {
-    if (out[i].ok !== false) continue;
-    const k = out.findIndex((y, n) => n > i && y.ok !== false && !y._recovers);
-    if (k > 0) { out[k]._recovers = out[i].name || "error"; out[i]._recovered = true; }
+    const x = out[i];
+    if (x.ok !== false && (x.recovery || /^(retry|fallback)\b/i.test(x.name || ""))) { x._recovers = (x.name || "").replace(/^(retry|fallback)\s*/i, "") || "error"; continue; }
+    if (x.ok !== false) continue;
+    const k = out.findIndex((y, n) => n > i && y.name === x.name && y.ok !== false && !y._recovers);
+    if (k > 0) { out[k]._recovers = x.name || "error"; x._recovered = true; }
   }
   return out;
 }
@@ -485,7 +519,7 @@ function renderTrace(trace, filter) {
     <div class="ev ${x.ok === false ? "fail" : x._recovers ? "recovered" : ""}">
       <div class="ic"><i></i></div>
       <div class="t"><span class="who ${esc(x.actor)}">${esc(ACTOR[x.actor] || x.actor || "")}</span><span class="nm">${esc(x.name || "")}</span><span class="ts">${esc(clock(x.ts))}</span></div>
-      ${x.summary ? `<div class="s">${esc(x.summary)}</div>` : ""}
+      ${x.summary ? `<div class="s" title="Click for the full text" onclick="this.classList.toggle('full')"><span class="short">${esc(shortSummary(x.summary))}</span><pre class="long">${esc(x.summary)}</pre></div>` : ""}
       ${x._recovers ? `<div class="rec">Recovered from ${esc(x._recovers)}</div>` : ""}
     </div>`).join("");
 }
@@ -497,7 +531,7 @@ function renderActivity(trace) {
     <div class="activity-head">Activity<div class="right"><div class="seg" id="act-filter"><button data-f="all" class="${S.actFilter === "all" ? "on" : ""}">All</button><button data-f="issues" class="${S.actFilter === "issues" ? "on" : ""}">Errors &amp; recoveries</button></div></div></div>
     <div class="act-sum">
       <span class="chip">${n("tool") + n("operator")} tool calls</span>
-      <span class="chip">${n("reader")} reader parses</span>
+      <span class="chip">${n("reader")} reader parse${n("reader") === 1 ? "" : "s"}</span>
       <span class="chip ${fails ? "err" : ""}">${fails} caught</span>
       <span class="chip ${rec ? "ok" : ""}">${rec} recovered</span>
     </div>
@@ -520,17 +554,23 @@ function newConversation() {
     <div class="mf"><button class="btn ghost" data-x>Cancel</button><button class="btn primary" id="nc-go">Start</button></div>
   </div>`;
   document.body.appendChild(bg);
-  const close = () => bg.remove();
+  const close = () => { bg.remove(); document.removeEventListener("keydown", onKey); };
   bg.addEventListener("click", (e) => { if (e.target === bg || e.target.closest("[data-x]")) close(); });
   $("#nc-to", bg).focus();
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onKey);
   $("#nc-go", bg).onclick = async () => {
+    const go = $("#nc-go", bg);
+    if (go.disabled) return;
+    go.disabled = true;
+    go.textContent = "Starting…";
     try {
       const r = await post("/api/live/conversations", { channel: $("#nc-ch", bg).value, to: $("#nc-to", bg).value, text: $("#nc-text", bg).value });
       close();
       await pollLive();
       const tid = r.result?.thread_id;
       if (tid) location.hash = "#/inbox/" + encodeURIComponent(tid);
-    } catch (e) { toast(e.message); }
+    } catch (e) { toast(e.message); go.disabled = false; go.textContent = "Start"; }
   };
 }
 
@@ -609,6 +649,7 @@ function attachRun(id) {
   renderSide();
   if (!id) return;
   S.es = new EventSource(`/api/runs/${id}/events`);
+  S.es.onopen = () => { S.turns = []; S.calls = {}; }; // the server replays the whole run on every (re)connect
   let pending = false;
   S.es.onmessage = (m) => {
     try { onRunEvent(JSON.parse(m.data)); } catch { return; }
@@ -735,19 +776,24 @@ const ORIGIN = new URLSearchParams(location.search).get("origin") || "assistant"
 const POST_CLS = { posted: "ok", published: "ok", ready: "warn", draft: "warn", login: "warn", failed: "err", not_connected: "", not_prepared: "" };
 function postRow(lid, r) {
   const cls = POST_CLS[r.state] ?? "";
-  let act = "";
   if (r.channel === "facebook_page") {
-    if (r.state === "not_prepared" || r.state === "failed") act = `<button class="btn sm" data-fb="prepare" data-lid="${esc(lid)}">Prepare Page post</button>`;
-    else if (r.state === "draft") act = `<button class="btn primary sm" data-fb="publish" data-lid="${esc(lid)}">Publish</button>`;
-    else if (r.state === "published" && r.url) act = `<a class="btn sm" href="${esc(r.url)}" target="_blank" rel="noopener">View post</a>`;
-  } else if (r.url && r.state === "posted") act = `<a class="btn sm" href="${esc(r.url)}" target="_blank" rel="noopener">View</a>`;
-  const extra = [];
-  if (r.state === "ready" && r.detail) extra.push(`<div class="small muted">${esc(r.detail)}</div>`);
-  if (r.screenshot) extra.push(`<a href="/api/file?path=${encodeURIComponent(r.screenshot)}" target="_blank" title="Open the filled form"><img class="shot" src="/api/file?path=${encodeURIComponent(r.screenshot)}" alt="Filled form on ${esc(chName(r.channel))}"></a>`);
-  if (r.state === "login" && r.command) extra.push(`<div class="small muted">Log in once, then ask again:</div><code class="cmd">${esc(r.command)}</code>`);
-  else if (r.state === "draft") extra.push(`<div class="small muted">Created on the Page as an unpublished post. Nobody sees it until you click Publish.</div>`);
-  else if (r.detail && r.state !== "posted") extra.push(`<div class="small muted">${esc(humanize(r.detail))}</div>`);
-  return `<div class="prow"><div class="ph">${chIcon(r.channel)}${esc(chName(r.channel))}<span class="r"><span class="chip ${cls}">${esc(r.label)}</span>${act}</span></div>${extra.length ? `<div class="px">${extra.join("")}</div>` : ""}</div>`;
+    const pub = r.state === "published";
+    const pics = (r.photos || []).map((ph) => `<img src="/api/file?path=${encodeURIComponent(ph)}" alt="">`).join("");
+    return `<div class="prow fb ${pub ? "done" : ""}">
+      <div class="ph">${I.messenger}<b>Facebook Page</b><span class="r"><span class="chip ${pub ? "ok" : r.state === "failed" ? "err" : "accent"}">${esc(r.label)}</span></span></div>
+      ${pub ? "" : `<div class="fbprev"><div class="fbtext">${esc(r.preview || "")}</div>${pics ? `<div class="strip sm">${pics}</div>` : ""}</div>`}
+      ${r.detail && !pub ? `<div class="flag">${esc(humanize(r.detail))}</div>` : ""}
+      ${pub ? (r.url ? `<a class="btn ok fbbtn" href="${esc(r.url)}" target="_blank" rel="noopener">${I.check}Published · View post ↗</a>` : `<span class="muted small">Published</span>`)
+            : `<button class="btn primary fbbtn" data-fb="publish" data-lid="${esc(lid)}">Publish to Facebook Page</button>`}
+    </div>`;
+  }
+  let act = "";
+  if (r.url && r.state === "posted") act = `<a class="btn sm" href="${esc(r.url)}" target="_blank" rel="noopener">View</a>`;
+  else if (r.screenshot) act = `<a class="btn sm ghost" href="/api/file?path=${encodeURIComponent(r.screenshot)}" target="_blank" title="The filled form, stopped before submit">Form ↗</a>`;
+  let line = "";
+  if (r.state === "login" && r.command) line = `Log in once: <code class="cmd">${esc(r.command)}</code>`;
+  else if (r.detail && r.state !== "posted") line = esc(humanize(r.detail));
+  return `<div class="prow"><div class="ph">${chIcon(r.channel)}${esc(chName(r.channel))}<span class="r"><span class="chip ${cls}">${esc(r.label)}</span>${act}</span></div>${line ? `<div class="px small muted">${line}</div>` : ""}</div>`;
 }
 function renderSide() {
   const el = $("#side");
@@ -786,7 +832,9 @@ function renderSide() {
   $$("button[data-fb]", el).forEach((b) => (b.onclick = async () => {
     const lid = b.dataset.lid, action = b.dataset.fb;
     if (action === "publish" && !confirm("Publish this listing on the Rentus Homes Facebook Page? It becomes visible to everyone.")) return;
+    if (action === "prepare" && !confirm("Create an unpublished draft post on the Facebook Page? Nobody sees it until you publish.")) return;
     b.disabled = true;
+    b.textContent = action === "publish" ? "Publishing…" : "Preparing…";
     try {
       await post(`/api/runs/${S.run}/listings/${encodeURIComponent(lid)}/facebook`, { action });
       toast(action === "publish" ? "Published on the Facebook Page" : "Unpublished Page post created");
@@ -796,33 +844,47 @@ function renderSide() {
 }
 
 // ================================================================== PIPELINE
+const PIPE = [...STAGES, ["lease", "Lease signing"], ["tenant", "Tenants"], ["lost", "Lost"]];
+function pipeKey(t) {
+  if (t.role === "tenant") return "tenant";
+  if (t.role === "lease_signing" || ["lease_signing", "lease_sent"].includes(t.stage)) return "lease";
+  return stageKey(t.stage);
+}
 function renderPipeline() {
   const root = $("#page-pipeline");
   if (S.tab !== "pipeline") return;
   const items = S.threads || [];
   const counts = {};
-  items.forEach((t) => (counts[stageKey(t.stage)] = (counts[stageKey(t.stage)] || 0) + 1));
-  const shown = items.filter((t) => S.pipeFilter === "all" || stageKey(t.stage) === S.pipeFilter)
-    .sort((a, b) => STAGES.findIndex(([k]) => k === stageKey(b.stage)) - STAGES.findIndex(([k]) => k === stageKey(a.stage)) || String(b.last_ts).localeCompare(String(a.last_ts)));
+  items.forEach((t) => (counts[pipeKey(t)] = (counts[pipeKey(t)] || 0) + 1));
+  const order = (t) => PIPE.findIndex(([k]) => k === pipeKey(t));
+  const shown = items.filter((t) => S.pipeFilter === "all" || pipeKey(t) === S.pipeFilter)
+    .sort((a, b) => order(b) - order(a) || String(b.last_ts).localeCompare(String(a.last_ts)));
   const key = JSON.stringify([shown, S.pipeFilter, counts]);
   if (root.dataset.key === key) return;
   root.dataset.key = key;
+  const stageCell = (t) => {
+    const k = pipeKey(t);
+    if (k === "tenant") return `<span class="chip role-tenant">Tenant</span>`;
+    if (k === "lease") return `<span class="chip role-lease_signing">${t.stage === "lease_sent" ? "Lease sent" : "Lease signing"}</span>`;
+    if (k === "lost") return `<span class="muted">Lost</span>`;
+    return stageBar(t.stage);
+  };
   root.innerHTML = `
     <div class="page-head"><h1>Pipeline</h1><span class="sub">${items.length} ${items.length === 1 ? "person" : "people"} across all channels</span></div>
     <div class="page-body">
       <div class="seg" id="pipe-filter" style="margin-bottom:14px">
         <button data-f="all" class="${S.pipeFilter === "all" ? "on" : ""}">All<span class="c">${items.length || ""}</span></button>
-        ${STAGES.map(([k, l]) => `<button data-f="${k}" class="${S.pipeFilter === k ? "on" : ""}">${l}<span class="c">${counts[k] || ""}</span></button>`).join("")}
+        ${PIPE.filter(([k]) => k !== "lost" || counts.lost).map(([k, l]) => `<button data-f="${k}" class="${S.pipeFilter === k ? "on" : ""}">${l}<span class="c">${counts[k] || ""}</span></button>`).join("")}
       </div>
       <div class="card">${!items.length
-        ? emptyState(I.inbox, S.threadsErr ? "Channels aren't connected" : "No prospects yet", "Everyone who writes in on any channel shows up here with their stage and what we still need from them.", S.threadsErr)
-        : !shown.length ? emptyState(I.check, "No one at this stage", "")
+        ? emptyState(I.inbox, S.threadsErr ? "Channels aren't connected" : "No one yet", "Everyone who writes in on any channel shows up here with their stage and what we still need from them.", S.threadsErr)
+        : !shown.length ? emptyState(I.check, "No one here", "")
         : `<table class="t"><thead><tr><th>Name</th><th>Channel</th><th>Stage</th><th>Qualification</th><th>Last message</th><th class="r">Updated</th></tr></thead><tbody>
         ${shown.map((t) => `<tr class="click" data-id="${esc(t.thread_id)}">
-          <td><b>${esc(t.renter_name || t.contact_display)}</b>${needsYou(t) ? ` <span class="chip warn">Needs you</span>` : ""}</td>
+          <td><b>${esc(t.renter_name || t.contact_display)}</b>${needsYou(t) ? ` <span class="chip warn">Needs you</span>` : ""}${t.context ? `<div class="small muted">${esc(t.context)}</div>` : ""}</td>
           <td><span class="chip">${chIcon(t.channel)}${esc(chName(t.channel))}</span></td>
-          <td>${stageBar(t.stage)}</td>
-          <td>${gateDots(t.gate)} <span class="muted small num">${gateCount(t.gate)}/5</span></td>
+          <td>${stageCell(t)}</td>
+          <td>${isProspect(t) ? `${gateDots(t.gate)} <span class="muted small num">${gateCount(t.gate)}/5</span>` : ""}</td>
           <td><div class="ell">${esc(t.last_text || "")}</div></td>
           <td class="r muted num">${esc(ago(t.last_ts))}</td></tr>`).join("")}</tbody></table>`}
       </div>
@@ -837,9 +899,9 @@ function wilson(p, n, z = 1.96) {
   const d = 1 + (z * z) / n, c = (p + (z * z) / (2 * n)) / d, h = (z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n))) / d;
   return [Math.max(0, c - h), Math.min(1, c + h)];
 }
-function barChart(rows, { max = 1, fmt = (x) => pct(x), hl = () => false, labelW = 200 } = {}) {
-  // horizontal bars with optional 95% CI whiskers: rows = [{label, value, ci:[lo,hi], sub}]
-  const W = 640, rowH = 30, top = 6, bottom = 22, plotW = W - labelW - 60;
+function barChart(rows, { max = 1, fmt = (x) => pct(x), hl = () => false, labelW = 250, refs = [] } = {}) {
+  // horizontal bars with optional 95% CI whiskers: rows = [{label, value, ci:[lo,hi]}]; refs = dashed reference lines
+  const W = 680, rowH = 30, top = refs.length ? 20 : 6, bottom = 22, plotW = W - labelW - 60;
   const H = top + rows.length * rowH + bottom;
   const x = (v) => labelW + Math.max(0, Math.min(1, v / max)) * plotW;
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => f * max);
@@ -849,14 +911,33 @@ function barChart(rows, { max = 1, fmt = (x) => pct(x), hl = () => false, labelW
     const y = top + i * rowH, cy = y + rowH / 2;
     s += `<text class="lab" x="${labelW - 10}" y="${cy + 4}" text-anchor="end">${esc(r.label)}</text>`;
     if (r.value == null) { s += `<text x="${labelW + 4}" y="${cy + 4}">no data</text>`; return; }
-    s += `<rect class="bar ${hl(r) ? "hl" : ""}" x="${labelW}" y="${y + 7}" width="${Math.max(1, x(r.value) - labelW)}" height="${rowH - 14}" rx="3"/>`;
+    s += `<rect class="bar ${hl(r) ? "hl" : ""}" x="${labelW}" y="${y + 7}" width="${Math.max(1, x(r.value) - labelW)}" height="${rowH - 14}" rx="3"><title>${esc(r.label)}: ${fmt(r.value)}${r.ci ? ` (95% CI ${fmt(r.ci[0])}–${fmt(r.ci[1])})` : ""}</title></rect>`;
     if (r.ci) s += `<line class="whisk" x1="${x(r.ci[0])}" x2="${x(r.ci[1])}" y1="${cy}" y2="${cy}"/><line class="whisk" x1="${x(r.ci[0])}" x2="${x(r.ci[0])}" y1="${cy - 5}" y2="${cy + 5}"/><line class="whisk" x1="${x(r.ci[1])}" x2="${x(r.ci[1])}" y1="${cy - 5}" y2="${cy + 5}"/>`;
     s += `<text class="val" x="${x(r.ci ? Math.max(r.ci[1], r.value) : r.value) + 8}" y="${cy + 4}">${fmt(r.value)}</text>`;
+  });
+  refs.forEach((r, i) => {
+    const xx = x(r.value);
+    s += `<line class="ref" x1="${xx}" x2="${xx}" y1="${top - 4}" y2="${H - bottom}"><title>${esc(r.label)}: ${fmt(r.value)}</title></line><text class="reflab" x="${xx}" y="${10 + (i % 2) * 0}" text-anchor="${i % 2 ? "start" : "end"}" dx="${i % 2 ? 3 : -3}">${esc(r.label)}</text>`;
   });
   return s + "</svg>";
 }
 const ciTxt = (ci, f = pct) => (ci ? `<span class="ci">${f(ci[0])}–${f(ci[1])}</span>` : "");
 const pTxt = (p) => (p == null ? "–" : p < 0.001 ? "<0.001" : p.toFixed(3));
+const MODEL_NAMES = { "claude-opus-5-5": "Claude Opus 5.5", "nemotron-3.5-lightning": "Nemotron 3.5 Lightning", "rentus-reader": "rentus-reader 0.6B" };
+const modelName = (m) => MODEL_NAMES[m] || m || "–";
+const HELP = {
+  heldout: "Held-out: test conversations that were never used while building or tuning the system.",
+  pass: "Pass rate: share of test conversations where the model did everything right (every check passed).",
+  reward: "Mean reward: average share of checks passed per conversation (0 to 1). An agent that does nothing already scores about 0.6, and one that only says hello about 0.84, so read it together with pass rate.",
+  ci: "The whiskers and the small grey ranges are 95% confidence intervals: with this many test conversations, the true value is very likely inside that range.",
+  every: "Passes every run: share of conversations the setup got fully right in every one of its repeated runs (consistency).",
+  calls: "Model calls per task: how many times the model was asked to think or act to finish one conversation (fewer is cheaper and faster).",
+  time: "Median time per task: wall-clock time to finish one test conversation.",
+  reader: "Reader exact match: share of renter messages where the reader extracted every field (lease length, move-in date exact or vague, phone, reason, people) exactly like the reference labels.",
+  paired: "Paired comparison: both setups ran the same conversations, so we compare them conversation by conversation. p is the chance of a gap this large if there were no real difference (Holm-corrected for running several comparisons).",
+  floor: "Reference agents: simple scripts that do nothing useful. They show the lowest scores the checks give, so real numbers can be read against them.",
+};
+const info = (k) => `<span class="info" title="${esc(HELP[k])}" tabindex="0">ⓘ</span>`;
 
 async function renderModel(force) {
   const root = $("#page-model");
@@ -877,53 +958,62 @@ async function renderModel(force) {
   const kinds = { baseline: 0, final: 1, variant: 2, reference: 3 };
   const ordered = [...cfgs].sort((a, b) => (kinds[a.kind] ?? 2) - (kinds[b.kind] ?? 2));
   const tasks = fin?.tasks || base?.tasks;
-  const short = (l) => String(l || "").replace(", same harness (reference)", " (reference)").replace(" simple_agent", "");
+  const lab = (c) => c.plain_label || c.label;
+  const byLabel = Object.fromEntries(cfgs.map((c) => [c.label, lab(c)]));
+  const floors = R.floors || [];
+  const refs = floors.filter((f) => ["do_nothing", "greet_only"].includes(f.name)).map((f) => ({ label: f.label, value: f.mean_reward }));
 
-  const kpi = (l, v, d) => `<div class="card kpi"><div class="l">${l}</div><div class="v num">${v}</div><div class="d">${d}</div></div>`;
+  const kpi = (l, v, d, k) => `<div class="card kpi"><div class="l">${l} ${k ? info(k) : ""}</div><div class="v num">${v}</div><div class="d">${d}</div></div>`;
   const heldout = cfgs.length ? `
     <div class="section">
-      <h2>Held-out evaluation${R.version ? ` <span class="chip">${esc(R.version)}</span>` : ""}</h2>
-      <p class="lead">${tasks || "–"} held-out tasks the system never trained or tuned on, scored by code checks in a simulated landlord world. Bars show the mean over runs; whiskers are 95% confidence intervals.</p>
+      <h2>Held-out test ${info("heldout")}</h2>
+      <p class="lead">${tasks || "–"} leasing conversations modeled on real ones, never seen during development, each scored by code checks (did it ask the right questions, call the right tools, avoid promises it can't make, hand off to the owner when it should). Each setup ran the whole set ${base?.runs && fin?.runs ? (base.runs === fin.runs ? base.runs + " times" : "several times") : "several times"}.</p>
       <div class="grid2">
-        <div class="card chart"><div class="ttl">Pass rate</div><div class="cap">Share of tasks where every check passed</div>${barChart(ordered.map((c) => ({ label: short(c.label), value: c.pass_rate, ci: c.pass_ci, kind: c.kind })), { hl: (r) => r.kind === "final" })}</div>
-        <div class="card chart"><div class="ttl">Mean reward</div><div class="cap">Average share of checks passed per task</div>${barChart(ordered.map((c) => ({ label: short(c.label), value: c.mean_reward, ci: c.reward_ci, kind: c.kind })), { hl: (r) => r.kind === "final", fmt: (x) => fix(x, 2) })}</div>
+        <div class="card chart"><div class="ttl">Pass rate ${info("pass")}</div><div class="cap">Conversations where every check passed · whiskers are 95% confidence intervals ${info("ci")}</div>${barChart(ordered.map((c) => ({ label: shortLab(lab(c)), value: c.pass_rate, ci: c.pass_ci, kind: c.kind })), { hl: (r) => r.kind === "final" })}</div>
+        <div class="card chart"><div class="ttl">Mean reward ${info("reward")}</div><div class="cap">Average share of checks passed${refs.length ? " · dashed lines: reference agents that do nothing useful" : ""}</div>${barChart(ordered.map((c) => ({ label: shortLab(lab(c)), value: c.mean_reward, ci: c.reward_ci, kind: c.kind })), { hl: (r) => r.kind === "final", fmt: (x) => fix(x, 2), refs })}</div>
       </div>
-      <div class="card" style="margin-top:16px"><table class="t"><thead><tr><th>Configuration</th><th class="r">Runs</th><th class="r">Pass rate</th><th class="r">Mean reward</th><th class="r">Passes every run</th><th class="r">Median time / task</th><th class="r">Model calls / task</th></tr></thead><tbody>
-        ${ordered.map((c) => `<tr class="${c.kind === "final" ? "hl" : ""}"><td><b>${esc(c.label)}</b><div class="muted small">${esc(c.model || "")}${c.config_label ? " · " + esc(c.config_label) : ""}</div></td>
+      <div class="card" style="margin-top:16px"><table class="t"><thead><tr><th>Setup</th><th class="r">Runs</th><th class="r">Pass rate ${info("pass")}</th><th class="r">Mean reward ${info("reward")}</th><th class="r">Passes every run ${info("every")}</th><th class="r">Median time / task ${info("time")}</th><th class="r">Model calls / task ${info("calls")}</th></tr></thead><tbody>
+        ${ordered.map((c) => `<tr class="${c.kind === "final" ? "hl" : ""}"><td><b title="${esc(c.config_label || "")}">${esc(lab(c))}</b>${c.explain ? `<div class="muted small">${esc(c.explain)}</div>` : ""}${c.tasks !== tasks ? `<div class="small" style="color:var(--warn)">${c.tasks} of ${tasks} conversations so far</div>` : ""}</td>
           <td class="r num">${c.runs ?? "–"}</td><td class="r num">${pct(c.pass_rate, 1)}<br>${ciTxt(c.pass_ci, (x) => pct(x, 0))}</td>
           <td class="r num">${fix(c.mean_reward, 3)}<br>${ciTxt(c.reward_ci, (x) => fix(x, 2))}</td>
-          <td class="r num">${c.pass_all_runs == null ? "–" : pct(c.pass_all_runs, 0)}</td><td class="r num">${c.task_seconds_p50 == null ? "–" : Math.round(c.task_seconds_p50) + " s"}</td>
+          <td class="r num">${c.pass_all_runs == null ? "–" : pct(c.pass_all_runs, 0)}</td><td class="r num">${!c.task_seconds_p50 ? "–" : Math.round(c.task_seconds_p50) + " s"}</td>
           <td class="r num">${c.model_calls_mean == null ? "–" : fix(c.model_calls_mean, 1)}</td></tr>`).join("")}
+        ${floors.map((f) => `<tr class="floor"><td><span class="muted">Reference: ${esc(f.label)}</span> ${info("floor")}</td><td class="r muted">–</td><td class="r num muted">${pct(f.pass_rate, 1)}</td><td class="r num muted">${fix(f.mean_reward, 3)}</td><td class="r muted">–</td><td class="r muted">–</td><td class="r muted">–</td></tr>`).join("")}
       </tbody></table></div>
-      ${(R.compare || []).length ? `<div class="card" style="margin-top:16px"><div class="card-head">Paired comparisons<span class="right muted small">same tasks, Holm-corrected p-values</span></div><table class="t"><thead><tr><th>Comparison</th><th class="r">Δ mean reward</th><th class="r">95% CI</th><th class="r">p (reward)</th><th class="r">Δ pass rate</th><th class="r">Tasks better / worse</th><th class="r">p (pass)</th></tr></thead><tbody>
-        ${R.compare.map((c) => `<tr><td>${esc(c.a)} <span class="muted">vs</span> ${esc(c.b)}</td><td class="r num">${c.d_reward >= 0 ? "+" : ""}${fix(c.d_reward, 3)}</td><td class="r num ci">${fix(c.d_reward_ci?.[0], 3)} to ${fix(c.d_reward_ci?.[1], 3)}</td><td class="r num">${pTxt(c.p_reward_holm)}</td><td class="r num">${c.d_pass >= 0 ? "+" : ""}${pct(c.d_pass, 1)}</td><td class="r num">${c.a_better} / ${c.b_better}</td><td class="r num">${pTxt(c.p_pass_holm)}</td></tr>`).join("")}
+      ${(R.compare || []).length ? `<div class="card" style="margin-top:16px"><div class="card-head">Same conversations, side by side ${info("paired")}<span class="right muted small">difference in mean reward and pass rate; p-values Holm-corrected</span></div><table class="t"><thead><tr><th>Comparison</th><th class="r">Δ mean reward</th><th class="r">95% CI</th><th class="r">p</th><th class="r">Δ pass rate</th><th class="r">Conversations better / worse</th><th class="r">p</th></tr></thead><tbody>
+        ${R.compare.map((c) => `<tr><td>${esc(byLabel[c.a] || c.a)} <span class="muted">vs</span> ${esc(byLabel[c.b] || c.b)}</td><td class="r num">${c.d_reward >= 0 ? "+" : ""}${fix(c.d_reward, 3)}</td><td class="r num ci">${fix(c.d_reward_ci?.[0], 3)} to ${fix(c.d_reward_ci?.[1], 3)}</td><td class="r num">${pTxt(c.p_reward_holm)}</td><td class="r num">${c.d_pass >= 0 ? "+" : ""}${pct(c.d_pass, 1)}</td><td class="r num">${c.a_better} / ${c.b_better}</td><td class="r num">${pTxt(c.p_pass_holm)}</td></tr>`).join("")}
       </tbody></table></div>` : ""}
-      ${R.categories?.baseline && R.categories?.final ? `<div class="card" style="margin-top:16px"><div class="card-head">By category</div><table class="t"><thead><tr><th>Category</th><th class="r">Tasks</th><th class="r">Baseline pass</th><th class="r">Final pass</th><th class="r">Baseline reward</th><th class="r">Final reward</th></tr></thead><tbody>
+      ${R.categories?.baseline && R.categories?.final ? `<div class="card" style="margin-top:16px"><div class="card-head">By kind of conversation</div><table class="t"><thead><tr><th>Kind</th><th class="r">Conversations</th><th class="r">Starting setup: pass</th><th class="r">Tuned: pass</th><th class="r">Starting setup: reward</th><th class="r">Tuned: reward</th></tr></thead><tbody>
         ${Object.keys(R.categories.final).map((k) => { const b = R.categories.baseline[k] || {}, f = R.categories.final[k] || {}; return `<tr><td>${esc(k)}</td><td class="r num">${f.tasks ?? b.tasks ?? "–"}</td><td class="r num">${pct(b.pass_rate, 0)}</td><td class="r num"><b>${pct(f.pass_rate, 0)}</b></td><td class="r num">${fix(b.mean_reward, 2)}</td><td class="r num"><b>${fix(f.mean_reward, 2)}</b></td></tr>`; }).join("")}
       </tbody></table></div>` : ""}
-      <div class="src">Source: <code>${esc(R.source || "")}</code> · <code>${esc(R.doc || "")}</code></div>
-    </div>` : `<div class="section"><h2>Held-out evaluation</h2><div class="card">${emptyState(I.activity, "No held-out results yet", "Results appear here as soon as the evaluation runs write their files.")}</div></div>`;
+      <div class="src">Source: <code>${esc(R.source || "")}</code> · <code>${esc(R.doc || "")}</code>${R.version ? ` · test set ${esc(R.version)}` : ""}</div>
+    </div>` : `<div class="section"><h2>Held-out test</h2><div class="card">${emptyState(I.activity, "No held-out results yet", "Results appear here as soon as the evaluation runs write their files.")}</div></div>`;
 
   const n = rd.sample_n;
+  const opus = modelName(rd.opus_model);
   const readerRows = [
     { label: "rentus-reader 0.6B (ours)", value: rd.sample?.finetuned, hl: true },
-    { label: "Claude Opus 5.5", value: rd.opus_exact_match },
-    { label: "Rules fallback (code)", value: rd.sample?.fallback },
-    { label: "Lightning 30B, prompted", value: rd.sample?.lightning },
+    { label: opus, value: rd.opus_exact_match },
+    { label: "Rules only (code)", value: rd.sample?.fallback },
+    { label: "Nemotron 3.5 Lightning, prompted", value: rd.sample?.lightning },
     { label: "Qwen3-0.6B, not fine-tuned", value: rd.sample?.base },
   ].map((r) => ({ ...r, ci: wilson(r.value, n) }));
+  const og = rd.owner_gold || [];
+  const ogRows = og.map((g) => ({ label: g.who === "ours" ? "rentus-reader 0.6B (ours)" : modelName(g.model) + (g.who === "lightning" ? ", prompted" : ""), value: g.exact_match, ci: wilson(g.exact_match, g.n), hl: g.who === "ours" }));
+  const ogN = og[0]?.n;
   const reader = rd.sample ? `
     <div class="section">
-      <h2>Reader</h2>
-      <p class="lead">The reader turns a renter's message into exact fields (lease length, move-in date, phone, reason, people). Exact match means every field is right. Same ${n} held-out messages for every model; whiskers are Wilson 95% intervals.</p>
+      <h2>Reader ${info("reader")}</h2>
+      <p class="lead">The reader is a 0.6B model we fine-tuned to turn a renter's message into exact fields (lease length, move-in date, phone, reason, people). Exact match means every field is right. Whiskers are 95% confidence intervals ${info("ci")}.</p>
       <div class="grid2">
-        <div class="card chart"><div class="ttl">Exact match</div><div class="cap">${n} held-out messages</div>${barChart(readerRows, { hl: (r) => r.hl })}</div>
+        ${ogRows.length ? `<div class="card chart"><div class="ttl">On the owner's own labels</div><div class="cap">${ogN} messages, labeled blind by the owner</div>${barChart(ogRows, { hl: (r) => r.hl })}</div>` : ""}
+        <div class="card chart"><div class="ttl">On held-out test messages</div><div class="cap">${n} messages from the published test split</div>${barChart(readerRows, { hl: (r) => r.hl })}</div>
         <div class="card"><table class="t"><tbody>
           <tr><td class="muted">Base model</td><td>${esc(rd.base_model)} + supervised fine-tuning</td></tr>
           <tr><td class="muted">Training</td><td class="num">${esc(rd.train_rows?.toLocaleString())} rows, ${esc(rd.train_minutes)} min on one ${esc(rd.gpu)}</td></tr>
           <tr><td class="muted">Full test set</td><td class="num">${pct(rd.exact_match_full, 1)} exact match on ${esc(rd.test_rows?.toLocaleString())} rows</td></tr>
-          <tr><td class="muted">Latency (p50)</td><td class="num">${rd.latency_p50_s != null ? Math.round(rd.latency_p50_s * 1000) + " ms" : "–"} <span class="muted">vs Opus ${rd.opus_latency_p50_s != null ? fix(rd.opus_latency_p50_s, 1) + " s" : "–"}</span></td></tr>
-          <tr><td class="muted">Cost per read</td><td class="num">$0 on our GPU <span class="muted">vs Opus $${fix(rd.opus_cost_per_read_usd, 4)}</span></td></tr>
+          <tr><td class="muted">Latency (median)</td><td class="num">${rd.latency_p50_s != null ? Math.round(rd.latency_p50_s * 1000) + " ms" : "–"} <span class="muted">vs ${esc(opus)} ${rd.opus_latency_p50_s != null ? fix(rd.opus_latency_p50_s, 1) + " s" : "–"}</span></td></tr>
+          <tr><td class="muted">Cost per read</td><td class="num">no per-call fee (one rented GPU${P.hardware?.price ? ", " + esc(P.hardware.price) : ""}) <span class="muted">vs ${esc(opus)} $${fix(rd.opus_cost_per_read_usd, 4)}</span></td></tr>
           <tr><td class="muted">Weights</td><td>${rd.hf ? `<a href="${esc(rd.hf)}" target="_blank" rel="noopener">${esc(rd.hf.replace("https://", ""))}</a>` : "–"}</td></tr>
         </tbody></table></div>
       </div>
@@ -931,23 +1021,24 @@ async function renderModel(force) {
 
   const pre = P.prefix || [], rsn = P.reasoning || [], sweep = P.sweep || [];
   const ron = rsn.find((x) => x.reasoning === "on"), roff = rsn.find((x) => x.reasoning === "off");
+  const ptok = sweep[0]?.prompt_tok_mean;
   const serving = sweep.length || pre.length ? `
     <div class="section">
       <h2>Serving on vLLM</h2>
-      <p class="lead">Both models run on one ${esc(P.hardware?.gpu || "GPU")}${P.hardware?.price ? ` (${esc(P.hardware.price)})` : ""} under vLLM. Replayed operator requests (about ${sweep[0]?.prompt_tok_mean?.toLocaleString() || "6,000"} prompt tokens, with tool calls) at increasing concurrency. ${P.totals ? `${P.totals.requests.toLocaleString()} requests, ${P.totals.errors} errors.` : ""}</p>
+      <p class="lead">Both models run on one ${esc(P.hardware?.gpu || "GPU")}${P.hardware?.price ? ` (${esc(P.hardware.price)})` : ""} under vLLM. We replayed real operator requests${ptok ? ` (about ${ptok.toLocaleString()} prompt tokens each, ending in a tool call)` : ""} at increasing numbers of simultaneous requests. ${P.totals ? `${P.totals.requests.toLocaleString()} requests, ${P.totals.errors} errors.` : ""}</p>
       <div class="grid2">
-        ${pre.length ? `<div class="card"><div class="card-head">Prefix caching<span class="right muted small">time to first token, p50</span></div><table class="t"><thead><tr><th>Concurrent requests</th><th class="r">Caching on</th><th class="r">Caching off</th><th class="r">Cache hit rate</th><th class="r">Throughput on / off</th></tr></thead><tbody>
+        ${pre.length ? `<div class="card"><div class="card-head">Prefix caching<span class="right muted small">time until the first word comes back, median</span></div><table class="t"><thead><tr><th>Simultaneous requests</th><th class="r">Caching on</th><th class="r">Caching off</th><th class="r">Reused from cache</th><th class="r">Throughput on / off</th></tr></thead><tbody>
           ${pre.map((r) => `<tr><td class="num">${r.n}</td><td class="r num"><b>${r.on?.ttft_p50_ms ?? "–"} ms</b></td><td class="r num">${r.off?.ttft_p50_ms ?? "–"} ms</td><td class="r num">${pct(r.on?.hit, 0)}</td><td class="r num">${fix(r.on?.tok_s, 0)} / ${fix(r.off?.tok_s, 0)} tok/s</td></tr>`).join("")}
         </tbody></table></div>` : ""}
-        ${ron && roff ? `<div class="card"><div class="card-head">Reasoning off for tool calls<span class="right muted small">${ron.n} concurrent</span></div><table class="t"><thead><tr><th></th><th class="r">Reasoning off</th><th class="r">Reasoning on</th></tr></thead><tbody>
+        ${ron && roff ? `<div class="card"><div class="card-head">Reasoning off for tool calls<span class="right muted small">${ron.n} simultaneous requests</span></div><table class="t"><thead><tr><th></th><th class="r">Reasoning off</th><th class="r">Reasoning on</th></tr></thead><tbody>
           <tr><td>Requests / s</td><td class="r num"><b>${fix(roff.req_s, 1)}</b></td><td class="r num">${fix(ron.req_s, 1)}</td></tr>
-          <tr><td>Latency p50</td><td class="r num"><b>${fix(roff.lat_p50_s, 2)} s</b></td><td class="r num">${fix(ron.lat_p50_s, 2)} s</td></tr>
-          <tr><td>Latency p95</td><td class="r num"><b>${fix(roff.lat_p95_s, 2)} s</b></td><td class="r num">${fix(ron.lat_p95_s, 2)} s</td></tr>
+          <tr><td>Latency, median</td><td class="r num"><b>${fix(roff.lat_p50_s, 2)} s</b></td><td class="r num">${fix(ron.lat_p50_s, 2)} s</td></tr>
+          <tr><td>Latency, slowest 5%</td><td class="r num"><b>${fix(roff.lat_p95_s, 2)} s</b></td><td class="r num">${fix(ron.lat_p95_s, 2)} s</td></tr>
           <tr><td>Output tokens / request</td><td class="r num"><b>${roff.out_tok_mean}</b></td><td class="r num">${ron.out_tok_mean}</td></tr>
           <tr><td>Requests ending in a tool call</td><td class="r num">${pct(roff.tool_call_share, 0)}</td><td class="r num">${pct(ron.tool_call_share, 0)}</td></tr>
         </tbody></table></div>` : ""}
       </div>
-      ${sweep.length ? `<div class="card" style="margin-top:16px"><div class="card-head">Two models on one card<span class="right muted small">operator load vs reader latency on the same GPU</span></div><table class="t"><thead><tr><th>Concurrent operator requests</th><th class="r">Operator throughput</th><th class="r">Operator latency p50 / p95</th><th class="r">Time to first token p50</th><th class="r">Reader latency p50 / p95</th><th class="r">Errors</th></tr></thead><tbody>
+      ${sweep.length ? `<div class="card" style="margin-top:16px"><div class="card-head">Two models on one card<span class="right muted small">operator load vs reader speed on the same GPU</span></div><table class="t"><thead><tr><th>Simultaneous operator requests</th><th class="r">Operator throughput</th><th class="r">Operator latency median / slowest 5%</th><th class="r">First word, median</th><th class="r">Reader latency median / slowest 5%</th><th class="r">Errors</th></tr></thead><tbody>
         ${sweep.map((r) => `<tr><td class="num">${r.n}</td><td class="r num">${fix(r.tok_s, 0)} tok/s</td><td class="r num">${fix(r.lat_p50_s, 1)} / ${fix(r.lat_p95_s, 1)} s</td><td class="r num">${r.ttft_p50_ms} ms</td><td class="r num">${r.reader_p50_ms} / ${r.reader_p95_ms} ms</td><td class="r num">${r.errors}</td></tr>`).join("")}
       </tbody></table></div>` : ""}
       <div class="src">Source: <code>${esc(P.source || "")}</code> · method in <code>${esc(P.doc || "")}</code></div>
@@ -957,7 +1048,7 @@ async function renderModel(force) {
   const budgetSec = budget.limit_b ? `
     <div class="section">
       <h2>Parameter budget</h2>
-      <p class="lead">Every generative model the running system loads, by total parameters. The limit is ${budget.limit_b}B.</p>
+      <p class="lead">Every model the running system loads, by total size. The event's limit is ${budget.limit_b}B parameters.</p>
       <div class="card"><div class="card-body">
         <div style="display:flex;align-items:baseline;gap:8px"><span class="num" style="font-size:20px;font-weight:600">${fix(budget.used_b, 1)}B</span><span class="muted">of ${budget.limit_b}B used</span></div>
         <div class="budget">${roles.filter((r) => r.params_b).map((r, i) => `<i style="width:${(r.params_b / budget.limit_b) * 100}%;background:${i ? "#0e9aa7" : "var(--accent)"}" title="${esc(r.who)} ${r.params_b}B"></i>`).join("")}</div>
@@ -966,18 +1057,58 @@ async function renderModel(force) {
       </tbody></table>${budget.note ? `<div class="card-body src" style="margin:0">${esc(budget.note)}</div>` : ""}</div>
     </div>` : "";
 
+  const ogOurs = og.find((g) => g.who === "ours"), ogFront = og.find((g) => g.who === "frontier");
   root.innerHTML = `
-    <div class="page-head"><h1>Model</h1><span class="sub">How the system performs, measured on held-out data</span><div class="right"><span class="muted small" id="model-at">Updated ${new Date(S.modelAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span><button class="btn sm" id="model-refresh">Refresh</button></div></div>
+    <div class="page-head"><h1>Model</h1><span class="sub">How well the system does its job, measured on conversations it never saw</span><div class="right"><span class="muted small" id="model-at">Updated ${new Date(S.modelAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span><button class="btn sm" id="model-refresh">Refresh</button></div></div>
     <div class="page-body">
       <div class="kpis">
-        ${kpi("Held-out pass rate", fin ? pct(fin.pass_rate, 0) : "–", base ? `baseline ${pct(base.pass_rate, 0)}` : "")}
-        ${kpi("Held-out mean reward", fin ? fix(fin.mean_reward, 2) : "–", base ? `baseline ${fix(base.mean_reward, 2)}` : "")}
-        ${kpi("Reader exact match", rd.sample ? pct(rd.sample.finetuned, 0) : "–", rd.opus_exact_match != null ? `Claude Opus 5.5 ${pct(rd.opus_exact_match, 0)}` : "")}
+        ${kpi("Held-out pass rate", fin ? pct(fin.pass_rate, 0) : "–", base ? `starting setup ${pct(base.pass_rate, 0)}` : "", "pass")}
+        ${kpi("Held-out mean reward", fin ? fix(fin.mean_reward, 2) : "–", base ? `starting setup ${fix(base.mean_reward, 2)}${refs[0] ? ` · does-nothing ${fix(refs[0].value, 2)}` : ""}` : "", "reward")}
+        ${ogOurs ? kpi("Reader exact match, owner labels", pct(ogOurs.exact_match, 0), ogFront ? `${esc(modelName(ogFront.model))} ${pct(ogFront.exact_match, 0)} · ${ogOurs.n} messages` : "", "reader")
+                 : kpi("Reader exact match", rd.sample ? pct(rd.sample.finetuned, 0) : "–", rd.opus_exact_match != null ? `${esc(opus)} ${pct(rd.opus_exact_match, 0)}` : "", "reader")}
         ${kpi("Parameters", budget.used_b != null ? fix(budget.used_b, 1) + "B" : "–", budget.limit_b ? `of ${budget.limit_b}B allowed` : "")}
       </div>
       ${heldout}${reader}${serving}${budgetSec}
     </div>`;
   $("#model-refresh").onclick = () => renderModel(true);
+}
+function shortLab(l) {
+  return String(l || "").replace(" · same harness (reference only)", " (reference)").replace(/ \((?!reference).*\)$/, "").replace(", on NeMo Gym's own harness", " on NeMo Gym");
+}
+
+// ================================================================== DATA
+async function renderData() {
+  const root = $("#page-data");
+  if (!S.dataDoc) {
+    try { S.dataDoc = await j("/static/data.json"); } catch { root.innerHTML = emptyState(I.alert, "Couldn't load the data sources", ""); return; }
+  }
+  const D = S.dataDoc;
+  const box = (t, sub, cls = "") => `<div class="fbox ${cls}"><b>${t}</b><span>${sub}</span></div>`;
+  root.innerHTML = `
+    <div class="page-head"><h1>Data</h1><span class="sub">What the system learned from and was tested on, and where to get it</span></div>
+    <div class="page-body">
+      <div class="card flow">
+        <div class="fcol">${box("Open data", "public datasets and rules, listed below")}${box("Owner's own threads", "private · never published, never sent to an outside model", "priv")}</div>
+        <div class="farrow">→</div>
+        <div class="fcol">${box("Synthetic data, made here", "reader messages from templates · twins: rewritten conversations with invented renters", "pub")}</div>
+        <div class="farrow">→</div>
+        <div class="fcol">${box("Reader training", "fine-tune the 0.6B reader")}${box("NeMo Gym tests", "held-out conversations on the Model tab")}</div>
+      </div>
+      <div class="section" style="margin-top:22px"><h2>Published by us</h2><p class="lead">On Hugging Face, byte-identical to the files in the repository.</p>
+        <div class="grid3">${D.published.map((d) => `<div class="card"><div class="card-body">
+          <div style="display:flex;gap:8px;align-items:center"><span class="chip ${d.kind === "model" ? "accent" : ""}">${d.kind}</span><a href="${esc(d.url)}" target="_blank" rel="noopener"><b>${esc(d.name)}</b> ↗</a></div>
+          <p class="small" style="margin:10px 0 6px">${esc(d.what)}</p>
+          <div class="small muted"><b>Used for:</b> ${esc(d.used_for)}</div><div class="small muted"><b>License:</b> ${esc(d.license)}</div>
+        </div></div>`).join("")}</div>
+      </div>
+      <div class="section"><h2>Open sources we used</h2>
+        <div class="card"><table class="t"><thead><tr><th>Source</th><th>Used for</th><th>License</th></tr></thead><tbody>
+          ${D.open.map((d) => `<tr><td><a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.name)} ↗</a></td><td class="muted">${esc(d.used_for)}</td><td class="muted">${esc(d.license)}</td></tr>`).join("")}
+        </tbody></table></div>
+      </div>
+      <div class="section"><h2>Private data</h2><p class="lead" style="max-width:820px">${esc(D.private)}</p>
+        <div class="src">Full method, transformations and rebuild commands: <code>docs/data-provenance.md</code></div></div>
+    </div>`;
 }
 
 // ------------------------------------------------------------------ boot
@@ -1003,5 +1134,6 @@ setInterval(() => {
   await pollStatus();
   route();
   await tick();
-  setInterval(tick, 2500);
+  const loop = async () => { try { await tick(); } catch { /* keep polling */ } setTimeout(loop, 2500); };
+  setTimeout(loop, 2500);
 })();

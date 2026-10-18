@@ -207,11 +207,14 @@ def test_live_channels_api(base):
     assert httpx.post(base + "/api/live/approvals/ap_1", json={"decision": "edit", "text": "Rent is $750, firm."}).json()["ok"]
     assert httpx.get(base + "/api/live/threads/t_test_sam").json()["messages"][-1]["text"] == "Rent is $750, firm."
     assert httpx.post(base + "/api/live/approvals/ap_2", json={"decision": "deny"}).json()["ok"]
-    assert httpx.post(base + "/api/live/approvals/ap_3", json={"decision": "approve"}).json()["ok"]  # dismiss a note
+    d = httpx.post(base + "/api/live/approvals/ap_3", json={"decision": "dismiss"}).json()  # a note: closed, nothing sent
+    assert d["ok"] and d["status"] == "dismissed" and not d["sent"]
     assert not [a for a in httpx.get(base + "/api/live/approvals").json()["items"] if a["source"] == "live"]
     c = httpx.post(base + "/api/live/conversations", json={"channel": "sms", "to": "+15550000", "text": "Hi"}).json()
     assert c["ok"] and c["result"]["thread_id"]
     assert httpx.post(base + "/api/live/conversations", json={"channel": "sms"}).status_code == 400
+    assert httpx.get(base + "/api/live/status").json()["can_archive"] is True
+    assert httpx.post(base + f"/api/live/threads/{c['result']['thread_id']}/archive").json()["ok"]
 
 
 def test_live_unavailable_degrades(tmp_path):

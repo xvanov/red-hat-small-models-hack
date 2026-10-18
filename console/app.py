@@ -524,7 +524,7 @@ def live_status():
     elif isinstance(chans, dict):
         chans = [dict(v, channel=v.get("channel") or k) for k, v in chans.items() if isinstance(v, dict)]
     return {"available": True, "error": None, "channels": chans, "send_enabled": bool(st.get("send_enabled")),
-            "allowlist_size": st.get("allowlist_size") or 0}
+            "allowlist_size": st.get("allowlist_size") or 0, "can_archive": livemod.has("archive_thread")}
 
 
 @app.get("/api/live/threads")
@@ -557,6 +557,16 @@ def live_reply(thread_id: str, body: dict = Body(...)):
     if err:
         raise HTTPException(503, err)
     return _delivery(r)
+
+
+@app.post("/api/live/threads/{thread_id}/archive")
+def live_archive(thread_id: str):
+    if not livemod.has("archive_thread"):
+        raise HTTPException(501, "archiving is not available in the live channels yet")
+    r, err = _live("archive_thread", thread_id)
+    if err:
+        raise HTTPException(503, err)
+    return {"ok": bool((r or {}).get("ok", True)) if isinstance(r, dict) else True}
 
 
 @app.post("/api/live/conversations")
@@ -611,16 +621,24 @@ def live_approvals():
 @app.post("/api/live/approvals/{approval_id:path}")
 def live_decide(approval_id: str, body: dict = Body(...)):
     decision = body.get("decision")
-    if decision not in ("approve", "edit", "deny"):
-        raise HTTPException(400, "decision must be approve, edit or deny")
+    if decision not in ("approve", "edit", "deny", "dismiss"):
+        raise HTTPException(400, "decision must be approve, edit, deny or dismiss")
     text = (body.get("text") or "").strip() or None
     if decision == "edit" and not text:
         raise HTTPException(400, "edit needs text")
     if approval_id.startswith("run:"):
         _, run_id, esc_id = approval_id.split(":", 2)
-        decide(run_id, esc_id, {"decision": "deny" if decision == "deny" else "approve", "text": text,
+        decide(run_id, esc_id, {"decision": "deny" if decision in ("deny", "dismiss") else "approve", "text": text,
                                 "source": (body.get("source") or "console")})
         return {"ok": True, "status": "recorded", "sent": False, "error": None}
+    if decision == "dismiss":  # a note or a draft-less escalation: close it, never send anything
+        if livemod.has("dismiss_approval"):
+            r, err = _live("dismiss_approval", approval_id)
+        else:
+            r, err = _live("decide", approval_id, "deny")
+        if err:
+            raise HTTPException(503, err)
+        return {"ok": bool((r or {}).get("ok", True)) if isinstance(r, dict) else True, "status": "dismissed", "sent": False, "error": None}
     r, err = _live("decide", approval_id, decision, text=text, _timeout=livemod.SEND_TIMEOUT_S)
     if err:  # never fall back to sending the original draft
         raise HTTPException(503, err)

@@ -70,7 +70,7 @@ def path_tabs(p):
     for scheme in ("light", "dark"):
         b, pg = open_page(p, API + "/#/inbox", scheme=scheme)
         for tab, sel in (("inbox", "#thread-list"), ("assistant", "#ask"), ("pipeline", "#page-pipeline .page-head"),
-                         ("model", "#page-model .kpis")):
+                         ("model", "#page-model .kpis"), ("data", "#page-data .flow")):
             pg.goto(API + f"/#/{tab}")
             try:
                 pg.wait_for_selector(sel, timeout=15000)
@@ -103,7 +103,12 @@ def path_inbox(p):
     pg.wait_for_selector("#msgs .msg", timeout=15000)
     pg.wait_for_timeout(1200)
     check("thread opens with its messages", len(pg.query_selector_all("#msgs .msg")) >= 1)
-    check("qualification dots show all five items", len(pg.query_selector_all(".qual .gate i")) == 5)
+    first = th["items"][0]
+    nd = len(pg.query_selector_all(".qual .gate i"))
+    if first.get("role") in (None, "prospect"):
+        check("qualification items shown for a prospect", nd in (4, 5), f"{nd} items ({first.get('channel')}; SMS hides phone)")
+    else:
+        check("no qualification dots for tenant / lease threads", nd == 0, first.get("role"))
     if not pg.is_visible(".activity"):
         pg.click("#toggle-act")
     check("Activity drawer lists the thread's trace", pg.is_visible(".activity .act-list"))
@@ -169,11 +174,10 @@ def path_approval(p):
             time.sleep(0.5)
         pg.on("dialog", lambda d: d.accept())
         pg.goto(base + f"/?origin=verify&run={rid}#/assistant")
-        pg.wait_for_selector('button[data-fb="prepare"]', timeout=20000)
+        pg.wait_for_selector('button[data-fb="publish"]', timeout=20000)
         fb0 = get(f"/api/runs/{rid}/posts", base)["listings"][0]["channels"][-1]["state"]
         check("Facebook Page is never posted without a click", fb0 == "not_prepared", fb0)
-        pg.click('button[data-fb="prepare"]')
-        pg.wait_for_selector('button[data-fb="publish"]', timeout=15000)
+        check("Facebook row previews the post text before publishing", "Appling" in pg.inner_text(".prow.fb"))
         pg.click('button[data-fb="publish"]')
         pg.wait_for_selector('text=View post', timeout=15000)
         fb1 = get(f"/api/runs/{rid}/posts", base)["listings"][0]["channels"][-1]
@@ -207,6 +211,10 @@ def path_model(p):
     base = next((c for c in r.get("configs") or [] if c["kind"] == "baseline"), None)
     if fin and base:
         want = [f"{fin['pass_rate'] * 100:.1f}%", f"{base['pass_rate'] * 100:.1f}%", f"{fin['mean_reward']:.3f}"]
+        check("plain setup names (no bare 'Final')", "Final" not in text and "starting setup" in text, r.get("version"))
+        check("metric explanations available on hover", len(pg.query_selector_all("#page-model .info")) >= 6)
+        if r.get("floors"):
+            check("reference floors shown", "Reference: Does nothing" in text)
         check("held-out numbers match /api/results", all(w in text for w in want), ", ".join(want) + f" ({r.get('version')})")
         check("charts with confidence intervals drawn", len(pg.query_selector_all(".chart svg .whisk")) >= 6)
     else:
@@ -214,7 +222,7 @@ def path_model(p):
     rd = t.get("reader") or {}
     if rd.get("sample"):
         check("reader exact match vs Lightning vs Opus shown",
-              f"{rd['sample']['finetuned'] * 100:.0f}%" in text and "Claude Opus 5.5" in text and "Lightning 30B" in text)
+              f"{rd['sample']['finetuned'] * 100:.0f}%" in text and "Claude Opus 5.5" in text and "Lightning" in text)
     check("serving numbers shown (prefix caching, reasoning off)", "Prefix caching" in text and "Reasoning off" in text)
     bud = t.get("budget") or {}
     check("parameter budget shown", f"{bud.get('used_b', 0):.1f}B" in text and f"{bud.get('limit_b', 0):g}B" in text)

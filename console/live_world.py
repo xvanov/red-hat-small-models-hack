@@ -79,6 +79,13 @@ def prepare_world(world, toolbox) -> dict:
 
 
 # ------------------------------------------------------------------ honest posting status
+def _rel(p: Path) -> str:
+    try:
+        return str(p.resolve().relative_to(REPO))
+    except ValueError:
+        return str(p)
+
+
 def _exists(p: str | None) -> bool:
     return bool(p) and ((REPO / p).is_file() or Path(p).is_file())
 
@@ -140,10 +147,11 @@ def posts(listings: list[dict], events: list[dict], fb: dict) -> list[dict]:
                 else:
                     rows.append({"channel": ch, "state": "failed", "label": "Failed", "detail": err.get("message") or code})
         f = fb.get(lid) or {}
-        rows.append({"channel": "facebook_page", "state": f.get("state") or "not_prepared",
-                     "label": {"draft": "Draft on Page, not visible yet", "published": "Published",
-                               "failed": "Failed"}.get(f.get("state"), "Not posted"),
-                     "detail": f.get("error"), "url": f.get("permalink"), "post_id": f.get("post_id")})
+        rows.insert(0, {"channel": "facebook_page", "state": f.get("state") or "not_prepared",
+                        "label": {"draft": "Draft on Page, not visible yet", "published": "Published",
+                                  "failed": "Not published"}.get(f.get("state"), "Ready to publish"),
+                        "detail": f.get("error"), "url": f.get("permalink"), "post_id": f.get("post_id"),
+                        "preview": post_text(l), "photos": [_rel(p) for p in room_photos()[:4]]})
         out.append({"listing_id": lid, "title": l.get("title"), "body": l.get("body"), "price": l.get("price"),
                     "status": l.get("status"), "channels": rows})
     return out

@@ -52,6 +52,13 @@ def call(fn: str, *args, _timeout: float | None = None, **kw):
         raise Unavailable(f"{fn} did not answer within {_timeout or CALL_TIMEOUT_S:.0f}s; it may still complete, check the thread")
 
 
+def has(fn: str) -> bool:
+    try:
+        return callable(getattr(_api(), fn, None))
+    except Unavailable:
+        return False
+
+
 def last_error() -> str | None:
     return _STATE["error"]
 

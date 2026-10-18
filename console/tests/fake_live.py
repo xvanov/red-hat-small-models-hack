@@ -19,7 +19,7 @@ def _ts(minutes_ago: float) -> str:
 THREADS: dict[str, dict] = {
     "t_test_sam": {
         "thread_id": "t_test_sam", "channel": "messenger", "contact_display": "Sam Test", "renter_name": "Sam",
-        "stage": "qualifying", "unread": True, "needs_owner": True,
+        "stage": "qualifying", "role": "prospect", "unread": True, "needs_owner": True,
         "gate": {"lease": "exact", "move_in": "vague", "phone": "missing", "reason": "exact", "people": "exact"},
         "messages": [
             {"id": "m1", "direction": "in", "text": "Hi, is the room with the private bath still available?", "ts": _ts(30), "status": "received", "channel": "messenger"},
@@ -36,7 +36,8 @@ THREADS: dict[str, dict] = {
     },
     "t_test_lee": {
         "thread_id": "t_test_lee", "channel": "sms", "contact_display": "+1 555 0100", "renter_name": "Lee",
-        "stage": "qualified", "unread": False, "needs_owner": False,
+        "stage": "tenant", "role": "tenant", "context": "Current tenant · Test Lane room · rent $700 due 1st",
+        "unread": False, "needs_owner": False,
         "gate": {"lease": "exact", "move_in": "exact", "phone": "exact", "reason": "exact", "people": "exact"},
         "messages": [
             {"id": "m4", "direction": "in", "text": "Saw the listing, can I see it Saturday?", "ts": _ts(120), "status": "received", "channel": "sms"},
@@ -132,3 +133,15 @@ def start_conversation(channel, to, text):
                         "messages": [{"id": f"m{next(_IDS)}", "direction": "out", "text": text, "ts": _ts(0), "status": "sent", "channel": channel}],
                         "trace": []}
         return {"thread_id": tid}
+
+
+def dismiss_approval(approval_id):
+    with _LOCK:
+        a = APPROVALS.pop(approval_id, None)
+        DECISIONS.append((approval_id, "dismiss", None))
+        return {"ok": a is not None}
+
+
+def archive_thread(thread_id):
+    with _LOCK:
+        return {"ok": THREADS.pop(thread_id, None) is not None}

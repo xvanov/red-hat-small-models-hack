@@ -174,6 +174,11 @@ def trust() -> dict:
         "sample": {k: (same.get(k) or {}).get("exact_match") for k in ("finetuned", "fallback", "lightning", "base")},
         "opus_exact_match": ropus.get("exact_match"), "opus_cost_per_read_usd": ropus.get("cost_per_row_usd"),
         "opus_latency_p50_s": (ropus.get("latency_s") or {}).get("p50"),
+        "opus_model": ropus.get("model"),
+        "owner_gold": [{"who": who, "model": m.get("model"), "n": m.get("n"), "exact_match": m.get("exact_match")}
+                       for who, m in ((w, _json(READER / f"{f}.owner_gold_combined.metrics.json") or {})
+                                      for w, f in (("ours", "finetuned-twin"), ("frontier", "frontier-twin"), ("lightning", "lightning-twin")))
+                       if m.get("n")],
     }
     total = LIGHTNING_PARAMS_B + (reader_b or 0)
     return {
@@ -244,6 +249,28 @@ def _v2_groups() -> dict[str, list[Path]]:
     return {}
 
 
+def plain_label(name: str, config_label: str, spec: str) -> tuple[str, str]:
+    """A name a non-expert can read, from the run name and its config string, plus one line on what it is."""
+    cfg = dict(t.split("=", 1) for t in config_label.split() if "=" in t)
+    prompt = cfg.get("prompt", "?")
+    reader = "fine-tuned reader" if "readermodel" in spec or "readermodel" in name else "rule-based reader"
+    tuned = f"v{prompt.lstrip('v')} prompt + guards + {reader}"
+    if name == "baseline":
+        return "Lightning · starting setup", f"Nemotron 3.5 Lightning with our first prompt ({prompt}), verbose tool descriptions and the rule-based reader"
+    if name == "final":
+        return f"Lightning · tuned ({tuned})", "Nemotron 3.5 Lightning with everything we built: " + tuned
+    if name == "final-router":
+        return "Lightning · tuned + router", f"The tuned setup ({tuned}) plus a router that picks the tools offered per step"
+    if name == "final-nemo":
+        return "Lightning · tuned, on NeMo Gym's own harness", "The tuned prompt run through NeMo Gym's simple_agent instead of our loop"
+    if name.startswith("frontier"):
+        return "Claude Opus 5.5 · same harness (reference only)", "A frontier model in the same loop and tools, for scale; never used by the running system"
+    return name.replace("-", " "), config_label
+
+
+FLOORS = GYM / "v3-floors.json"
+
+
 def results_v2() -> dict:
     """Held-out v2 configs with 95% CIs and paired tests, computed by gym/stats.py from per_task.jsonl."""
     groups = _v2_groups()
@@ -275,10 +302,11 @@ def results_v2() -> dict:
         cost = [r["cost_usd"] for r in rows if isinstance(r.get("cost_usd"), (int, float))]
         label, kind = V2_LABELS.get(name, ("Claude Opus 5.5, same harness (reference)", "reference") if name.startswith("frontier")
                                     else (name.replace("-", " "), "variant"))
+        plain, explain = plain_label(name, sums[0].get("config_label") or "", (sums[0].get("variant") or {}).get("spec") or "")
         k = s["k"]
         cfgs[name] = cfg
         out["configs"].append({
-            "name": name, "label": label, "kind": kind, "runs": s["runs"] and len(s["runs"]), "tasks": s["tasks"],
+            "name": name, "label": label, "plain_label": plain, "explain": explain, "kind": kind, "runs": s["runs"] and len(s["runs"]), "tasks": s["tasks"],
             "pass_rate": s["pass_rate"], "pass_ci": list(s["pass_ci"]), "mean_reward": s["mean_reward"],
             "reward_ci": list(s["reward_ci"]), "pass_all_runs": s["pass_hat"][k][0] if k >= 2 else None,
             "pass_any_run": s["pass_at"][k] if k >= 2 else None, "flaky_tasks": s.get("flaky_tasks"),
@@ -312,6 +340,13 @@ def results_v2() -> dict:
             out["categories"][n] = {cat: {"tasks": v["tasks"], "pass_rate": v["pass_rate"], "pass_ci": list(v["pass_ci"]),
                                           "mean_reward": v["mean_reward"], "reward_ci": list(v["reward_ci"])}
                                     for cat, v in st.by_category(cfgs[n]).items()}
+    fl = _json(FLOORS) or {}
+    tasks = next((c["tasks"] for c in out["configs"] if c["kind"] == "final"), None)
+    if fl.get("agents") and fl.get("tasks") == tasks:  # floors only when they were scored on this same task set
+        names = {"do_nothing": "Does nothing", "greet_only": "Only says hello", "escalate_all": "Hands everything to the owner",
+                 "mark_lost": "Marks every renter lost"}
+        out["floors"] = [{"name": k, "label": names.get(k, k), "mean_reward": v.get("mean_reward"), "pass_rate": v.get("pass_rate")}
+                         for k, v in fl["agents"].items()]
     _RESULTS_CACHE.update(key=key, value=out)
     return out
 
