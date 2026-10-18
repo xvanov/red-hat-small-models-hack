@@ -1,817 +1,896 @@
-// Rentus Operator console. Vanilla JS, no build step.
+/* Rentus Operator console: Inbox, Assistant, Pipeline, Model. Plain JS, no build step. */
 "use strict";
 
-const CHANNELS = ["marketplace", "roomies", "craigslist", "padsplit", "sms", "email"];
-const LANE_NAMES = { marketplace: "Marketplace", roomies: "Roomies", craigslist: "Craigslist", padsplit: "PadSplit", sms: "SMS", email: "Email" };
-const GATE = ["lease", "move_in", "phone", "reason", "occupants"];
-const GATE_LABEL = { lease: "Lease", move_in: "Move-in", phone: "Phone", reason: "Reason", occupants: "People" };
-const STATE_WORD = { ok: "answered exactly", vague: "vague, asked again", no: "no", none: "not asked yet" };
-const STATUS_LABEL = { new: "New", qualifying: "Qualifying", qualified: "Qualified", showing_proposed: "Showing proposed",
-  showing_confirmed: "Showing confirmed", applied: "Applied", leased: "Placed", not_now: "Parked", lost: "Closed", escalated: "Waiting on you" };
-const STATUS_TONE = { qualified: "ok", showing_proposed: "accent", showing_confirmed: "ok", applied: "ok", leased: "ok", not_now: "warn", lost: "err", escalated: "warn" };
-const FAULT_LABEL = { page_changed: "Page changed", malformed: "Malformed result", rate_limited: "Rate limited",
-  login_required: "Login wall", timeout: "Timeout", upstream_error: "Upstream 502", not_found: "Not found" };
-
-const S = { runId: null, es: null, seen: new Set(), status: null, badge: null, readerLabel: "rentus-reader 0.6B",
-  viewTimer: null, lastView: null, seenMsgs: new Set(), editing: {}, qrUrl: null, calls: {}, group: null,
-  groups: 0, reasoning: null, threadNames: {}, trust: null, cardSig: {} };
-const $ = (id) => document.getElementById(id);
+// ------------------------------------------------------------------ helpers
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const pct = (x, d = 0) => (x == null ? "–" : (100 * x).toFixed(d) + "%");
-const fix = (x, d = 3) => (x == null ? "–" : Number(x).toFixed(d));
-const humanize = (s) => { s = String(s ?? ""); return /^[a-z]+(_[a-z]+)+$/.test(s) ? s.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase()) : s; };
-const hms = (ts) => { if (!ts) return ""; const d = new Date(ts); return isNaN(d) ? String(ts).slice(11, 19) : d.toLocaleTimeString("en-GB", { hour12: false }); };
-const short = (v, n = 90) => { let s = typeof v === "string" ? v : JSON.stringify(v); if (s === undefined) s = ""; return s.length > n ? s.slice(0, n - 1) + "…" : s; };
-const fmtDate = (s) => { if (!s) return ""; const d = new Date(String(s).length <= 10 ? s + "T12:00" : s); return isNaN(d) ? String(s) :
-  d.toLocaleDateString("en-US", { month: "short", day: "numeric" }) + (String(s).length > 10 ? " " + d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : ""); };
-
-async function api(path, opts = {}) {
-  const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts, body: opts.body ? JSON.stringify(opts.body) : undefined });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.detail || j.error || r.statusText);
-  return j;
+const pct = (x, d = 0) => (x == null || isNaN(x) ? "–" : (x * 100).toFixed(d) + "%");
+const fix = (x, d = 2) => (x == null || isNaN(x) ? "–" : Number(x).toFixed(d));
+async function j(url) {
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
 }
-
-// ================================================================ status, badges, demo bar
-async function refreshStatus() {
-  try {
-    const s = await api("/api/status");
-    S.status = s; S.badge = s.badge; S.readerLabel = s.reader_label || S.readerLabel;
-    setPill($("badge"), s.badge.live, s.badge.live ? "Nemotron 3.5 Lightning 30B · vLLM" : s.badge.label,
-      s.badge.live ? `models: ${(s.badge.models || []).join(", ")} · config ${s.operator_config || ""} (best on the held-out Gym tasks)`
-        : (s.badge.operator_import_error || "OPERATOR_BASE_URL not reachable"));
-    if (s.reader) setPill($("readerBadge"), s.reader.live, s.reader.live ? "rentus-reader 0.6B" : s.reader.label.replace(/^reader: /, ""),
-      s.reader.live ? "models: " + (s.reader.models || []).join(", ") : "READER_BASE_URL not reachable: read_reply uses the rule-based fallback");
-    if (!S.faultsBuilt) buildFaultMenu(s.fault_kinds, s.default_fault_tool, s.fault_help || {});
-    if (s.active_run && s.active_run !== S.runId) { resetUI(); attach(s.active_run); }
-    if (!s.active_run && S.runId) { detach(); resetUI(); }
-    const st = s.run_status || "";
-    $("runinfo").innerHTML = S.runId ? `<i class="dot ${st === "running" ? "on" : "idle"}"></i>${esc(st === "running" ? "working" : st || "ready")}`
-      : `<i class="dot"></i>no run`;
-    $("runinfo").title = S.runId ? "run " + S.runId : "";
-    renderDemo(s.demo && s.demo.run_id === S.runId ? s.demo : null, s.approve_url);
-  } catch (e) { setPill($("badge"), false, "console offline", ""); }
+async function post(url, body) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.detail || d.error || r.statusText);
+  return d;
 }
-
-function setPill(el, live, text, title) {
-  el.className = "pill " + (live ? "live" : "stub");
-  el.querySelector(".pv").textContent = text;
-  el.title = title || "";
+function toast(msg) {
+  const t = document.createElement("div");
+  t.className = "toast";
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3200);
 }
-
-function buildFaultMenu(kinds, defaults, help) {
-  S.faultsBuilt = true;
-  const box = $("faultList");
-  box.innerHTML = "";
-  for (const k of ["page_changed", "malformed", "rate_limited", "login_required", "timeout", "upstream_error", "not_found"].filter((k) => kinds.includes(k))) {
-    const b = document.createElement("button");
-    b.innerHTML = `<span class="fl">${esc(FAULT_LABEL[k])}</span><span class="ft">next ${esc(defaults[k])}</span><span class="fh">${esc(help[k] || "")}</span>`;
-    b.onclick = () => injectFault(k);
-    box.appendChild(b);
-  }
-}
-
-async function injectFault(kind) {
-  $("breakMenu").classList.add("hidden");
-  if (!S.runId) return sysChat("Start a run first, then break it.");
-  try {
-    const r = await api(`/api/runs/${S.runId}/faults`, { method: "POST", body: { kind, tool: $("faultTool").value || null } });
-    sysChat(`Broke it: ${FAULT_LABEL[kind]} on the next ${r.fault.tool} call.`);
-  } catch (e) { sysChat("Fault failed: " + e.message); }
-}
-
-function renderDemo(d, approveUrl) {
-  const bar = $("demoBar");
-  const running = !!(d && !d.finished);
-  $("demoBtn").disabled = running;
-  $("demoBtn").textContent = running ? "Demo running…" : "▶ Demo run";
-  if (!d) { bar.classList.add("hidden"); return; }
-  bar.classList.remove("hidden");
-  const ids = d.steps.map((s) => s.id);
-  const cur = ids.indexOf(d.step);
-  $("demoSteps").innerHTML = d.steps.filter((s) => s.id !== "done").map((s, i) =>
-    `<li class="${i < cur || d.step === "done" ? "done" : i === cur ? "now" : ""}"><span class="b">${i < cur || d.step === "done" ? "✓" : i + 1}</span>${esc(s.title)}</li>`).join("");
-  const st = d.steps[cur] || { title: "Starting", say: "" };
-  $("demoTitle").textContent = d.error ? "Demo stopped" : st.title;
-  $("demoSay").textContent = d.error ? d.error : st.say;
-  const sec = Math.round(d.elapsed || 0);
-  $("demoClock").textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
-  const url = d.approve_url || approveUrl || "";
-  $("phoneUrl").textContent = url.replace(/^https?:\/\//, "");
-  $("phoneBox").classList.toggle("hot", d.step === "approve");
-  if (url && url !== S.qrUrl && window.QRCode) {
-    $("qr").innerHTML = "";
-    try { new QRCode($("qr"), { text: url, width: 144, height: 144 }); S.qrUrl = url; } catch (e) { /* offline: the URL text is enough */ }
-  }
-}
-
-async function startDemo() {
-  try {
-    $("demoBtn").disabled = true;
-    const r = await api("/api/demo", { method: "POST", body: { speed: parseFloat($("speed").value) } });
-    resetUI(); attach(r.run_id); refreshStatus();
-  } catch (e) { sysChat("Demo failed: " + e.message); $("demoBtn").disabled = false; }
-}
-
-// ================================================================ evidence panels
-function wilson(p, n) {  // 95% Wilson interval for a proportion measured on n items
-  if (p == null || !n) return null;
-  const z = 1.959964, d = 1 + z * z / n, c = (p + z * z / (2 * n)) / d, h = (z * Math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))) / d;
-  return [Math.max(0, c - h), Math.min(1, c + h)];
-}
-
-function ciBar(est, ci, cls = "", digits = 3, asPct = false) {
-  const lo = ci ? ci[0] : est, hi = ci ? ci[1] : est;
-  const f = (x) => (asPct ? pct(x, 0) : fix(x, digits));
-  return `<div class="ci ${cls}" title="95% CI ${f(lo)} to ${f(hi)}"><span class="lbl">${asPct ? pct(est, 1) : fix(est, digits)}</span>
-    <span class="trk"><span class="rng" style="left:${(100 * lo).toFixed(1)}%;width:${Math.max(0.6, 100 * (hi - lo)).toFixed(1)}%"></span>
-    <span class="pt" style="left:${(100 * est).toFixed(1)}%"></span></span><span class="cit">${ci ? f(lo) + " to " + f(hi) : ""}</span></div>`;
-}
-
-async function loadTrust() {
-  const box = $("tab-trust");
-  try {
-    const [t, R2] = await Promise.all([api("/api/trust"), api("/api/results")]);
-    S.trust = t;
-    $("kpiParams").textContent = `${t.budget.used_b}B / ${t.budget.limit_b}B`;
-    const cfg = Object.fromEntries((R2.configs || []).map((c) => [c.name, c]));
-    const fin = cfg.final, base = cfg.baseline, R = t.reader;
-    const cmp = (R2.compare || []).find((c) => c.a === (fin && fin.label) && c.b === (base && base.label));
-    const opB = t.roles[0].params_b, rdB = t.roles[1].params_b || 0, lim = t.budget.limit_b;
-    box.innerHTML = `
-      ${fin && base ? `<div class="tiles">
-        <div class="tile hl"><div class="k">Held-out reward, final</div><div class="v">${fix(fin.mean_reward)}<small>of 1</small></div>
-          <div class="d">95% CI ${fix(fin.reward_ci[0])} to ${fix(fin.reward_ci[1])} · baseline ${fix(base.mean_reward)}</div></div>
-        <div class="tile"><div class="k">Tasks fully passed</div><div class="v">${pct(fin.pass_rate, 0)}<small>vs ${pct(base.pass_rate, 0)}</small></div>
-          <div class="d">95% CI ${pct(fin.pass_ci[0])} to ${pct(fin.pass_ci[1])}, ${fin.tasks} tasks × ${fin.runs} runs</div></div>
-        ${cmp ? `<div class="tile"><div class="k">Better than baseline on</div><div class="v">${cmp.a_better}<small>of ${cmp.tasks} tasks</small></div>
-          <div class="d">worse on ${cmp.b_better} · Holm p ${cmp.p_pass_holm < 0.001 ? "< 0.001" : fix(cmp.p_pass_holm, 3)}</div></div>` : ""}
-        <div class="tile"><div class="k">Parameter budget</div><div class="v">${t.budget.used_b}B<small>of ${lim}B</small></div>
-          <div class="d">no paid API in the loop</div></div>
-      </div>` : ""}
-      <div class="h3">Who does what</div>
-      <div class="roles">
-        ${t.roles.map((r, i) => `<div class="role ${["op", "rd2", "vf"][i]}"><div class="rh"><b>${esc(r.who)}</b><span class="p">${r.params_b ? r.params_b + "B" : "0B"}</span></div>
-          <div class="rm">${r.link ? `<a href="${esc(r.link)}" target="_blank">${esc(r.model)} ↗</a>` : esc(r.model)}</div>
-          <div class="rd">${esc(r.does)}. ${esc(r.served)}.</div></div>`).join("")}
-      </div>
-      <div class="budget"><div class="bar"><div class="op" style="width:${(100 * opB / lim).toFixed(1)}%" title="operator ${opB}B"></div>
-        <div class="rd" style="width:${Math.max(0.8, 100 * rdB / lim).toFixed(1)}%" title="reader ${rdB}B"></div></div>
-        <div class="lab"><span>operator ${opB}B + reader ${rdB}B = ${t.budget.used_b}B</span><span>limit ${lim}B</span></div></div>
-      <div class="h3">Reader on the same ${R.sample_n || "?"} held-out messages <span class="muted">(exact match = every field right)</span></div>
-      <table class="t"><tr><th></th><th>exact match, 95% CI</th><th class="r">latency p50</th><th class="r">cost / read</th></tr>
-        <tr class="ours"><td>rentus-reader 0.6B, fine-tuned</td><td>${ciBar(R.sample.finetuned || 0, wilson(R.sample.finetuned, R.sample_n), "", 3, true)}</td><td class="r">${fix(R.latency_p50_s, 2)} s</td><td class="r">$0</td></tr>
-        <tr><td>Claude Opus 5.5, prompted</td><td>${ciBar(R.opus_exact_match || 0, wilson(R.opus_exact_match, R.sample_n), "base", 3, true)}</td><td class="r">${fix(R.opus_latency_p50_s, 1)} s</td><td class="r">$${fix(R.opus_cost_per_read_usd, 3)}</td></tr>
-        <tr><td>Lightning 30B, prompted</td><td>${ciBar(R.sample.lightning || 0, wilson(R.sample.lightning, R.sample_n), "base", 3, true)}</td><td></td><td></td></tr>
-        <tr><td>Rule-based fallback</td><td>${ciBar(R.sample.fallback || 0, wilson(R.sample.fallback, R.sample_n), "base", 3, true)}</td><td></td><td></td></tr>
-      </table>
-      <div class="note">${fin ? `Reliability is the weak spot: <b>${pct(fin.pass_all_runs, 0)}</b> of tasks pass in all ${fin.runs} runs, ${pct(fin.pass_any_run, 0)} in at least one. ` : ""}
-        Reader trained on ${R.train_rows?.toLocaleString() || "?"} open and synthetic EN/ES messages in ${R.train_minutes || "?"} min; full test set (${R.test_rows} rows) ${pct(R.exact_match_full, 1)}.
-        Published at <a href="${esc(R.hf)}" target="_blank">${esc(R.hf.replace("https://", ""))}</a>. Read live from ${esc(R2.source)} and ${t.sources.slice(2).map(esc).join(", ")}.</div>`;
-  } catch (e) { box.innerHTML = `<div class="empty">trust panel error: ${esc(e.message)}</div>`; }
-}
-
-async function loadResults() {
-  const box = $("tab-score");
-  try {
-    const [R2, v1] = await Promise.all([api("/api/results"), api("/api/scoreboard")]);
-    const cs = R2.configs || [];
-    const cats = R2.categories || {};
-    const catNames = Object.keys(cats.final || cats.baseline || {});
-    const sign = (x, d = 3) => (x >= 0 ? "+" : "−") + Math.abs(x).toFixed(d);
-    const p = (x) => (x < 0.001 ? "< 0.001" : x.toFixed(3));
-    box.innerHTML = (cs.length ? `
-      <div class="h3">Held-out tasks, never used for tuning <span class="muted">(${cs[0].tasks} tasks, approved task set v2)</span></div>
-      <table class="t"><tr><th>config</th><th class="r">runs</th><th>mean reward, 95% CI</th><th>pass rate, 95% CI</th><th class="r">pass in every run</th><th class="r">time / task p50</th></tr>
-        ${cs.map((c) => `<tr class="${c.kind === "final" ? "ours" : ""}" title="${esc(c.config_label || "")}"><td>${esc(c.label)}${c.via === "nemo" ? ' <span class="chip">NeMo Gym</span>' : ""}</td>
-          <td class="r">${c.runs}</td><td>${ciBar(c.mean_reward, c.reward_ci, c.kind === "final" ? "" : "base")}</td>
-          <td>${ciBar(c.pass_rate, c.pass_ci, c.kind === "final" ? "" : "base", 3, true)}</td>
-          <td class="r">${c.pass_all_runs == null ? "–" : pct(c.pass_all_runs, 0)}</td><td class="r">${c.task_seconds_p50 == null ? "–" : Math.round(c.task_seconds_p50) + " s"}</td></tr>`).join("")}
-      </table>
-      <div class="h3">Paired tests on the same tasks <span class="muted">(Holm-corrected)</span></div>
-      <table class="t"><tr><th>A vs B</th><th>Δ reward, 95% CI</th><th class="r">p</th><th class="r">Δ pass</th><th class="r">tasks A / B better</th></tr>
-        ${(R2.compare || []).map((c) => { const sig = c.p_reward_holm < 0.05; const cls = !sig ? "flat" : c.d_reward > 0 ? "pos" : "neg";
-          return `<tr><td>${esc(c.a)} vs ${esc(c.b)}</td><td><span class="delta ${cls}">${sign(c.d_reward)}</span> <span class="muted">(${sign(c.d_reward_ci[0])} to ${sign(c.d_reward_ci[1])})</span></td>
-          <td class="r">${p(c.p_reward_holm)}</td><td class="r">${sign(100 * c.d_pass, 1)} pts</td><td class="r">${c.a_better} / ${c.b_better}</td></tr>`; }).join("")}
-      </table>
-      ${catNames.length ? `<div class="h3">By category, baseline → final <span class="muted">(mean reward)</span></div>
-      <table class="t"><tr><th>category</th><th class="r">tasks</th><th>baseline</th><th>final</th></tr>
-        ${catNames.map((k) => `<tr><td>${esc(k)}</td><td class="r">${(cats.final || cats.baseline)[k].tasks}</td>
-          <td>${cats.baseline && cats.baseline[k] ? ciBar(cats.baseline[k].mean_reward, cats.baseline[k].reward_ci, "base") : "–"}</td>
-          <td>${cats.final && cats.final[k] ? ciBar(cats.final[k].mean_reward, cats.final[k].reward_ci) : "–"}</td></tr>`).join("")}
-      </table>` : ""}
-      <div class="note">Same Lightning weights in every row; only the harness, prompt, verifier and reader change. Pass rate = every check on a task passed (Wilson interval over tasks); reward = share of checks passed (bootstrap over tasks). Computed live by gym/stats.py from ${esc(R2.source.split(" via")[0])}; write-up in ${esc(R2.doc)}.</div>`
-      : `<div class="empty">No v2 held-out results yet (gym/results/v2-heldout-*).</div>`) +
-      (v1.length ? `<details class="v1"><summary>Earlier v1 ablation ladder and Opus reference (superseded task set, not comparable)</summary><div class="ladder">` +
-        v1.map((r) => `<div class="sb k-${esc(r.kind)}"><div class="top"><span>${esc(r.label)} <span class="muted small">${r.runner === "nemo" ? "NeMo Gym" : "our loop"} · ${r.runs} run${r.runs > 1 ? "s" : ""}</span></span>
-          <span class="num">${fix(r.passed, r.passed % 1 ? 1 : 0)}/${r.tasks} · <b>${fix(r.mean_reward)}</b></span></div><div class="bar"><div style="width:${(100 * r.mean_reward).toFixed(1)}%"></div></div></div>`).join("") +
-        `</div></details>` : "");
-  } catch (e) { box.innerHTML = `<div class="empty">results error: ${esc(e.message)}</div>`; }
-}
-
-async function loadPerf() {
-  const box = $("tab-perf");
-  try {
-    const P = await api("/api/performance");
-    if (!P.sweep.length) { box.innerHTML = `<div class="empty">No serving benchmarks yet (${esc(P.source)}).</div>`; return; }
-    const best = P.prefix.length ? P.prefix[P.prefix.length - 1] : null;
-    const peak = Math.max(...P.sweep.map((r) => r.tok_s), ...(P.prefix.map((x) => x.on.tok_s)));
-    const ron = P.reasoning.find((r) => r.reasoning === "on"), roff = P.reasoning.find((r) => r.reasoning === "off");
-    const readerP95 = Math.max(...P.sweep.filter((r) => r.n > 1).map((r) => r.reader_p95_ms || 0));
-    const maxSweep = Math.max(...P.sweep.map((r) => r.tok_s));
-    const maxPre = best ? Math.max(...P.prefix.map((x) => x.on.tok_s)) : 1;
-    box.innerHTML = `
-      <div class="tiles">
-        <div class="tile hl"><div class="k">Peak throughput</div><div class="v">${Math.round(peak).toLocaleString()}<small>tok/s</small></div><div class="d">one ${esc(P.hardware?.gpu || "GPU")}${P.hardware ? ", " + esc(P.hardware.price) : ""}</div></div>
-        ${best ? `<div class="tile"><div class="k">Prefix caching</div><div class="v">+${Math.round(100 * (best.on.tok_s / best.off.tok_s - 1))}%<small>at N=${best.n}</small></div><div class="d">time to first token ${(best.on.ttft_p50_ms / 1000).toFixed(1)} s vs ${(best.off.ttft_p50_ms / 1000).toFixed(1)} s</div></div>` : ""}
-        ${ron && roff ? `<div class="tile"><div class="k">Reasoning off, tool turns</div><div class="v">${roff.req_s}<small>vs ${ron.req_s} turns/s</small></div><div class="d">p95 ${roff.lat_p95_s.toFixed(1)} s vs ${ron.lat_p95_s.toFixed(1)} s, all turns still tool calls</div></div>` : ""}
-        <div class="tile"><div class="k">Reader under load</div><div class="v">≤ ${readerP95}<small>ms p95</small></div><div class="d">0.6B on the same GPU at every operator load</div></div>
-        <div class="tile"><div class="k">Benchmark requests</div><div class="v">${P.totals.requests.toLocaleString()}<small>${P.totals.errors} errors</small></div><div class="d">real ${P.totals.prompt_tokens?.toLocaleString()}-token prompt, ${P.totals.tools} tool schemas</div></div>
-      </div>
-      <div class="twocol">
-        <div><div class="h3">Output tokens/s by concurrent requests</div>
-          <div class="chart">${P.sweep.map((r) => `<div class="col2"><div class="bars"><div class="b" style="height:${(100 * r.tok_s / maxSweep).toFixed(1)}%" title="N=${r.n}: ${Math.round(r.tok_s)} tok/s, latency p50 ${r.lat_p50_s}s, TTFT p50 ${r.ttft_p50_ms} ms, ${r.errors} errors"><span>${Math.round(r.tok_s)}</span></div></div></div>`).join("")}</div>
-          <div class="chart-x">${P.sweep.map((r) => `<span>N=${r.n}</span>`).join("")}</div></div>
-        ${best ? `<div><div class="h3">Prefix caching on vs off <span class="muted">(paired runs)</span></div>
-          <div class="chart-legend"><span><i></i>caching on</span><span><i class="off"></i>off</span></div>
-          <div class="chart" style="height:116px">${P.prefix.map((x) => `<div class="col2"><div class="bars">
-            <div class="b" style="height:${(100 * x.on.tok_s / maxPre).toFixed(1)}%" title="N=${x.n}, caching on: ${Math.round(x.on.tok_s)} tok/s"><span>${Math.round(x.on.tok_s)}</span></div>
-            <div class="b off" style="height:${(100 * x.off.tok_s / maxPre).toFixed(1)}%" title="N=${x.n}, caching off: ${Math.round(x.off.tok_s)} tok/s"></div></div></div>`).join("")}</div>
-          <div class="chart-x">${P.prefix.map((x) => `<span>N=${x.n}</span>`).join("")}</div></div>` : ""}
-      </div>
-      <div class="note">vLLM serves the 30B operator (NVFP4) and the 0.6B reader from two processes on one card. Measured with the operator's real system prompt and tools; rows from ${esc(P.source)}, method and caveats in ${esc(P.doc)}.</div>`;
-  } catch (e) { box.innerHTML = `<div class="empty">performance error: ${esc(e.message)}</div>`; }
-}
-
-async function loadReal() {
-  const box = $("tab-real");
-  try {
-    const r = await api("/api/realworld");
-    const p = r.post, st = r.stats || {};
-    const lines = p && p.text ? p.text.split(" / ") : [];
-    const ctr = (k, label) => `<div class="ctr"><b>${st[k] ?? "–"}</b><span>${label}</span></div>`;
-    box.innerHTML = p ? `
-      <div class="rw-post">${r.thumb ? `<a href="${esc(p.permalink)}" target="_blank"><img src="/api/file?path=${encodeURIComponent(r.thumb)}" alt="Appling Way room photo"></a>` : ""}
-        <div><div class="livebadge"><i class="dot"></i>Live on Facebook${p.posted ? " since " + esc(p.posted) : ""}</div>
-          <div class="pt">${esc(lines[0] || "Live listing")}</div><div class="pb">${esc(lines.slice(1).join(" "))}</div>
-          <div class="small muted">Written by the operator (Lightning), compliance-checked, posted unedited on the Rentus Homes Facebook Page${p.photos ? ` with ${p.photos} photos` : ""}.</div>
-          <div style="margin-top:8px"><a class="btn" href="${esc(p.permalink)}" target="_blank">Open the live post ↗</a></div></div></div>
-      <div class="h3">Pilot inbox, shadow mode <span class="muted">(counts only)</span></div>
-      <div class="counters">${ctr("inquiries", "inquiries")}${ctr("conversations", "conversations")}${ctr("drafts", "drafts written")}
-        ${ctr("gate_items_captured", "gate items captured")}${ctr("escalations", "escalations")}${ctr("errors", "errors")}</div>
-      <div class="note">The operator reads real replies to this post and drafts answers; it never sends. The owner replies himself, and renter text never enters the repo. Updated ${esc(st.updated_at || "–")}.</div>`
-      : `<div class="empty">No pilot post recorded (docs/DECISIONS.md D20).</div>`;
-  } catch (e) { box.innerHTML = `<div class="empty">real-world panel error: ${esc(e.message)}</div>`; }
-}
-
-// ================================================================ scenarios + runs
-async function loadScenarios() {
-  try {
-    const list = await api("/api/scenarios");
-    const sel = $("scenario"), cur = sel.value;
-    sel.innerHTML = '<option value="">(pick a Gym task)</option>' + list.map((s) => `<option value="${esc(s.id)}">${esc(s.id)}</option>`).join("");
-    sel.value = cur;
-  } catch (e) { /* gym not built */ }
-}
-
-async function startRun(goal, scenarioId) {
-  const body = { goal: goal || "", speed: parseFloat($("speed").value) };
-  if (scenarioId) body.scenario_id = scenarioId;
-  const r = await api("/api/runs", { method: "POST", body });
-  resetUI(); attach(r.run_id); refreshStatus();
-}
-
-function resetUI() {
-  S.seen = new Set(); S.seenMsgs = new Set(); S.editing = {}; S.calls = {}; S.group = null; S.groups = 0; S.reasoning = null; S.cardSig = {};
-  $("trace").innerHTML = ""; $("chatLog").innerHTML = "";
-  renderView({ lanes: {}, register: [], escalations: [], jobs: [], quotes: [], spend: {}, calendar: [], clusters: [], rooms: {} });
-}
-
-function detach() { if (S.es) S.es.close(); S.es = null; S.runId = null; }
-
-function attach(runId) {
-  if (S.es) S.es.close();
-  S.runId = runId;
-  S.es = new EventSource(`/api/runs/${runId}/events`);
-  S.es.onmessage = (m) => {
-    let ev; try { ev = JSON.parse(m.data); } catch { return; }
-    if (S.seen.has(ev._k)) return;
-    S.seen.add(ev._k);
-    onEvent(ev);
-  };
-  scheduleView(0);
-}
-
-function onEvent(ev) {
-  addTrace(ev);
-  const d = ev.data || {};
-  if (ev.type === "owner_message" && ev.actor !== "owner" && d.summary) { /* the turn's final text follows in turn_done */ }
-  else if (ev.type === "owner_message" && d.text && d.text.startsWith("Owner decision on escalation")) sysChat(d.text);
-  else if (ev.type === "owner_message" && d.text) chatBubble("owner", "You", d.text);
-  else if (ev.type === "model_message" && S.status?.mode === "stub" && d.text && !(d.tool_calls || []).length) chatBubble("op", opLabel(d), d.text);
-  else if (ev.type === "turn_done" && d.final_text) chatBubble("op", `${opLabel(d)}${d.who ? " · about " + d.who : ""} · ${d.tool_calls} tool calls in ${d.seconds}s`, cleanReport(d.final_text));
-  else if (ev.type === "escalation") sysChat("Needs you: " + humanize(d.reason || ""));
-  else if (ev.type === "demo_step") sysChat(d.title, "step");
-  else if (ev.type === "owner_decision") sysChat(`You ${d.decision === "approve" ? "approved" : "denied"} ${d.esc_id}${d.via ? " from the " + d.via : ""}${d.edited ? " with an edit" : ""}.`);
-  if (["tool_result", "renter_message", "escalation", "owner_message", "model_message", "owner_decision"].includes(ev.type)) scheduleView(150);
-}
-
-function cleanReport(t) {
-  return String(t).replace(/\*\*/g, "").replace(/^\s*Summary( for (the )?owner)?:\s*/i, "").replace(/ /g, " ").replace(/\n{2,}/g, "\n").trim();
-}
-
-function scheduleView(ms) { clearTimeout(S.viewTimer); S.viewTimer = setTimeout(refreshView, ms); }
-async function refreshView() { if (!S.runId) return; try { renderView(await api(`/api/runs/${S.runId}/view`)); } catch (e) { /* run gone */ } }
-
-// ================================================================ owner chat
-function chatBubble(cls, who, text) {
-  const div = document.createElement("div");
-  div.className = "bubble " + cls;
-  div.innerHTML = `<div class="who">${esc(who)}</div><div class="body">${esc(text)}</div>`;
-  $("chatLog").appendChild(div);
-  const body = div.querySelector(".body");
-  if (cls === "op" && body.scrollHeight > body.clientHeight + 4) {
-    const m = document.createElement("div"); m.className = "more"; m.textContent = "Show all";
-    m.onclick = () => { div.classList.toggle("open"); m.textContent = div.classList.contains("open") ? "Show less" : "Show all"; };
-    div.appendChild(m);
-  }
-  $("chatLog").scrollTop = 1e9;
-}
-function sysChat(text, cls = "") {
-  const div = document.createElement("div");
-  div.className = "bubble sys " + cls;
-  div.textContent = text;
-  $("chatLog").appendChild(div);
-  $("chatLog").scrollTop = 1e9;
-}
-
-async function sendChat(text) {
-  text = text.trim();
-  if (!text) return;
-  $("chatInput").value = "";
-  const live = S.runId && S.status && S.status.active_run === S.runId && !["stopped", "error"].includes(S.status.run_status);
-  try {
-    if (live) await api(`/api/runs/${S.runId}/owner`, { method: "POST", body: { text } });
-    else await startRun(text, null);
-  } catch (e) { sysChat("Send failed: " + e.message); }
-}
-
-// ================================================================ trace (grouped per turn)
-function opLabel(d) {
-  const m = (d && d.model) || "";
-  if (m === "stub" || (!S.badge?.live && !m)) return "operator · stub";
-  return "operator · Lightning 30B";
-}
-
-function actorOf(ev) {
-  const a = ev.actor || "system", d = ev.data || {};
-  if ((ev.type === "tool_call" || ev.type === "tool_result") && d.tool === "read_reply") return ["reader · 0.6B", "reader"];
-  if (a === "router" || (ev.type === "verifier" && d.stage === "router")) return ["router", "router"];
-  if (ev.type === "tool_result" && a === "system") return ["tools · sandbox", "tools"];
-  if (a === "operator") return [opLabel(d).replace("operator · ", "operator · "), "operator"];
-  if (a === "verifier") return ["verifier · code", "verifier"];
-  if (a === "harness") return ["harness · code", "verifier"];
-  if (a.startsWith("renter:") || a.startsWith("tenant:")) return [a.split(":")[0] + " (script)", "renter"];
-  if (a.startsWith("vendor:")) return ["vendor (script)", "vendor"];
-  if (a === "owner") return ["owner", "owner"];
-  if (ev._src === "console") return [ev.type.startsWith("demo") || ev.type.startsWith("approve") ? "demo director" : "console", "system"];
-  return [a, "system"];
-}
-
-function threadOf(ev) {
-  const d = ev.data || {};
-  const args = d.args || d.arguments || {};
-  let t = d.thread_id || (typeof args === "object" && args ? args.thread_id : null);
-  if (!t && d.call_id && S.calls[d.call_id]) t = S.calls[d.call_id].thread;
-  if (!t && (ev.actor || "").includes(":")) t = "who:" + ev.actor.split(":")[1];
-  return t;
-}
-function whoName(t) {
-  if (!t) return "";
-  if (S.threadNames[t]) return S.threadNames[t];
-  if (t.startsWith("who:")) return t.slice(4).replace(/^./, (c) => c.toUpperCase());
-  return t.replace(/^t_(tenant_)?/, "").replace(/^./, (c) => c.toUpperCase());
-}
-
-function fmtArgs(tool, a) {
-  if (!a || typeof a !== "object") return short(a, 90);
-  if (tool === "send_message") return `${a.thread_id ? "" : ""}“${short(a.text || "", 110)}”`;
-  if (tool === "publish_listing") return `${a.channel || ""}${a.listing_id ? " · " + a.listing_id : ""}`;
-  if (tool === "read_reply") return a.text || a.message ? `“${short(a.text || a.message, 90)}”` : `asking for ${a.pending_item || "the next item"}`;
-  const keys = Object.keys(a).filter((k) => k !== "thread_id");
-  return keys.map((k) => `${k}=${short(typeof a[k] === "string" ? a[k] : JSON.stringify(a[k]), 40)}`).join(", ");
-}
-function fmtResult(tool, res) {
-  const d = (res && res.data) || {};
-  if (tool === "publish_listing") return d.status || "ok";
-  if (tool === "read_reply") {
-    const f = d.fields || d;
-    const items = Object.entries(f).filter(([k, v]) => k !== "backend" && v && typeof v === "object" && v.status && v.status !== "absent")
-      .map(([k, v]) => `${GATE_LABEL[k] || k} ${v.status === "answered" ? "✓" : v.status}${v.date || (v.value != null && v.value !== true) ? " " + (v.date || v.value) : ""}`);
-    const lang = f.language && f.language !== "en" ? ` · ${f.language}` : "";
-    return short((items.join(" · ") || "nothing new") + lang, 90);
-  }
-  if (tool === "send_message") return d.status || "sent";
-  if (tool === "upsert_renter") return d.gate_missing ? (d.gate_missing.length ? "missing " + d.gate_missing.join(", ") : "gate complete") : "saved";
-  if (tool === "request_quote") return d.quote ? `$${d.quote.amount}` : "ok";
-  if (tool === "book_vendor") return d.job?.status || "booked";
-  if (d && typeof d === "object" && !Array.isArray(d)) {
-    const parts = Object.entries(d).slice(0, 4).map(([k, v]) => Array.isArray(v) ? `${v.length} ${k}`
-      : v && typeof v === "object" ? (v.status ? `${k} ${v.status}` : k) : `${k} ${short(String(v), 28)}`);
-    return short(parts.join(" · "), 80);
-  }
-  return short(d, 60);
-}
-
-const TRIGGERS = new Set(["owner_message", "renter_message"]);  // console notes arrive from a second file, so they never open a group
-
-function groupFor(ev) {
-  const d = ev.data || {};
-  const isTrigger = TRIGGERS.has(ev.type) && !(ev.type === "owner_message" && ev.actor !== "owner");
-  if (isTrigger || !S.group) {
-    let title = "Run", quote = "", kind = "sys";
-    if (ev.type === "owner_message") { title = d.text?.startsWith("Owner decision") ? "Your decision" : "You"; quote = d.text || ""; kind = "owner"; }
-    else if (ev.type === "renter_message") { title = `${d.name || whoName(threadOf(ev))} wrote${d.channel ? " on " + (LANE_NAMES[d.channel] || d.channel) : ""}`; quote = d.text || ""; kind = "renter"; }
-    else if (ev.type === "demo_step") { title = "Demo step"; quote = d.title || ""; }
-    else if (ev.type === "owner_decision") { title = "Your decision"; quote = `${d.decision} ${d.esc_id}${d.via ? " via " + d.via : ""}`; kind = "owner"; }
-    else if (ev.type === "fault_injected") { title = "Broke it on purpose"; quote = `${FAULT_LABEL[d.kind] || d.kind} on the next ${d.tool}`; kind = "fault"; }
-    else if (ev.type === "scenario") { title = "Gym scenario"; quote = d.scenario_id || ""; }
-    const g = document.createElement("div");
-    g.className = "tg k-" + kind;
-    g.innerHTML = `<div class="tg-h"><span class="car">▾</span><span class="ts">${esc(hms(ev.ts))}</span><span class="tt">${esc(title)}</span>
-      <span class="tq">${quote ? "“" + esc(short(quote, 140)) + "”" : ""}</span><span class="tc"></span></div><div class="tg-b"></div>`;
-    g.querySelector(".tg-h").onclick = () => g.classList.toggle("folded");
-    g._n = 0; g._rec = 0;
-    g.dataset.ts = ev.ts || "";
-    $("trace").appendChild(g);
-    S.group = g; S.groups++;
-    foldOld();
-    if (isTrigger) return { g, header: true };
-  }
-  if (ev.ts && S.group.dataset.ts && ev.ts < S.group.dataset.ts) {  // a late console note: file it under the turn it happened in
-    const gs = [...$("trace").children];
-    const home = gs.filter((x) => x.dataset.ts && x.dataset.ts <= ev.ts).pop() || gs[0];
-    return { g: home, header: false };
-  }
-  return { g: S.group, header: false };
-}
-
-function foldOld() {  // keep the newest groups open; older groups fold unless they hold a recovery
-  const gs = [...$("trace").children];
-  gs.slice(0, Math.max(0, gs.length - 4)).forEach((g) => { if (!g._rec && !g._pinned) g.classList.add("folded"); });
-  while ($("trace").childElementCount > 200) $("trace").removeChild($("trace").firstChild);
-}
-
-function bump(g, rec) {
-  g._n++;
-  if (rec) markRec(g); else drawCount(g);
-}
-function markRec(g) { g._rec++; g.classList.add("has-rec"); g.classList.remove("folded"); drawCount(g); }
-function drawCount(g) {
-  g.querySelector(".tc").innerHTML = `${g._n} step${g._n === 1 ? "" : "s"}${g._rec ? ` · <span class="rc-n">${g._rec} recover${g._rec === 1 ? "y" : "ies"}</span>` : ""}`;
-}
-
-function addRow(g, ev, cls, html, title) {
-  const [label, acls] = actorOf(ev);
-  const t = threadOf(ev);
-  const row = document.createElement("div");
-  row.className = "row " + cls;
-  row.innerHTML = `<span class="ts">${esc(hms(ev.ts))}</span><span class="actor a-${acls}">${esc(label)}</span>
-    <span class="who">${esc(whoName(t))}</span><span class="s">${html}</span>`;
-  row.title = title || row.querySelector(".s").textContent;
-  row.dataset.ts = ev.ts || "";
-  const body = g.querySelector(".tg-b");
-  let before = null;  // console notes come from a second file: keep rows in time order
-  if (ev.ts && body.lastElementChild && body.lastElementChild.dataset.ts > ev.ts) before = [...body.children].find((el) => el.dataset.ts > ev.ts) || null;
-  body.insertBefore(row, before);
-  bump(g, /\b(err|retry|vfail|fb|fault)\b/.test(cls));
-  return row;
-}
-
-function addTrace(ev) {
-  const d = ev.data || {};
-  if (ev.type === "renter_message" && d.thread_id && d.name) S.threadNames[d.thread_id] = d.name;
-  const { g, header } = groupFor(ev);
-  if (header) { followTrace(); return; }
-  let row = null;
-  switch (ev.type) {
-    case "model_message": {
-      if ((d.tool_calls || []).length && !d.text) { S.reasoning = d.reasoning || null; return; }  // folded into the tool row below
-      if (!d.text) return;
-      row = addRow(g, ev, "msg", `says: ${esc(short(d.text.replace(/\*\*/g, ""), 220))}`, d.text);
-      break;
-    }
-    case "tool_call": {
-      const tool = d.tool || d.name;
-      const args = d.args ?? d.arguments ?? {};
-      row = addRow(g, ev, "tool pending", `<span class="tool">${esc(tool)}</span> <span class="res">${esc(fmtArgs(tool, args))}</span> <span class="res">…</span>`,
-        (S.reasoning ? "Why: " + short(S.reasoning, 600) + "\n\n" : "") + tool + " " + JSON.stringify(args));
-      S.reasoning = null;
-      if (d.call_id) S.calls[d.call_id] = { row, tool, args, thread: typeof args === "object" && args ? args.thread_id : null };
-      break;
-    }
-    case "tool_result": {
-      const res = d.result || {};
-      const ok = d.ok ?? res.ok;
-      const err = d.error || res.error;
-      const fault = d.fault ? (typeof d.fault === "string" ? d.fault : d.fault.kind || "fault") : null;
-      const call = d.call_id && S.calls[d.call_id];
-      const tool = d.tool || call?.tool || "";
-      const outcome = ok === false ? `<span class="errm">✗ ${esc(err?.code || "error")}${err?.message ? ": " + esc(short(err.message, 90)) : ""}</span>`
-        : `<span class="okm">✓</span> <span class="res">${esc(fmtResult(tool, res))}</span>`;
-      const fx = fault ? ` <span class="errm">[injected ${esc(fault)}]</span>` : "";
-      if (call && call.row && call.row.parentElement) {
-        const r = call.row;
-        r.classList.remove("pending");
-        if (ok === false || fault) { r.classList.add("err"); markRec(r.closest(".tg")); }
-        r.querySelector(".s").innerHTML = `<span class="tool">${esc(tool)}</span> <span class="res">${esc(fmtArgs(tool, call.args))}</span> → ${outcome}${fx}`;
-        if (tool === "read_reply") { const be = res.data?.backend; r.querySelector(".actor").textContent = be === "fallback" ? "reader · rules" : "reader · 0.6B"; }
-        r.title += "\n→ " + JSON.stringify(res).slice(0, 800);
-        followTrace();
-        return;
-      }
-      row = addRow(g, ev, ok === false || fault ? "err" : "ok", `<span class="tool">${esc(tool)}</span> → ${outcome}${fx}`);
-      break;
-    }
-    case "verifier": {
-      if (d.stage === "router") { row = addRow(g, ev, "msg", `routed: ${esc(d.decision || d.route || d.action || "")}${d.reason ? " · " + esc(d.reason) : ""}`); break; }
-      if (d.stage === "policy") {
-        const cls = d.action === "retry" ? "retry" : d.action === "fallback" ? "fb" : "vfail";
-        row = addRow(g, ev, cls, `policy: ${esc(d.tool || "")} ${esc(d.code || "")} → ${esc(d.action || "")}${d.note ? " (" + esc(d.note) + ")" : ""}`); break;
-      }
-      const what = d.check || d.stage || "";
-      const extra = d.detail || [].concat(d.problems || [], d.repaired || [], d.errors || []).join("; ");
-      if (d.ok !== false && S.hidePasses) return;
-      row = addRow(g, ev, d.ok === false ? "vfail" : "vok", `${d.ok === false ? "✗ caught" : "✓ pass"} ${esc(what)}${d.tool ? " on " + esc(d.tool) : ""}${extra ? ": " + esc(short(extra, 160)) : ""}`);
-      break;
-    }
-    case "retry": row = addRow(g, ev, "retry", `↻ retry ${esc(d.tool || "")} (attempt ${esc(d.attempt ?? "?")}) after ${esc(d.code || d.reason || d.error || "")}${d.delay_s ? `, waited ${esc(d.delay_s)}s` : ""}`); break;
-    case "fallback": row = addRow(g, ev, "fb", `⤳ fallback ${esc(d.tool ? d.tool + ": " : "")}${esc(d.code ? d.code + " · " : "")}${esc(d.from ? d.from + " → " : "")}${esc(d.to || d.note || "")}${d.suggestion ? " → " + esc(d.suggestion) : ""}${d.reason ? " (" + esc(short(d.reason, 100)) + ")" : ""}`); break;
-    case "escalation": row = addRow(g, ev, "esc", `⚑ asks you: ${esc(humanize(d.reason || ""))}${d.draft ? " · draft “" + esc(short(d.draft, 90)) + "”" : ""}`); break;
-    case "fault_injected": row = addRow(g, ev, "fault", `⚡ next ${esc(d.tool)} will fail: ${esc(FAULT_LABEL[d.kind] || d.kind)}${d.match ? " " + esc(JSON.stringify(d.match)) : ""}`); break;
-    case "demo_step": row = addRow(g, ev, "step-row", `▶ demo step: ${esc(d.title || "")}`); break;
-    case "owner_decision": row = addRow(g, ev, "esc", `you ${d.decision === "approve" ? "approved" : "denied"} ${esc(d.esc_id)}${d.via ? " from the " + esc(d.via) : ""}${d.edited ? " with your own wording" : ""}`); break;
-    case "scenario": row = addRow(g, ev, "msg", `Gym scenario ${esc(d.scenario_id)}: ${esc(d.counterparts)} scripted counterparts, ${(d.faults || []).length} scripted faults`); break;
-    case "approve_wait": row = addRow(g, ev, "esc", d.open ? `waiting for you: ${esc(d.open)} decision(s) on the phone` : `owner approval: ${esc(d.detail || "nothing open")}`); break;
-    case "demo_nudge": row = addRow(g, ev, "msg", `nothing was waiting for you, so Devon writes again: “${esc(d.text)}”`); break;
-    case "approve_done": row = addRow(g, ev, "msg", `you decided after ${esc(d.waited_s)}s`); break;
-    case "turn_done": row = addRow(g, ev, "done-row", `turn done${d.who ? " for " + esc(d.who) : ""}: ${esc(d.status)}, ${esc(d.tool_calls)} tool calls in ${esc(d.seconds)}s`); break;
-    case "owner_message": row = addRow(g, ev, "msg", `report to you: ${esc(short(d.summary || d.text || "", 200))}`); break;
-    case "score": row = addRow(g, ev, "ok", `score ${esc(short(d, 160))}`); break;
-    default: row = addRow(g, ev, "msg", `${esc(ev.type)}: ${esc(short(d, 160))}`);
-  }
-  followTrace();
-}
-
-function followTrace() { if ($("followTrace").checked) $("traceScroll").scrollTop = 1e9; }
-
-// ================================================================ view
-function imgSrc(shot) {
-  if (!shot) return null;
-  if (shot.startsWith("data:") || shot.startsWith("http")) return shot;
-  return "/api/file?path=" + encodeURIComponent(shot);
-}
-
-function renderChannels(v) {
-  const lanes = v.lanes || {};
-  const names = [...CHANNELS, ...Object.keys(lanes).filter((c) => !CHANNELS.includes(c))];
-  const lst = (v.listings || []).slice(-1)[0];
-  let html = lst ? `<div class="listing"><div><div class="t">${esc(lst.title || "Listing")}</div><div class="s">$${esc(lst.price)} · ${esc(lst.room_id || "")} · ${esc(lst.status || "")}</div></div></div>`
-    : `<div class="listing"><div><div class="t muted">No listing yet</div><div class="s">tell the operator which room is free</div></div></div>`;
-  for (const ch of names) {
-    const L = lanes[ch] || { posts: [], threads: [] };
-    const p = L.posts.slice(-1)[0];
-    const st = p ? (p.status || "draft") : null;
-    const cls = !st ? "idle" : st === "live" ? "live" : /fail|error|broken|blocked/.test(st) ? "failed" : "ready";
-    const src = p && imgSrc(p.screenshot);
-    const threads = L.threads.length;
-    html += `<div class="chan ${cls}" title="${esc(p ? p.url || st : "not posted")}"><div class="cn"><i class="dot"></i>${esc(LANE_NAMES[ch] || ch)}</div>
-      <div class="cs">${st ? esc(humanize(st)) : "not posted"}${threads ? ` · ${threads} thread${threads === 1 ? "" : "s"}` : ""}</div>
-      ${src ? `<a href="${esc(src)}" target="_blank"><img src="${esc(src)}" alt="${esc(ch)} screenshot"></a>` : ""}</div>`;
-  }
-  $("channels").innerHTML = html;
-}
-
-function convoHtml(msgs, n = 2) {
-  return msgs.slice(-n).map((m) => {
-    const key = `${m._t}:${m._i}`;
-    const fresh = !S.seenMsgs.has(key); S.seenMsgs.add(key);
-    return `<div class="m ${m.from === "operator" ? "operator" : "renter"}${fresh ? " new" : ""}">${esc(m.text)}</div>`;
-  }).join("");
-}
-
-function renderPipeline(v) {
-  const threads = {};
-  for (const [ch, L] of Object.entries(v.lanes || {})) for (const t of L.threads) {
-    threads[t.thread_id] = { ...t, channel: ch, messages: t.messages.map((m, i) => ({ ...m, _t: t.thread_id, _i: i })) };
-    if (t.renter_name) S.threadNames[t.thread_id] = t.renter_name.replace(/\s*\(tenant\)/, "");
-  }
-  const cards = { inquiry: [], qualified: [], showing: [], application: [] };
-  const used = new Set();
-  const cal = Object.fromEntries((v.calendar || []).filter((e) => ["proposed", "confirmed"].includes(e.status)).map((e) => [e.renter_id, e]));
-  for (const r of v.register || []) {
-    const stage = r.stage || "inquiry";
-    if (!cards[stage]) continue;
-    const ts = (r.thread_ids || []).map((id) => threads[id]).filter(Boolean);
-    ts.forEach((t) => used.add(t.thread_id));
-    const t = ts[0];
-    const g = r.gate || {};
-    const done = GATE.filter((k) => (g[k] || {}).state === "ok").length;
-    const facts = [g.move_in?.state === "ok" ? "in " + fmtDate(g.move_in.value) : null, g.occupants?.state === "ok" ? `${g.occupants.value} ${g.occupants.value == 1 ? "person" : "people"}` : null,
-      g.reason?.state === "ok" ? g.reason.value : null].filter(Boolean).join(" · ");
-    const show = cal[r.renter_id];
-    cards[stage].push({ id: r.renter_id, sig: JSON.stringify([r.status, g, t && t.messages.length, show]), html: `
-      <div class="h"><span class="nm">${esc(r.name)}</span>${t ? `<span class="chip">${esc(LANE_NAMES[t.channel] || t.channel)}</span>` : ""}${(r.language || t?.language) && (r.language || t?.language) !== "en" ? `<span class="chip accent">${esc(r.language || t.language)}</span>` : ""}</div>
-      <div class="meta">${esc(STATUS_LABEL[r.status] || humanize(r.status || "new"))} · ${done}/5 gate${facts ? " · " + esc(facts) : ""}</div>
-      <div class="gate">${GATE.map((k) => `<span class="g ${(g[k] || {}).state || "none"}" title="${GATE_LABEL[k]}: ${STATE_WORD[(g[k] || {}).state || "none"]}${g[k]?.value != null ? " (" + esc(g[k].value) + ")" : ""}"></span>`).join("")}</div>
-      <div class="gate-l">${GATE.map((k) => `<span class="${(g[k] || {}).state || "none"}">${GATE_LABEL[k]}</span>`).join("")}</div>
-      ${show ? `<div class="show"><b>Showing ${esc(show.status)}</b> ${esc(fmtDate(show.start))}</div>` : ""}
-      ${t ? `<div class="convo">${convoHtml(t.messages)}</div>` : ""}` });
-  }
-  for (const t of Object.values(threads)) {
-    if (used.has(t.thread_id) || t.kind === "tenant") continue;
-    cards.inquiry.push({ id: t.thread_id, sig: JSON.stringify([t.messages.length]), html: `
-      <div class="h"><span class="nm">${esc(t.renter_name || t.thread_id)}</span><span class="chip">${esc(LANE_NAMES[t.channel] || t.channel)}</span>${t.language && t.language !== "en" ? `<span class="chip accent">${esc(t.language)}</span>` : ""}</div>
-      <div class="meta">New inquiry · not in the register yet</div>
-      <div class="gate">${GATE.map(() => `<span class="g none"></span>`).join("")}</div>
-      <div class="convo">${convoHtml(t.messages)}</div>` });
-  }
-  for (const col of document.querySelectorAll(".stage")) {
-    const list = cards[col.dataset.stage] || [];
-    col.querySelector(".n").textContent = list.length;
-    const body = col.querySelector(".stage-b");
-    const sig = list.map((c) => c.id + c.sig).join("|");
-    if (body.dataset.sig === sig) continue;
-    body.dataset.sig = sig;
-    body.innerHTML = list.length ? list.map((c) => {
-      const changed = S.cardSig[c.id] !== undefined && S.cardSig[c.id] !== c.sig;
-      S.cardSig[c.id] = c.sig;
-      return `<div class="rc${changed ? " flash" : ""}" data-id="${esc(c.id)}">${c.html}</div>`;
-    }).join("") : `<div class="empty">${{ inquiry: "Renters show up here as they write in", qualified: "All five gate items answered exactly", showing: "Proposed, waiting on your confirmation", application: "Applications and placements" }[col.dataset.stage]}</div>`;
-  }
-  return threads;
-}
-
-function renderRegister(v) {
-  const reg = v.register || [];
-  $("regCount").textContent = reg.length ? `${reg.length} ${reg.length === 1 ? "person" : "people"} · never deleted` : "";
-  $("register").innerHTML = reg.length ? reg.map((r) => {
-    const w = r.wants || {}, g = r.gate || {};
-    const area = [].concat((w.areas && (w.areas.resolved || w.areas.raw)) || w.area || []).join(", ");
-    const parts = [area && `<span class="k">area</span> ${esc(area)}`, w.type && esc(w.type), w.budget_max_usd && `<span class="k">≤</span> $${esc(w.budget_max_usd)}`,
-      (g.move_in?.value || w.move_in) && `<span class="k">move-in</span> ${esc(fmtDate(g.move_in?.value || w.move_in))}`,
-      g.occupants?.value && `${esc(g.occupants.value)} ${g.occupants.value == 1 ? "person" : "people"}`,
-      r.reconnect_at && `<span class="k">reconnect</span> ${esc(fmtDate(r.reconnect_at))}`,
-      r.listing_of_interest && `<span class="k">asked about</span> ${esc(r.listing_of_interest)}`].filter(Boolean);
-    return `<div class="rr"><span class="nm">${esc(r.name)}<span class="src">${esc(r.channel || "")}${r.language ? " · " + esc(r.language) : ""}</span></span>
-      <span class="chip ${STATUS_TONE[r.status] || ""}">${esc(STATUS_LABEL[r.status] || humanize(r.status || "new"))}</span>
-      <span class="w">${parts.join(" · ") || '<span class="k">criteria not stated yet</span>'}</span></div>`;
-  }).join("") : `<div class="empty">Every inquiry lands here, whether or not a room fits today.</div>`;
-}
-
-function renderClusters(v) {
-  const cl = v.clusters || [], sig = v.supply_signals || [], rooms = v.rooms || {};
-  let html = rooms.total ? `<div class="inv">${rooms.total} rooms in inventory · ${rooms.listed || 0} listed now</div>` : "";
-  html += sig.map((s) => `<div class="cl"><div class="h"><b>${esc(s.title || s.key || "Supply signal")}</b><span class="chip ok">SIGNAL</span></div>
-    <div class="s">${esc(s.summary || s.note || JSON.stringify(s).slice(0, 160))}</div></div>`).join("");
-  html += cl.map((c) => `<div class="cl"><div class="h"><b>${esc(c.area)} · ${esc(c.type)}</b>
-      <span class="chip ${c.level === "signal" ? "ok" : c.level === "watch" ? "warn" : ""}">${c.level === "signal" ? "SUPPLY SIGNAL" : c.level === "watch" ? "WATCH" : "forming"}</span></div>
-    <div class="bar">${[0, 1, 2, 3, 4].map((i) => `<i class="${i < c.qualified ? "q" : i < c.people ? "p" : ""}"></i>`).join("")}</div>
-    <div class="s">$${c.band[0]} to $${c.band[1]} · ${c.people} active, ${c.qualified} qualified of 5 needed${c.inferred ? " · from the room they asked about" : ""} · ${esc(c.names.join(", "))}</div></div>`).join("");
-  if (!cl.length && !sig.length) html += `<div class="empty">No demand yet.</div>`;
-  html += `<div class="explain">People who want the same area, type and $150 budget band form a cluster. 3 active is WATCH; 5 qualified is a supply signal: the tenants are already waiting, so it is time to find a matching house.</div>`;
-  $("clusters").innerHTML = html;
-}
-
-function renderEscalations(v, threads) {
-  const list = v.escalations || [];
-  const open = list.filter((e) => !e.status || e.status === "open");
-  const shows = (v.calendar || []).filter((e) => e.status === "proposed");
-  const names = Object.fromEntries((v.register || []).map((r) => [r.renter_id, r.name]));
-  $("escCount").textContent = (open.length + shows.length) || "";
-  if (Object.values(S.editing).some(Boolean)) return;  // never wipe a reply the owner is typing
-  const escHtml = list.slice().reverse().map((e) => {
-    const isOpen = !e.status || e.status === "open";
-    const t = threads[e.thread_id || e.ref_id] || null;
-    const last = t ? [...t.messages].reverse().find((m) => m.from === "renter") : null;
-    const job = (v.jobs || []).find((j) => j.job_id === (e.job_id || e.ref_id));
-    const who = t ? t.renter_name : job ? job.property : e.ref_id || "Decision";
-    return `<div class="esc ${isOpen ? "" : "done"}" data-esc="${esc(e.esc_id)}">
-      <div class="top"><b>${esc(who)}</b>${t ? `<span class="chip">${esc(LANE_NAMES[t.channel] || t.channel)}</span>` : ""}
-        ${isOpen ? '<span class="chip accent">decide</span>' : `<span class="chip ${e.status === "approved" ? "ok" : "err"}">${esc(e.status)}</span>`}${e.decided_via ? `<span class="via">via ${esc(e.decided_via)}</span>` : ""}</div>
-      ${last ? `<div class="q">“${esc(short(last.text, 160))}”</div>` : ""}
-      <div class="r">${esc(humanize(e.reason))}</div>
-      ${e.draft || e.owner_text ? `<div class="d"><span class="lbl">${e.owner_text ? "Your reply" : "Drafted reply"}</span>${esc(e.owner_text || e.draft)}</div>` : ""}
-      ${isOpen ? `<div class="btns"><button class="approve" data-esc="${esc(e.esc_id)}" data-d="approve">Approve</button>
-        ${e.draft ? `<button class="edit" data-esc="${esc(e.esc_id)}" data-d="edit">Edit</button>` : ""}
-        <button class="deny" data-esc="${esc(e.esc_id)}" data-d="deny">Deny</button></div>` : ""}</div>`;
-  }).join("");
-  const showHtml = shows.map((e) => `<div class="todo"><span class="chip accent">confirm</span><span><b>Showing with ${esc(names[e.renter_id] || e.renter_id)}</b> ${esc(fmtDate(e.start))}, proposed to the renter as pending your confirmation</span></div>`).join("");
-  $("escalations").innerHTML = escHtml + showHtml || `<div class="empty">Nothing needs you. Money, exceptions and anything the records don't answer come here with a drafted reply.</div>`;
-}
-
-function renderOps(v, threads) {
-  const jobs = v.jobs || [];
-  const tenants = Object.values(threads).filter((t) => t.kind === "tenant");
-  $("opsCard").classList.toggle("hidden", !jobs.length && !tenants.length);
-  const sp = v.spend || {}, lim = sp.limit;
-  const p = lim ? Math.min(100, (100 * (sp.spent || 0)) / lim) : 0;
-  $("spend").innerHTML = lim != null ? `<span>Spent <b>$${(sp.spent || 0).toFixed(0)}</b> of your $${esc(lim)} limit</span><div class="spendbar ${sp.spent > lim ? "over" : ""}"><div style="width:${p}%"></div></div>` : "";
-  $("kpiSpend").textContent = lim != null && jobs.length ? `$${(sp.spent || 0).toFixed(0)} / $${lim}` : "–";
-  const vn = v.vendors || {};
-  const used = new Set();
-  let html = jobs.map((j) => {
-    const qs = (v.quotes || []).filter((q) => q.job_id === j.job_id);
-    const t = tenants.find((x) => x.room_id && x.room_id === j.room_id) || tenants[0];
-    if (t) used.add(t.thread_id);
-    return `<div class="job"><div class="h"><b>${esc(j.issue || "Job")}</b><span class="chip ${j.status === "booked" ? "ok" : ""}">${esc(j.status)}</span></div>
-      <div class="meta muted small">${esc(j.property || "")}${j.vendor_id ? ` · booked ${esc(vn[j.vendor_id] || j.vendor_id)} for $${esc(j.cost)}` : ""}</div>
-      ${qs.length ? `<div class="quotes">${qs.map((q) => `<span class="quote ${q.status === "accepted" || q.vendor_id === j.vendor_id ? "win" : ""}">${esc(vn[q.vendor_id] || q.vendor_id)} $${esc(q.amount)}</span>`).join("")}</div>` : ""}
-      ${t ? `<div class="convo">${convoHtml(t.messages)}</div>` : ""}</div>`;
-  }).join("");
-  html += tenants.filter((t) => !used.has(t.thread_id)).map((t) => `<div class="job"><div class="h"><b>${esc(t.renter_name)}</b><span class="chip">${esc(LANE_NAMES[t.channel] || t.channel)}</span></div>
-    <div class="convo">${convoHtml(t.messages)}</div></div>`).join("");
-  $("jobs").innerHTML = html;
-}
-
-function renderView(v) {
-  S.lastView = v;
-  renderChannels(v);
-  const threads = renderPipeline(v);
-  renderRegister(v);
-  renderClusters(v);
-  renderEscalations(v, threads);
-  renderOps(v, threads);
-}
-
-async function decide(escId, decision, text) {
-  try { await api(`/api/runs/${S.runId}/escalations/${escId}`, { method: "POST", body: { decision, text: text || null, source: "console" } }); }
-  catch (err) { sysChat("Decision failed: " + err.message); }
-  S.editing[escId] = false;
-  scheduleView(200);
-}
-
-// ================================================================ wiring
-function setTheme(t) {
-  document.documentElement.dataset.theme = t;
-  try { localStorage.setItem("rentus-theme", t); } catch (e) { /* storage blocked */ }
-}
-$("themeBtn").onclick = () => {
-  const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-  setTheme(cur === "dark" ? "light" : "dark");
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("rentus." + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("rentus." + k, JSON.stringify(v)); } catch { /* private mode */ } },
 };
-$("chatForm").onsubmit = (e) => { e.preventDefault(); sendChat($("chatInput").value); };
-$("chatInput").onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat($("chatInput").value); } };
-document.querySelectorAll(".hint").forEach((b) => (b.onclick = () => sendChat(b.dataset.text)));
-$("runScenario").onclick = async () => {
-  const sid = $("scenario").value;
-  $("gymMenu").classList.add("hidden");
-  if (!sid) return sysChat("Pick a scenario first (gym/tasks/*.jsonl).");
-  try { await startRun("", sid); } catch (e) { sysChat("Scenario failed: " + e.message); }
+function parseTs(ts) {
+  if (!ts) return null;
+  const d = new Date(ts);
+  return isNaN(d) ? null : d;
+}
+function ago(ts) {
+  const d = parseTs(ts);
+  if (!d) return "";
+  const s = (Date.now() - d) / 1000;
+  if (s < 60) return "now";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  if (s < 86400) return Math.floor(s / 3600) + "h";
+  if (s < 7 * 86400) return d.toLocaleDateString([], { weekday: "short" });
+  return d.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+function clock(ts) {
+  const d = parseTs(ts);
+  return d ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+}
+function day(ts) {
+  const d = parseTs(ts);
+  if (!d) return "";
+  const today = new Date();
+  if (d.toDateString() === today.toDateString()) return "Today";
+  return d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
+}
+
+// ------------------------------------------------------------------ icons
+const I = {
+  messenger: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3C7 3 3 6.7 3 11.3c0 2.5 1.2 4.7 3.1 6.2V21l3.2-1.8c.9.3 1.8.4 2.7.4 5 0 9-3.7 9-8.3S17 3 12 3z"/><path d="m7.5 13 3-3 2.5 2 3.5-3"/></svg>',
+  sms: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M11 18h2"/></svg>',
+  email: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>',
+  listing: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 4l9 6.5V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg>',
+  alert: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>',
+  clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
+  bot: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="12" rx="3"/><path d="M12 3v4M9 12h.01M15 12h.01M9 16h6"/></svg>',
+  inbox: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>',
+  chat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>',
+  plug: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v6M15 2v6M6 8h12v3a6 6 0 0 1-12 0zM12 17v5"/></svg>',
+  plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+  activity: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>',
+  send: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/></svg>',
+  wrench: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0 5 5L21 13l-8 8-4-4 8-8-1.3-1.3a4 4 0 0 0-5-5z" transform="translate(-3 0)"/></svg>',
+  cal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>',
 };
-$("demoBtn").onclick = startDemo;
-$("resetBtn").onclick = async () => { try { await api("/api/reset", { method: "POST" }); } catch (e) { /* */ } detach(); resetUI(); refreshStatus(); };
-$("speed").onchange = async () => {
-  if (S.runId) try { await api(`/api/runs/${S.runId}/speed`, { method: "POST", body: { speed: parseFloat($("speed").value) } }); } catch (e) { /* finished run */ }
+const LISTING_SITES = ["marketplace", "facebook", "roomies", "craigslist", "padsplit", "zillow", "furnished_finder"];
+function chIcon(ch) {
+  ch = (ch || "").toLowerCase();
+  if (ch.includes("messenger") || ch === "facebook_page") return I.messenger;
+  if (ch.includes("sms") || ch.includes("text") || ch.includes("phone")) return I.sms;
+  if (ch.includes("mail")) return I.email;
+  if (LISTING_SITES.some((x) => ch.includes(x))) return I.listing;
+  return I.chat;
+}
+const CH_NAME = { messenger_personal: "Marketplace · Messenger", messenger: "Messenger", sms: "SMS", email: "Email", marketplace: "Marketplace", roomies: "Roomies", craigslist: "Craigslist", padsplit: "PadSplit", facebook: "Facebook" };
+const chName = (c) => CH_NAME[(c || "").toLowerCase()] || (c ? c[0].toUpperCase() + c.slice(1) : "Unknown");
+
+const GATE = [["lease", "Lease"], ["move_in", "Move-in"], ["phone", "Phone"], ["reason", "Reason"], ["people", "People"]];
+function gateDots(g) {
+  g = g || {};
+  return `<span class="gate" title="${GATE.map(([k, l]) => `${l}: ${g[k] || "missing"}`).join(" · ")}">${GATE.map(([k]) => `<i class="${g[k] || "missing"}"></i>`).join("")}</span>`;
+}
+function gateFull(g) {
+  g = g || {};
+  const word = { exact: "", vague: " (vague)", missing: " (missing)" };
+  return `<div class="gate-full">${GATE.map(([k, l]) => `<span class="${g[k] || "missing"}"><span class="gate"><i class="${g[k] || "missing"}"></i></span>${l}${word[g[k] || "missing"]}</span>`).join("")}</div>`;
+}
+const gateCount = (g) => GATE.filter(([k]) => (g || {})[k] === "exact").length;
+
+const STAGES = [["inquiry", "Inquiry"], ["qualifying", "Qualifying"], ["qualified", "Qualified"], ["showing", "Showing"], ["application", "Application"]];
+const STAGE_ALIAS = { new: "inquiry", escalated: "qualifying", showing_proposed: "showing", showing_confirmed: "showing", applied: "application", leased: "application" };
+const stageKey = (s) => STAGE_ALIAS[s] || s || "inquiry";
+function stageBar(s) {
+  const k = stageKey(s);
+  const i = STAGES.findIndex(([x]) => x === k);
+  const label = i >= 0 ? STAGES[i][1] : esc(k);
+  return `<span class="stage">${STAGES.map((_, n) => `<i class="${n <= i ? "on" : ""}"></i>`).join("")}<span>${label}</span></span>`;
+}
+function emptyState(icon, title, text, detail) {
+  return `<div class="empty">${icon}<b>${esc(title)}</b><div>${esc(text)}</div>${detail ? `<div class="detail">${esc(detail)}</div>` : ""}</div>`;
+}
+
+// ------------------------------------------------------------------ global state + polling
+const S = {
+  tab: "inbox", threadId: null, status: null, live: null, threads: null, threadsErr: null, approvals: [], approvalsErr: null,
+  thread: null, threadKey: "", filter: store.get("filter", "all"), activity: store.get("activity", true), actFilter: "all",
+  editing: {}, run: null, runView: null, turns: [], es: null, results: null, trust: null, perf: null, pipeFilter: "all",
 };
-$("breakBtn").onclick = () => { $("breakMenu").classList.toggle("hidden"); $("gymMenu").classList.add("hidden"); };
-$("gymBtn").onclick = () => { $("gymMenu").classList.toggle("hidden"); $("breakMenu").classList.add("hidden"); };
-document.addEventListener("click", (e) => { if (!e.target.closest(".menuwrap")) { $("breakMenu").classList.add("hidden"); $("gymMenu").classList.add("hidden"); } });
-$("escalations").onclick = async (e) => {
-  const b = e.target.closest("button[data-esc]");
-  if (!b) return;
-  const id = b.dataset.esc, card = b.closest(".esc");
-  if (b.dataset.d === "edit") {
-    const cur = (S.lastView.escalations || []).find((x) => x.esc_id === id) || {};
-    S.editing[id] = true;
-    card.querySelector(".d")?.remove();
-    card.querySelector(".btns").insertAdjacentHTML("beforebegin", `<textarea rows="3">${esc(cur.draft || "")}</textarea>`);
-    card.querySelector(".btns").innerHTML = `<button class="approve" data-esc="${esc(id)}" data-d="send">Send my reply</button><button data-esc="${esc(id)}" data-d="cancel">Cancel</button>`;
-    card.querySelector("textarea").focus();
+
+async function pollStatus() {
+  try {
+    S.status = await j("/api/status");
+    const b = S.status.badge || {}, r = S.status.reader || {};
+    setStat("#st-op", b.backend_up, b.backend_up ? "Operator · Lightning on vLLM" : "Operator · offline");
+    setStat("#st-reader", r.live, r.live ? "Reader 0.6B" : "Reader · rules fallback", !r.live ? "warn" : null);
+  } catch { setStat("#st-op", false, "Console offline"); }
+  try {
+    S.live = await j("/api/live/status");
+    const el = $("#st-channels");
+    if (!S.live.available) {
+      el.innerHTML = `<span class="dot"></span>Channels not connected`;
+      el.title = S.live.error || "";
+    } else {
+      el.title = `${S.live.send_enabled ? "Sending enabled" : "Drafts only, nothing is sent"} · allow-list ${S.live.allowlist_size}`;
+      el.innerHTML = (S.live.channels || []).map((c) => `<span class="stat" title="${esc(c.line || "")} ${esc(c.detail || "")}"><span class="dot ${c.connected ? "on" : "off"}"></span>${esc(chName(c.channel))}</span>`).join("") || "No channels";
+    }
+  } catch { /* keep last */ }
+}
+function setStat(sel, on, label, cls) {
+  const el = $(sel);
+  el.innerHTML = `<span class="dot ${cls || (on ? "on" : "off")}"></span>${esc(label)}`;
+}
+
+async function pollLive() {
+  try {
+    const [t, a] = await Promise.all([j("/api/live/threads"), j("/api/live/approvals")]);
+    S.threads = t.items;
+    S.threadsErr = t.available ? null : t.error;
+    S.approvals = a.items || [];
+    S.approvalsErr = a.available ? null : a.error;
+  } catch (e) {
+    S.threadsErr = String(e.message || e);
+  }
+  const liveNeeds = (S.approvals || []).filter((x) => x.source === "live").length;
+  const asstNeeds = (S.approvals || []).filter((x) => x.source === "assistant").length;
+  badge("#nav-inbox", liveNeeds);
+  badge("#nav-assistant", asstNeeds);
+  if (S.tab === "inbox") renderThreadList();
+  if (S.tab === "pipeline") renderPipeline();
+  if (S.tab === "assistant") renderSide();
+}
+function badge(sel, n) {
+  const el = $(sel);
+  el.hidden = !n;
+  el.textContent = n || "";
+}
+
+// ------------------------------------------------------------------ router
+function route() {
+  const parts = (location.hash || "#/inbox").slice(2).split("/");
+  const tab = ["inbox", "assistant", "pipeline", "model"].includes(parts[0]) ? parts[0] : "inbox";
+  S.tab = tab;
+  $$(".nav a[data-tab]").forEach((a) => a.classList.toggle("active", a.dataset.tab === tab));
+  $$("main > .page").forEach((p) => (p.hidden = p.id !== "page-" + tab));
+  if (tab === "inbox") {
+    mountInbox();
+    const id = parts[1] ? decodeURIComponent(parts.slice(1).join("/")) : null;
+    if (id !== S.threadId) openThread(id);
+  }
+  if (tab === "assistant") mountAssistant();
+  if (tab === "pipeline") renderPipeline();
+  if (tab === "model") renderModel();
+}
+window.addEventListener("hashchange", route);
+
+// ================================================================== INBOX
+function mountInbox() {
+  const root = $("#page-inbox");
+  if (root.dataset.mounted) return;
+  root.dataset.mounted = "1";
+  root.innerHTML = `
+    <div class="inbox">
+      <div class="threads">
+        <div class="threads-head">
+          <div class="row"><h1>Inbox</h1><button class="btn sm" id="new-convo" style="margin-left:auto">${I.plus}New conversation</button></div>
+          <div class="seg" id="thread-filter">
+            <button data-f="all">All</button><button data-f="needs">Needs you</button><button data-f="unread">Unread</button>
+          </div>
+        </div>
+        <div class="thread-list" id="thread-list"></div>
+      </div>
+      <div class="convo" id="convo"></div>
+    </div>`;
+  $("#thread-filter").addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    S.filter = b.dataset.f;
+    store.set("filter", S.filter);
+    renderThreadList();
+  });
+  $("#thread-list").addEventListener("click", (e) => {
+    const it = e.target.closest(".titem");
+    if (it) location.hash = "#/inbox/" + encodeURIComponent(it.dataset.id);
+  });
+  $("#new-convo").addEventListener("click", newConversation);
+  renderThreadList();
+  renderConvo();
+}
+
+function needsYou(t) {
+  return t.needs_owner || (S.approvals || []).some((a) => a.source === "live" && a.thread_id === t.thread_id);
+}
+
+function renderThreadList() {
+  const el = $("#thread-list");
+  if (!el) return;
+  const counts = { all: 0, needs: 0, unread: 0 };
+  const items = S.threads || [];
+  items.forEach((t) => { counts.all++; if (needsYou(t)) counts.needs++; if (t.unread) counts.unread++; });
+  $$("#thread-filter button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.f === S.filter);
+    const c = counts[b.dataset.f];
+    b.innerHTML = { all: "All", needs: "Needs you", unread: "Unread" }[b.dataset.f] + (c ? `<span class="c">${c}</span>` : "");
+  });
+  if (S.threads == null) { el.innerHTML = `<div class="empty"><span class="spinner"></span></div>`; return; }
+  if (!items.length) {
+    el.innerHTML = S.threadsErr
+      ? emptyState(I.plug, "Channels aren't connected", "Conversations from Messenger, SMS and email will show up here once the live channels are running.", S.threadsErr)
+      : emptyState(I.inbox, "No conversations yet", "New messages from renters on any channel will appear here.");
     return;
   }
-  if (b.dataset.d === "cancel") { S.editing[id] = false; scheduleView(0); return; }
-  b.disabled = true;
-  if (b.dataset.d === "send") return decide(id, "approve", card.querySelector("textarea").value);
-  decide(id, b.dataset.d);
-};
-$("followTrace").onchange = followTrace;
-$("recoveryOnly").onchange = (e) => $("trace").classList.toggle("recovery-only", e.target.checked);
-$("dockBtn").onclick = () => $("dock").classList.toggle("collapsed");
-function setExpanded(on) { document.querySelector(".evidence").classList.toggle("expanded", on); $("scrim").classList.toggle("hidden", !on); $("expandBtn").textContent = on ? "✕" : "⤢"; }
-$("expandBtn").onclick = () => setExpanded(!document.querySelector(".evidence").classList.contains("expanded"));
-$("scrim").onclick = () => setExpanded(false);
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") setExpanded(false); });
-document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => {
-  $("dock").classList.remove("collapsed");
-  document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("active", x === t));
-  document.querySelectorAll(".tabbody").forEach((x) => x.classList.toggle("hidden", x.id !== "tab-" + t.dataset.tab));
-}));
-$("stages").onclick = (e) => { const c = e.target.closest(".rc"); if (c) c.classList.toggle("expanded"); };
+  const shown = items.filter((t) => S.filter === "all" || (S.filter === "needs" ? needsYou(t) : t.unread));
+  if (!shown.length) { el.innerHTML = emptyState(I.check, "All caught up", S.filter === "needs" ? "Nothing is waiting for you." : "No unread conversations."); return; }
+  el.innerHTML = shown.map((t) => `
+    <div class="titem ${t.unread ? "unread" : ""} ${t.thread_id === S.threadId ? "sel" : ""}" data-id="${esc(t.thread_id)}">
+      <div class="ch" title="${esc(chName(t.channel))}">${chIcon(t.channel)}</div>
+      <div class="name">${esc(t.renter_name || t.contact_display)}</div>
+      <div class="time">${esc(ago(t.last_ts))}</div>
+      <div class="last">${esc(t.last_text || "")}</div>
+      <div class="meta">${needsYou(t) ? `<span class="chip warn">Needs you</span>` : gateDots(t.gate)}</div>
+    </div>`).join("");
+}
 
-resetUI();
-refreshStatus(); loadScenarios(); loadTrust(); loadResults(); loadPerf(); loadReal();
-setInterval(refreshStatus, 1500);
-setInterval(() => scheduleView(0), 2000);
-setInterval(loadReal, 30000);
-setInterval(loadScenarios, 60000);
+async function openThread(id) {
+  S.threadId = id;
+  S.thread = null;
+  S.threadKey = "";
+  S.editing = {};
+  renderThreadList();
+  renderConvo();
+  if (id) await refreshThread();
+}
+
+async function refreshThread() {
+  const id = S.threadId;
+  if (!id || S.tab !== "inbox") return;
+  try {
+    const t = await j("/api/live/threads/" + encodeURIComponent(id));
+    if (id !== S.threadId) return;
+    const key = JSON.stringify([t, (S.approvals || []).filter((a) => a.thread_id === id)]);
+    if (key === S.threadKey) return;
+    S.threadKey = key;
+    S.thread = t;
+    S.threadErr = null;
+    renderConvo();
+  } catch (e) {
+    S.threadErr = String(e.message || e);
+    if (!S.thread) renderConvo();
+  }
+}
+
+function renderConvo() {
+  const root = $("#convo");
+  if (!root) return;
+  if (!S.threadId) {
+    root.innerHTML = emptyState(I.messenger, "Select a conversation", "Pick a thread on the left to read it, approve drafts and see what the operator did.");
+    return;
+  }
+  const t = S.thread;
+  if (!t) {
+    root.innerHTML = S.threadErr ? emptyState(I.alert, "Couldn't load this conversation", "", S.threadErr) : `<div class="empty"><span class="spinner"></span></div>`;
+    return;
+  }
+  // keep composer text and scroll position across refreshes
+  const prevText = $("#reply-text")?.value || "";
+  const msgsEl = $("#msgs");
+  const stick = !msgsEl || msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 40;
+  const prevScroll = msgsEl?.scrollTop;
+  const actScroll = $("#act-list")?.scrollTop;
+  const sameThread = root.dataset.tid === t.thread_id;
+  root.dataset.tid = t.thread_id;
+
+  const pend = (S.approvals || []).filter((a) => a.thread_id === t.thread_id && a.source === "live");
+  root.innerHTML = `
+    <div class="convo-main">
+      <div class="convo-head">
+        <div>
+          <div class="who">${esc(t.renter_name || t.contact_display)}</div>
+          <div class="sub"><span class="chip">${chIcon(t.channel)}${esc(chName(t.channel))}</span>${t.renter_name && t.contact_display !== t.renter_name ? `<span>${esc(t.contact_display)}</span>` : ""}${stageBar(t.stage)}</div>
+        </div>
+        <div class="right">
+          <button class="btn sm ${S.activity ? "" : "ghost"}" id="toggle-act">${I.activity}Activity${(t.trace || []).length ? ` <span class="muted">${t.trace.length}</span>` : ""}</button>
+        </div>
+      </div>
+      <div class="qual">${gateFull(t.gate)}</div>
+      <div class="msgs" id="msgs">${renderMessages((t.messages || []).filter((m) => !(["awaiting_approval", "draft"].includes(m.status) && pend.some((a) => (a.draft_text || "").trim() === (m.text || "").trim()))))}</div>
+      ${pend.map(renderPending).join("")}
+      <div class="composer">
+        <textarea id="reply-text" rows="2" placeholder="Write a reply as yourself…"></textarea>
+        <div class="bar"><span>Replies go out on ${esc(chName(t.channel))}${S.live && !S.live.send_enabled ? " as drafts (sending is off)" : ""}</span><button class="btn primary sm" id="reply-send">${I.send}Send</button></div>
+      </div>
+    </div>
+    ${S.activity ? `<aside class="activity">${renderActivity(t.trace || [])}</aside>` : ""}`;
+  const ta = $("#reply-text");
+  ta.value = prevText;
+  const m = $("#msgs");
+  m.scrollTop = sameThread && !stick ? prevScroll : m.scrollHeight;
+  if (sameThread && actScroll != null && $("#act-list")) $("#act-list").scrollTop = actScroll;
+  $("#toggle-act").onclick = () => { S.activity = !S.activity; store.set("activity", S.activity); renderConvo(); };
+  $("#reply-send").onclick = sendReply;
+  ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendReply(); });
+  bindPending(root);
+  $$("#act-filter button").forEach((b) => (b.onclick = () => { S.actFilter = b.dataset.f; renderConvo(); }));
+}
+
+const STATUS_LABEL = { sent: "Sent", received: "", draft: "Draft", failed: "Failed", awaiting_approval: "Waiting for your approval", delivered: "Delivered", read: "Read" };
+function renderMessages(ms) {
+  if (!ms.length) return emptyState(I.messenger, "No messages yet", "");
+  let lastDay = "";
+  return ms.map((m) => {
+    const d = day(m.ts);
+    const sep = d && d !== lastDay ? `<div class="daysep">${esc(d)}</div>` : "";
+    lastDay = d || lastDay;
+    const st = m.status || (m.direction === "out" ? "sent" : "received");
+    const lbl = STATUS_LABEL[st] ?? st;
+    const ico = st === "sent" || st === "delivered" ? I.check : st === "failed" ? I.alert : st === "awaiting_approval" || st === "draft" ? I.clock : "";
+    return `${sep}<div class="msg ${m.direction === "out" ? "out" : "in"} ${esc(st)}" data-id="${esc(m.id)}">
+      <div class="b">${esc(m.text)}</div>
+      <div class="m">${m.channel ? esc(chName(m.channel)) + " · " : ""}${esc(clock(m.ts))}${lbl ? ` · <span class="st-${esc(st)}">${ico}${esc(lbl)}</span>` : ""}</div>
+    </div>`;
+  }).join("");
+}
+
+function renderPending(a) {
+  const editing = a.id in S.editing;
+  return `<div class="pending" data-aid="${esc(a.id)}">
+    <div class="why"><b>Draft reply waiting for your approval</b>${a.reason ? `<div>${esc(a.reason)}</div>` : ""}</div>
+    ${editing ? `<textarea rows="3" class="edit-text">${esc(S.editing[a.id])}</textarea>` : a.draft_text ? `<div class="draft">${esc(a.draft_text)}</div>` : `<div class="muted small">No draft: write the reply yourself or approve the operator's plan.</div>`}
+    <div class="acts">
+      ${editing
+        ? `<button class="btn ok" data-act="send-edit">${I.check}Send edited reply</button><button class="btn ghost" data-act="cancel">Cancel</button>`
+        : `<button class="btn ok" data-act="approve">${I.check}Approve &amp; send</button><button class="btn" data-act="edit">Edit</button><button class="btn danger" data-act="deny">Deny</button>`}
+    </div>
+  </div>`;
+}
+function bindPending(root, after) {
+  $$(".pending", root).forEach((el) => {
+    const id = el.dataset.aid;
+    el.addEventListener("input", (e) => { if (e.target.classList.contains("edit-text")) S.editing[id] = e.target.value; });
+    el.addEventListener("click", async (e) => {
+      const b = e.target.closest("button[data-act]");
+      if (!b) return;
+      const a = (S.approvals || []).find((x) => x.id === id) || {};
+      const act = b.dataset.act;
+      if (act === "edit") { S.editing[id] = a.draft_text || ""; return rerenderApprovals(after); }
+      if (act === "cancel") { delete S.editing[id]; return rerenderApprovals(after); }
+      const body = act === "send-edit" ? { decision: "edit", text: S.editing[id] } : { decision: act };
+      $$("button", el).forEach((x) => (x.disabled = true));
+      try {
+        await post("/api/live/approvals/" + encodeURIComponent(id), body);
+        delete S.editing[id];
+        S.approvals = S.approvals.filter((x) => x.id !== id);
+        toast(act === "deny" ? "Denied" : "Approved");
+      } catch (err) {
+        toast("Couldn't record the decision: " + err.message);
+      }
+      await pollLive();
+      rerenderApprovals(after);
+    });
+  });
+}
+function rerenderApprovals(after) {
+  if (after) return after();
+  S.threadKey = "";
+  renderConvo();
+  refreshThread();
+}
+
+async function sendReply() {
+  const ta = $("#reply-text");
+  const text = ta.value.trim();
+  if (!text || !S.threadId) return;
+  $("#reply-send").disabled = true;
+  try {
+    await post(`/api/live/threads/${encodeURIComponent(S.threadId)}/reply`, { text });
+    ta.value = "";
+    S.threadKey = "";
+    await refreshThread();
+  } catch (e) {
+    toast("Not sent: " + e.message);
+  } finally {
+    const b = $("#reply-send");
+    if (b) b.disabled = false;
+  }
+}
+
+const ACTOR = { operator: "Operator", reader: "Reader", verifier: "Verifier", tool: "Tool" };
+function markRecoveries(trace) {
+  // a failed step followed later by a successful one is a recovery; label the first success after it
+  const out = trace.map((x) => ({ ...x }));
+  for (let i = 0; i < out.length; i++) {
+    if (out[i].ok !== false) continue;
+    const k = out.findIndex((y, n) => n > i && y.ok !== false && !y._recovers);
+    if (k > 0) { out[k]._recovers = out[i].name || "error"; out[i]._recovered = true; }
+  }
+  return out;
+}
+function renderTrace(trace, filter) {
+  const marked = markRecoveries(trace);
+  const rows = filter === "issues" ? marked.filter((x) => x.ok === false || x._recovers) : marked;
+  if (!rows.length) return `<div class="empty small">${filter === "issues" ? "No errors or recoveries." : "Nothing recorded yet."}</div>`;
+  return rows.map((x) => `
+    <div class="ev ${x.ok === false ? "fail" : x._recovers ? "recovered" : ""}">
+      <div class="ic"><i></i></div>
+      <div class="t"><span class="who ${esc(x.actor)}">${esc(ACTOR[x.actor] || x.actor || "")}</span><span class="nm">${esc(x.name || "")}</span><span class="ts">${esc(clock(x.ts))}</span></div>
+      ${x.summary ? `<div class="s">${esc(x.summary)}</div>` : ""}
+      ${x._recovers ? `<div class="rec">Recovered from ${esc(x._recovers)}</div>` : ""}
+    </div>`).join("");
+}
+function renderActivity(trace) {
+  const n = (a) => trace.filter((x) => x.actor === a).length;
+  const fails = trace.filter((x) => x.ok === false).length;
+  const rec = markRecoveries(trace).filter((x) => x._recovers).length;
+  return `
+    <div class="activity-head">Activity<div class="right"><div class="seg" id="act-filter"><button data-f="all" class="${S.actFilter === "all" ? "on" : ""}">All</button><button data-f="issues" class="${S.actFilter === "issues" ? "on" : ""}">Errors &amp; recoveries</button></div></div></div>
+    <div class="act-sum">
+      <span class="chip">${n("tool") + n("operator")} tool calls</span>
+      <span class="chip">${n("reader")} reader parses</span>
+      <span class="chip ${fails ? "err" : ""}">${fails} caught</span>
+      <span class="chip ${rec ? "ok" : ""}">${rec} recovered</span>
+    </div>
+    <div class="act-list" id="act-list">${renderTrace(trace, S.actFilter)}</div>`;
+}
+
+function newConversation() {
+  const chans = (S.live?.channels || []).map((c) => c.channel);
+  const opts = (chans.length ? chans : ["messenger", "sms", "email"]).map((c) => `<option value="${esc(c)}">${esc(chName(c))}</option>`).join("");
+  const bg = document.createElement("div");
+  bg.className = "modal-bg";
+  bg.innerHTML = `<div class="modal" role="dialog">
+    <h3>New conversation</h3>
+    <div class="mb">
+      <label>Channel<select id="nc-ch">${opts}</select></label>
+      <label>To<input type="text" id="nc-to" placeholder="Phone, email or Messenger id"></label>
+      <label>Message<textarea id="nc-text" rows="3" placeholder="Hi, this is Rentus about the room on…"></textarea></label>
+      <div class="muted small">${S.live?.send_enabled ? `Sends only to the ${S.live.allowlist_size} allow-listed contacts.` : "Sending is off: the message is kept as a draft."}</div>
+    </div>
+    <div class="mf"><button class="btn ghost" data-x>Cancel</button><button class="btn primary" id="nc-go">Start</button></div>
+  </div>`;
+  document.body.appendChild(bg);
+  const close = () => bg.remove();
+  bg.addEventListener("click", (e) => { if (e.target === bg || e.target.closest("[data-x]")) close(); });
+  $("#nc-to", bg).focus();
+  $("#nc-go", bg).onclick = async () => {
+    try {
+      const r = await post("/api/live/conversations", { channel: $("#nc-ch", bg).value, to: $("#nc-to", bg).value, text: $("#nc-text", bg).value });
+      close();
+      await pollLive();
+      const tid = r.result?.thread_id;
+      if (tid) location.hash = "#/inbox/" + encodeURIComponent(tid);
+    } catch (e) { toast(e.message); }
+  };
+}
+
+// ================================================================== ASSISTANT
+function mountAssistant() {
+  const root = $("#page-assistant");
+  if (!root.dataset.mounted) {
+    root.dataset.mounted = "1";
+    root.innerHTML = `
+      <div class="assist">
+        <div class="chat">
+          <div class="page-head" style="padding-bottom:10px;border-bottom:1px solid var(--line)"><h1>Assistant</h1><span class="sub">Tell the operator what you need. It lists rooms, handles repairs and asks you before anything goes out.</span><div class="right"><button class="btn sm" id="new-chat">New chat</button></div></div>
+          <div class="chat-scroll" id="chat-scroll"><div class="chat-inner" id="chat"></div></div>
+          <div class="chat-compose"><div class="composer">
+            <textarea id="ask" rows="2" placeholder="e.g. Appling Way room free Nov 1, $750, private bath"></textarea>
+            <div class="bar"><span id="run-state"></span><button class="btn primary sm" id="ask-send">${I.send}Send</button></div>
+          </div></div>
+        </div>
+        <aside class="side" id="side"></aside>
+      </div>`;
+    $("#ask-send").onclick = ask;
+    $("#ask").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); ask(); } });
+    $("#new-chat").onclick = async () => {
+      await post("/api/reset").catch(() => {});
+      attachRun(null);
+    };
+    $("#chat").addEventListener("click", (e) => {
+      const b = e.target.closest(".steps-toggle");
+      if (b) { const t = S.turns[+b.dataset.i]; t.open = !t.open; renderChat(); return; }
+      const s = e.target.closest(".suggest button");
+      if (s) { $("#ask").value = s.textContent; ask(); }
+    });
+  }
+  const active = S.status?.active_run;
+  const live = active && !["stopped", "error"].includes(S.status?.run_status);
+  if (live && active !== S.run) attachRun(active);
+  else if (!live && !S.run) renderChat();
+  renderSide();
+}
+
+function attachRun(id) {
+  if (S.es) { S.es.close(); S.es = null; }
+  S.run = id;
+  S.turns = [];
+  S.runView = null;
+  S.calls = {};
+  renderChat();
+  renderSide();
+  if (!id) return;
+  S.es = new EventSource(`/api/runs/${id}/events`);
+  let pending = false;
+  S.es.onmessage = (m) => {
+    try { onRunEvent(JSON.parse(m.data)); } catch { return; }
+    if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; renderChat(); }); }
+  };
+}
+
+function curTurn() { return S.turns[S.turns.length - 1]; }
+function onRunEvent(e) {
+  const d = e.data || {};
+  if (e.type === "owner_message" && e.actor === "owner") {
+    S.turns.push({ owner: d.text, steps: [], reply: null, done: false, open: false, ts: e.ts });
+    return;
+  }
+  const t = curTurn();
+  if (!t) return;
+  if (e._src === "console" && e.type === "turn_done" && (d.kind === "owner" || !d.thread_id)) {
+    if (d.kind !== "owner") return;
+    t.done = true;
+    t.reply = d.final_text || t.reply;
+    t.stats = d;
+    return;
+  }
+  if (e.type === "owner_message" && e.actor === "operator") { t.reply = t.reply || d.summary || d.text; return; }
+  if (d.thread_id && e.type !== "escalation") return; // renter conversations are not part of the owner's chat
+  if (e.type === "tool_call") {
+    const s = { kind: "tool", actor: e.actor === "verifier" ? "verifier" : "operator", name: d.tool, args: d.args, ok: null, ts: e.ts };
+    t.steps.push(s);
+    if (d.call_id) S.calls[d.call_id] = s;
+  } else if (e.type === "tool_result") {
+    const s = S.calls[d.call_id];
+    const r = d.result || {};
+    if (s) { s.ok = r.ok !== false; s.err = r.error ? (r.error.code || "") + (r.error.message ? ": " + r.error.message : "") : null; s.result = r.data; }
+  } else if (e.type === "verifier" && d.ok === false) {
+    t.steps.push({ kind: "verifier", actor: "verifier", name: d.stage || "check", ok: false, err: (d.problems || []).join("; "), ts: e.ts });
+  } else if (e.type === "retry") {
+    t.steps.push({ kind: "retry", actor: "verifier", name: "retry " + (d.tool || ""), ok: true, err: `${d.code || ""} → retried (attempt ${d.attempt || 1})`, ts: e.ts, recovery: true });
+  } else if (e.type === "fallback") {
+    t.steps.push({ kind: "fallback", actor: "verifier", name: "fallback " + (d.tool || ""), ok: true, err: [d.code, d.suggestion || d.note].filter(Boolean).join(" → "), ts: e.ts, recovery: true });
+  } else if (e.type === "reader" || (e.type === "tool_call" && d.tool === "read_reply")) {
+    t.steps.push({ kind: "reader", actor: "reader", name: "read_reply", ok: true, ts: e.ts });
+  }
+}
+
+function argSummary(a) {
+  if (!a || typeof a !== "object") return "";
+  const parts = Object.entries(a).filter(([, v]) => v != null && v !== "").slice(0, 3).map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`);
+  const s = parts.join(", ");
+  return s.length > 110 ? s.slice(0, 107) + "…" : s;
+}
+function renderChat() {
+  const el = $("#chat");
+  if (!el) return;
+  const st = S.status?.run_status;
+  const busy = S.turns.length && !curTurn().done;
+  $("#run-state").textContent = busy ? "Working…" : S.run ? "" : "Enter to send";
+  if (!S.turns.length) {
+    el.innerHTML = `<div class="empty" style="padding-top:80px">${I.bot}<b>What should the operator do?</b><div>Describe a room to list, a repair, or a question about your renters.</div>
+      <div class="suggest">
+        <button>Appling Way room free Nov 1, $750, private bath. Post it on Marketplace, Roomies and Craigslist.</button>
+        <button>The tenant at Appling Way says the kitchen sink is leaking. Get quotes and book the cheapest plumber under $400.</button>
+      </div></div>`;
+    return;
+  }
+  const sc = $("#chat-scroll");
+  const stick = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 60;
+  el.innerHTML = S.turns.map((t, i) => {
+    const tools = t.steps.filter((s) => s.kind === "tool").length;
+    const issues = t.steps.filter((s) => s.ok === false).length;
+    const recov = t.steps.filter((s) => s.recovery).length;
+    const trace = t.steps.map((s) => ({ ts: s.ts, actor: s.name === "read_reply" ? "reader" : s.actor, name: s.name, ok: s.ok === null ? undefined : s.ok,
+      summary: s.err || argSummary(s.args) }));
+    return `<div class="turn-owner">${esc(t.owner)}</div>
+      <div class="turn-op"><div class="av">${I.bot}</div><div class="body">
+        ${t.reply ? `<div class="text">${esc(t.reply)}</div>` : ""}
+        ${!t.done ? `<div class="working"><span class="spinner"></span>${t.steps.length ? esc(lastStepLabel(t)) : "Thinking…"}</div>` : ""}
+        ${t.steps.length ? `<button class="steps-toggle" data-i="${i}">${t.open ? "Hide" : "Show"} ${tools} tool call${tools === 1 ? "" : "s"}${t.stats?.seconds ? ` · ${Math.round(t.stats.seconds)}s` : ""}${issues ? ` <span class="chip err">${issues} caught</span>` : ""}${recov ? ` <span class="chip ok">${recov} recovered</span>` : ""}</button>` : ""}
+        ${t.open ? `<div class="steps">${renderTrace(trace, "all")}</div>` : ""}
+      </div></div>`;
+  }).join("");
+  if (stick) sc.scrollTop = sc.scrollHeight;
+  void st;
+}
+function lastStepLabel(t) {
+  const s = t.steps[t.steps.length - 1];
+  return s.kind === "tool" ? `Calling ${s.name}…` : s.name;
+}
+
+async function ask() {
+  const ta = $("#ask");
+  const text = ta.value.trim();
+  if (!text) return;
+  ta.value = "";
+  const st = S.status?.run_status;
+  try {
+    if (!S.run || ["stopped", "error"].includes(st)) {
+      const r = await post("/api/runs", { goal: text, seed_renters: false });
+      attachRun(r.run_id);
+      S.status = { ...(S.status || {}), active_run: r.run_id, run_status: "starting" };
+    } else {
+      await post(`/api/runs/${S.run}/owner`, { text });
+    }
+  } catch (e) {
+    toast("Couldn't reach the operator: " + e.message);
+    ta.value = text;
+  }
+}
+
+async function pollRunView() {
+  if (S.tab !== "assistant" || !S.run) return;
+  try {
+    S.runView = await j(`/api/runs/${S.run}/view`);
+    renderSide();
+  } catch { /* run gone */ }
+}
+
+const POST_STATUS = {
+  live: ["ok", "Posted"], posted: ["ok", "Posted"], ready_to_submit: ["warn", "Needs your click"], draft: ["", "Draft"],
+  failed: ["err", "Failed"], error: ["err", "Failed"], pending: ["", "Posting…"],
+};
+function renderSide() {
+  const el = $("#side");
+  if (!el || S.tab !== "assistant") return;
+  const key = JSON.stringify([S.runView, (S.approvals || []).filter((a) => a.source === "assistant"), S.editing]);
+  if (key === el.dataset.key) return;
+  if ($(".edit-text", el) && document.activeElement?.classList.contains("edit-text")) return; // don't clobber typing
+  el.dataset.key = key;
+  const v = S.runView;
+  const aps = (S.approvals || []).filter((a) => a.source === "assistant");
+  const out = [];
+  if (aps.length) out.push(`<h2>Needs your approval</h2>` + aps.map(renderPending).join(""));
+  for (const l of v?.listings || []) {
+    const chans = Object.entries(l.channels || {});
+    out.push(`<h2>Listing</h2><div class="card listing-prev"><div class="card-body">
+      <div style="display:flex;gap:8px;align-items:baseline"><div class="ttl">${esc(l.title || l.listing_id)}</div><div class="price" style="margin-left:auto">${l.price ? "$" + esc(l.price) + "/mo" : ""}</div></div>
+      ${l.body ? `<div class="desc">${esc(l.body)}</div>` : ""}
+    </div>${chans.length ? `<div class="card-body rows" style="border-top:1px solid var(--line)">${chans.map(([ch, p]) => {
+      p = typeof p === "object" && p ? p : { status: String(p) };
+      const [cls, label] = POST_STATUS[p.status] || ["", p.status || "–"];
+      const link = p.url ? `<a class="btn sm" href="${esc(p.url)}" target="_blank" rel="noopener">${p.status === "ready_to_submit" ? "Publish" : "View"}</a>`
+        : p.screenshot ? `<a class="btn sm" href="/api/file?path=${encodeURIComponent(p.screenshot)}" target="_blank">${p.status === "ready_to_submit" ? "Review &amp; publish" : "Screenshot"}</a>` : "";
+      return `<div>${chIcon(ch)}${esc(chName(ch))}<span class="r"><span class="chip ${cls}">${esc(label)}</span>${link}</span></div>`;
+    }).join("")}</div>` : ""}</div>`);
+  }
+  for (const jb of v?.jobs || []) {
+    const qs = (v.quotes || []).filter((q) => q.job_id === jb.job_id);
+    const vendor = (id) => v.vendors?.[id] || id;
+    out.push(`<h2>Maintenance</h2><div class="card"><div class="card-body">
+      <div style="display:flex;gap:8px"><b>${esc(jb.issue || jb.job_id)}</b><span class="chip ${jb.status === "booked" || jb.status === "done" ? "ok" : ""}" style="margin-left:auto">${esc(jb.status || "open")}</span></div>
+      <div class="muted small">${esc(jb.address || jb.property || "")}${jb.scheduled_for ? " · scheduled " + esc(jb.scheduled_for) : ""}</div>
+    </div>${qs.length ? `<div class="card-body rows" style="border-top:1px solid var(--line)">${qs.map((q) => `<div>${esc(q.vendor_name || vendor(q.vendor_id))}<span class="r"><span class="num">$${esc(q.amount)}</span><span class="chip ${q.status === "accepted" ? "ok" : q.status === "declined" ? "" : ""}">${esc(q.status || "quoted")}</span></span></div>`).join("")}</div>` : ""}
+    ${v.spend?.limit ? `<div class="card-body small muted" style="border-top:1px solid var(--line)">Spent $${esc(v.spend.spent)} of your $${esc(v.spend.limit)} limit</div>` : ""}</div>`);
+  }
+  const cal = (v?.calendar || []).filter((c) => c.status !== "cancelled");
+  if (cal.length) out.push(`<h2>Showings</h2><div class="card"><div class="card-body rows">${cal.map((c) => `<div>${I.cal}${esc(c.title)}<span class="r"><span class="muted small">${esc((c.start || "").replace("T", " "))}</span><span class="chip ${c.status === "confirmed" ? "ok" : "warn"}">${esc(c.status)}</span></span></div>`).join("")}</div></div>`);
+  el.innerHTML = out.length ? out.join("") : emptyState(I.listing, "Nothing here yet", "Listings, posting status, repair quotes and showings the operator works on appear here.");
+  bindPending(el, () => { delete el.dataset.key; renderSide(); });
+}
+
+// ================================================================== PIPELINE
+function renderPipeline() {
+  const root = $("#page-pipeline");
+  if (S.tab !== "pipeline") return;
+  const items = S.threads || [];
+  const counts = {};
+  items.forEach((t) => (counts[stageKey(t.stage)] = (counts[stageKey(t.stage)] || 0) + 1));
+  const shown = items.filter((t) => S.pipeFilter === "all" || stageKey(t.stage) === S.pipeFilter)
+    .sort((a, b) => STAGES.findIndex(([k]) => k === stageKey(b.stage)) - STAGES.findIndex(([k]) => k === stageKey(a.stage)) || String(b.last_ts).localeCompare(String(a.last_ts)));
+  const key = JSON.stringify([shown, S.pipeFilter, counts]);
+  if (root.dataset.key === key) return;
+  root.dataset.key = key;
+  root.innerHTML = `
+    <div class="page-head"><h1>Pipeline</h1><span class="sub">${items.length} ${items.length === 1 ? "person" : "people"} across all channels</span></div>
+    <div class="page-body">
+      <div class="seg" id="pipe-filter" style="margin-bottom:14px">
+        <button data-f="all" class="${S.pipeFilter === "all" ? "on" : ""}">All<span class="c">${items.length || ""}</span></button>
+        ${STAGES.map(([k, l]) => `<button data-f="${k}" class="${S.pipeFilter === k ? "on" : ""}">${l}<span class="c">${counts[k] || ""}</span></button>`).join("")}
+      </div>
+      <div class="card">${!items.length
+        ? emptyState(I.inbox, S.threadsErr ? "Channels aren't connected" : "No prospects yet", "Everyone who writes in on any channel shows up here with their stage and what we still need from them.", S.threadsErr)
+        : !shown.length ? emptyState(I.check, "No one at this stage", "")
+        : `<table class="t"><thead><tr><th>Name</th><th>Channel</th><th>Stage</th><th>Qualification</th><th>Last message</th><th class="r">Updated</th></tr></thead><tbody>
+        ${shown.map((t) => `<tr class="click" data-id="${esc(t.thread_id)}">
+          <td><b>${esc(t.renter_name || t.contact_display)}</b>${needsYou(t) ? ` <span class="chip warn">Needs you</span>` : ""}</td>
+          <td><span class="chip">${chIcon(t.channel)}${esc(chName(t.channel))}</span></td>
+          <td>${stageBar(t.stage)}</td>
+          <td>${gateDots(t.gate)} <span class="muted small num">${gateCount(t.gate)}/5</span></td>
+          <td><div class="ell">${esc(t.last_text || "")}</div></td>
+          <td class="r muted num">${esc(ago(t.last_ts))}</td></tr>`).join("")}</tbody></table>`}
+      </div>
+    </div>`;
+  $("#pipe-filter").onclick = (e) => { const b = e.target.closest("button"); if (b) { S.pipeFilter = b.dataset.f; renderPipeline(); } };
+  $$("tr.click", root).forEach((r) => (r.onclick = () => (location.hash = "#/inbox/" + encodeURIComponent(r.dataset.id))));
+}
+
+// ================================================================== MODEL
+function wilson(p, n, z = 1.96) {
+  if (p == null || !n) return null;
+  const d = 1 + (z * z) / n, c = (p + (z * z) / (2 * n)) / d, h = (z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n))) / d;
+  return [Math.max(0, c - h), Math.min(1, c + h)];
+}
+function barChart(rows, { max = 1, fmt = (x) => pct(x), hl = () => false, labelW = 200 } = {}) {
+  // horizontal bars with optional 95% CI whiskers: rows = [{label, value, ci:[lo,hi], sub}]
+  const W = 640, rowH = 30, top = 6, bottom = 22, plotW = W - labelW - 60;
+  const H = top + rows.length * rowH + bottom;
+  const x = (v) => labelW + Math.max(0, Math.min(1, v / max)) * plotW;
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => f * max);
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img">`;
+  ticks.forEach((tk) => { s += `<line class="grid" x1="${x(tk)}" x2="${x(tk)}" y1="${top}" y2="${H - bottom}"/><text x="${x(tk)}" y="${H - 6}" text-anchor="middle">${fmt(tk)}</text>`; });
+  rows.forEach((r, i) => {
+    const y = top + i * rowH, cy = y + rowH / 2;
+    s += `<text class="lab" x="${labelW - 10}" y="${cy + 4}" text-anchor="end">${esc(r.label)}</text>`;
+    if (r.value == null) { s += `<text x="${labelW + 4}" y="${cy + 4}">no data</text>`; return; }
+    s += `<rect class="bar ${hl(r) ? "hl" : ""}" x="${labelW}" y="${y + 7}" width="${Math.max(1, x(r.value) - labelW)}" height="${rowH - 14}" rx="3"/>`;
+    if (r.ci) s += `<line class="whisk" x1="${x(r.ci[0])}" x2="${x(r.ci[1])}" y1="${cy}" y2="${cy}"/><line class="whisk" x1="${x(r.ci[0])}" x2="${x(r.ci[0])}" y1="${cy - 5}" y2="${cy + 5}"/><line class="whisk" x1="${x(r.ci[1])}" x2="${x(r.ci[1])}" y1="${cy - 5}" y2="${cy + 5}"/>`;
+    s += `<text class="val" x="${x(r.ci ? Math.max(r.ci[1], r.value) : r.value) + 8}" y="${cy + 4}">${fmt(r.value)}</text>`;
+  });
+  return s + "</svg>";
+}
+const ciTxt = (ci, f = pct) => (ci ? `<span class="ci">${f(ci[0])}–${f(ci[1])}</span>` : "");
+const pTxt = (p) => (p == null ? "–" : p < 0.001 ? "<0.001" : p.toFixed(3));
+
+async function renderModel(force) {
+  const root = $("#page-model");
+  if (!S.results || force) {
+    if (!root.innerHTML) root.innerHTML = `<div class="empty"><span class="spinner"></span></div>`;
+    const [r, t, p] = await Promise.allSettled([j("/api/results"), j("/api/trust"), j("/api/performance")]);
+    S.results = r.value || null;
+    S.trust = t.value || null;
+    S.perf = p.value || null;
+    S.modelAt = Date.now();
+  }
+  if (S.tab !== "model") return;
+  const R = S.results || {}, T = S.trust || {}, P = S.perf || {};
+  const cfgs = R.configs || [];
+  const base = cfgs.find((c) => c.kind === "baseline"), fin = cfgs.find((c) => c.kind === "final");
+  const rd = T.reader || {};
+  const budget = T.budget || {};
+  const kinds = { baseline: 0, final: 1, variant: 2, reference: 3 };
+  const ordered = [...cfgs].sort((a, b) => (kinds[a.kind] ?? 2) - (kinds[b.kind] ?? 2));
+  const tasks = fin?.tasks || base?.tasks;
+  const short = (l) => String(l || "").replace(", same harness (reference)", " (reference)").replace(" simple_agent", "");
+
+  const kpi = (l, v, d) => `<div class="card kpi"><div class="l">${l}</div><div class="v num">${v}</div><div class="d">${d}</div></div>`;
+  const heldout = cfgs.length ? `
+    <div class="section">
+      <h2>Held-out evaluation${R.version ? ` <span class="chip">${esc(R.version)}</span>` : ""}</h2>
+      <p class="lead">${tasks || "–"} held-out tasks the system never trained or tuned on, scored by code checks in a simulated landlord world. Bars show the mean over runs; whiskers are 95% confidence intervals.</p>
+      <div class="grid2">
+        <div class="card chart"><div class="ttl">Pass rate</div><div class="cap">Share of tasks where every check passed</div>${barChart(ordered.map((c) => ({ label: short(c.label), value: c.pass_rate, ci: c.pass_ci, kind: c.kind })), { hl: (r) => r.kind === "final" })}</div>
+        <div class="card chart"><div class="ttl">Mean reward</div><div class="cap">Average share of checks passed per task</div>${barChart(ordered.map((c) => ({ label: short(c.label), value: c.mean_reward, ci: c.reward_ci, kind: c.kind })), { hl: (r) => r.kind === "final", fmt: (x) => fix(x, 2) })}</div>
+      </div>
+      <div class="card" style="margin-top:16px"><table class="t"><thead><tr><th>Configuration</th><th class="r">Runs</th><th class="r">Pass rate</th><th class="r">Mean reward</th><th class="r">Passes every run</th><th class="r">Median time / task</th><th class="r">Model calls / task</th></tr></thead><tbody>
+        ${ordered.map((c) => `<tr class="${c.kind === "final" ? "hl" : ""}"><td><b>${esc(c.label)}</b><div class="muted small">${esc(c.model || "")}${c.config_label ? " · " + esc(c.config_label) : ""}</div></td>
+          <td class="r num">${c.runs ?? "–"}</td><td class="r num">${pct(c.pass_rate, 1)}<br>${ciTxt(c.pass_ci, (x) => pct(x, 0))}</td>
+          <td class="r num">${fix(c.mean_reward, 3)}<br>${ciTxt(c.reward_ci, (x) => fix(x, 2))}</td>
+          <td class="r num">${c.pass_all_runs == null ? "–" : pct(c.pass_all_runs, 0)}</td><td class="r num">${c.task_seconds_p50 == null ? "–" : Math.round(c.task_seconds_p50) + " s"}</td>
+          <td class="r num">${c.model_calls_mean == null ? "–" : fix(c.model_calls_mean, 1)}</td></tr>`).join("")}
+      </tbody></table></div>
+      ${(R.compare || []).length ? `<div class="card" style="margin-top:16px"><div class="card-head">Paired comparisons<span class="right muted small">same tasks, Holm-corrected p-values</span></div><table class="t"><thead><tr><th>Comparison</th><th class="r">Δ mean reward</th><th class="r">95% CI</th><th class="r">p (reward)</th><th class="r">Δ pass rate</th><th class="r">Tasks better / worse</th><th class="r">p (pass)</th></tr></thead><tbody>
+        ${R.compare.map((c) => `<tr><td>${esc(c.a)} <span class="muted">vs</span> ${esc(c.b)}</td><td class="r num">${c.d_reward >= 0 ? "+" : ""}${fix(c.d_reward, 3)}</td><td class="r num ci">${fix(c.d_reward_ci?.[0], 3)} to ${fix(c.d_reward_ci?.[1], 3)}</td><td class="r num">${pTxt(c.p_reward_holm)}</td><td class="r num">${c.d_pass >= 0 ? "+" : ""}${pct(c.d_pass, 1)}</td><td class="r num">${c.a_better} / ${c.b_better}</td><td class="r num">${pTxt(c.p_pass_holm)}</td></tr>`).join("")}
+      </tbody></table></div>` : ""}
+      ${R.categories?.baseline && R.categories?.final ? `<div class="card" style="margin-top:16px"><div class="card-head">By category</div><table class="t"><thead><tr><th>Category</th><th class="r">Tasks</th><th class="r">Baseline pass</th><th class="r">Final pass</th><th class="r">Baseline reward</th><th class="r">Final reward</th></tr></thead><tbody>
+        ${Object.keys(R.categories.final).map((k) => { const b = R.categories.baseline[k] || {}, f = R.categories.final[k] || {}; return `<tr><td>${esc(k)}</td><td class="r num">${f.tasks ?? b.tasks ?? "–"}</td><td class="r num">${pct(b.pass_rate, 0)}</td><td class="r num"><b>${pct(f.pass_rate, 0)}</b></td><td class="r num">${fix(b.mean_reward, 2)}</td><td class="r num"><b>${fix(f.mean_reward, 2)}</b></td></tr>`; }).join("")}
+      </tbody></table></div>` : ""}
+      <div class="src">Source: <code>${esc(R.source || "")}</code> · <code>${esc(R.doc || "")}</code></div>
+    </div>` : `<div class="section"><h2>Held-out evaluation</h2><div class="card">${emptyState(I.activity, "No held-out results yet", "Results appear here as soon as the evaluation runs write their files.")}</div></div>`;
+
+  const n = rd.sample_n;
+  const readerRows = [
+    { label: "rentus-reader 0.6B (ours)", value: rd.sample?.finetuned, hl: true },
+    { label: "Claude Opus 5.5", value: rd.opus_exact_match },
+    { label: "Rules fallback (code)", value: rd.sample?.fallback },
+    { label: "Lightning 30B, prompted", value: rd.sample?.lightning },
+    { label: "Qwen3-0.6B, not fine-tuned", value: rd.sample?.base },
+  ].map((r) => ({ ...r, ci: wilson(r.value, n) }));
+  const reader = rd.sample ? `
+    <div class="section">
+      <h2>Reader</h2>
+      <p class="lead">The reader turns a renter's message into exact fields (lease length, move-in date, phone, reason, people). Exact match means every field is right. Same ${n} held-out messages for every model; whiskers are Wilson 95% intervals.</p>
+      <div class="grid2">
+        <div class="card chart"><div class="ttl">Exact match</div><div class="cap">${n} held-out messages</div>${barChart(readerRows, { hl: (r) => r.hl })}</div>
+        <div class="card"><table class="t"><tbody>
+          <tr><td class="muted">Base model</td><td>${esc(rd.base_model)} + supervised fine-tuning</td></tr>
+          <tr><td class="muted">Training</td><td class="num">${esc(rd.train_rows?.toLocaleString())} rows, ${esc(rd.train_minutes)} min on one ${esc(rd.gpu)}</td></tr>
+          <tr><td class="muted">Full test set</td><td class="num">${pct(rd.exact_match_full, 1)} exact match on ${esc(rd.test_rows?.toLocaleString())} rows</td></tr>
+          <tr><td class="muted">Latency (p50)</td><td class="num">${rd.latency_p50_s != null ? Math.round(rd.latency_p50_s * 1000) + " ms" : "–"} <span class="muted">vs Opus ${rd.opus_latency_p50_s != null ? fix(rd.opus_latency_p50_s, 1) + " s" : "–"}</span></td></tr>
+          <tr><td class="muted">Cost per read</td><td class="num">$0 on our GPU <span class="muted">vs Opus $${fix(rd.opus_cost_per_read_usd, 4)}</span></td></tr>
+          <tr><td class="muted">Weights</td><td>${rd.hf ? `<a href="${esc(rd.hf)}" target="_blank" rel="noopener">${esc(rd.hf.replace("https://", ""))}</a>` : "–"}</td></tr>
+        </tbody></table></div>
+      </div>
+    </div>` : "";
+
+  const pre = P.prefix || [], rsn = P.reasoning || [], sweep = P.sweep || [];
+  const ron = rsn.find((x) => x.reasoning === "on"), roff = rsn.find((x) => x.reasoning === "off");
+  const serving = sweep.length || pre.length ? `
+    <div class="section">
+      <h2>Serving on vLLM</h2>
+      <p class="lead">Both models run on one ${esc(P.hardware?.gpu || "GPU")}${P.hardware?.price ? ` (${esc(P.hardware.price)})` : ""} under vLLM. Replayed operator requests (about ${sweep[0]?.prompt_tok_mean?.toLocaleString() || "6,000"} prompt tokens, with tool calls) at increasing concurrency. ${P.totals ? `${P.totals.requests.toLocaleString()} requests, ${P.totals.errors} errors.` : ""}</p>
+      <div class="grid2">
+        ${pre.length ? `<div class="card"><div class="card-head">Prefix caching<span class="right muted small">time to first token, p50</span></div><table class="t"><thead><tr><th>Concurrent requests</th><th class="r">Caching on</th><th class="r">Caching off</th><th class="r">Cache hit rate</th><th class="r">Throughput on / off</th></tr></thead><tbody>
+          ${pre.map((r) => `<tr><td class="num">${r.n}</td><td class="r num"><b>${r.on?.ttft_p50_ms ?? "–"} ms</b></td><td class="r num">${r.off?.ttft_p50_ms ?? "–"} ms</td><td class="r num">${pct(r.on?.hit, 0)}</td><td class="r num">${fix(r.on?.tok_s, 0)} / ${fix(r.off?.tok_s, 0)} tok/s</td></tr>`).join("")}
+        </tbody></table></div>` : ""}
+        ${ron && roff ? `<div class="card"><div class="card-head">Reasoning off for tool calls<span class="right muted small">${ron.n} concurrent</span></div><table class="t"><thead><tr><th></th><th class="r">Reasoning off</th><th class="r">Reasoning on</th></tr></thead><tbody>
+          <tr><td>Requests / s</td><td class="r num"><b>${fix(roff.req_s, 1)}</b></td><td class="r num">${fix(ron.req_s, 1)}</td></tr>
+          <tr><td>Latency p50</td><td class="r num"><b>${fix(roff.lat_p50_s, 2)} s</b></td><td class="r num">${fix(ron.lat_p50_s, 2)} s</td></tr>
+          <tr><td>Latency p95</td><td class="r num"><b>${fix(roff.lat_p95_s, 2)} s</b></td><td class="r num">${fix(ron.lat_p95_s, 2)} s</td></tr>
+          <tr><td>Output tokens / request</td><td class="r num"><b>${roff.out_tok_mean}</b></td><td class="r num">${ron.out_tok_mean}</td></tr>
+          <tr><td>Requests ending in a tool call</td><td class="r num">${pct(roff.tool_call_share, 0)}</td><td class="r num">${pct(ron.tool_call_share, 0)}</td></tr>
+        </tbody></table></div>` : ""}
+      </div>
+      ${sweep.length ? `<div class="card" style="margin-top:16px"><div class="card-head">Two models on one card<span class="right muted small">operator load vs reader latency on the same GPU</span></div><table class="t"><thead><tr><th>Concurrent operator requests</th><th class="r">Operator throughput</th><th class="r">Operator latency p50 / p95</th><th class="r">Time to first token p50</th><th class="r">Reader latency p50 / p95</th><th class="r">Errors</th></tr></thead><tbody>
+        ${sweep.map((r) => `<tr><td class="num">${r.n}</td><td class="r num">${fix(r.tok_s, 0)} tok/s</td><td class="r num">${fix(r.lat_p50_s, 1)} / ${fix(r.lat_p95_s, 1)} s</td><td class="r num">${r.ttft_p50_ms} ms</td><td class="r num">${r.reader_p50_ms} / ${r.reader_p95_ms} ms</td><td class="r num">${r.errors}</td></tr>`).join("")}
+      </tbody></table></div>` : ""}
+      <div class="src">Source: <code>${esc(P.source || "")}</code> · method in <code>${esc(P.doc || "")}</code></div>
+    </div>` : "";
+
+  const roles = T.roles || [];
+  const budgetSec = budget.limit_b ? `
+    <div class="section">
+      <h2>Parameter budget</h2>
+      <p class="lead">Every generative model the running system loads, by total parameters. The limit is ${budget.limit_b}B.</p>
+      <div class="card"><div class="card-body">
+        <div style="display:flex;align-items:baseline;gap:8px"><span class="num" style="font-size:20px;font-weight:600">${fix(budget.used_b, 1)}B</span><span class="muted">of ${budget.limit_b}B used</span></div>
+        <div class="budget">${roles.filter((r) => r.params_b).map((r, i) => `<i style="width:${(r.params_b / budget.limit_b) * 100}%;background:${i ? "#0e9aa7" : "var(--accent)"}" title="${esc(r.who)} ${r.params_b}B"></i>`).join("")}</div>
+      </div><table class="t"><thead><tr><th>Role</th><th>Model</th><th class="r">Parameters</th><th>Served</th><th>Does</th></tr></thead><tbody>
+        ${roles.map((r) => `<tr><td><b>${esc(r.who)}</b></td><td>${r.link ? `<a href="${esc(r.link)}" target="_blank" rel="noopener">${esc(r.model)}</a>` : esc(r.model)}</td><td class="r num">${r.params_b ? r.params_b + "B" : "–"}</td><td class="muted">${esc(r.served)}</td><td class="muted">${esc(r.does)}</td></tr>`).join("")}
+      </tbody></table>${budget.note ? `<div class="card-body src" style="margin:0">${esc(budget.note)}</div>` : ""}</div>
+    </div>` : "";
+
+  root.innerHTML = `
+    <div class="page-head"><h1>Model</h1><span class="sub">How the system performs, measured on held-out data</span><div class="right"><span class="muted small" id="model-at">Updated ${new Date(S.modelAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span><button class="btn sm" id="model-refresh">Refresh</button></div></div>
+    <div class="page-body">
+      <div class="kpis">
+        ${kpi("Held-out pass rate", fin ? pct(fin.pass_rate, 0) : "–", base ? `baseline ${pct(base.pass_rate, 0)}` : "")}
+        ${kpi("Held-out mean reward", fin ? fix(fin.mean_reward, 2) : "–", base ? `baseline ${fix(base.mean_reward, 2)}` : "")}
+        ${kpi("Reader exact match", rd.sample ? pct(rd.sample.finetuned, 0) : "–", rd.opus_exact_match != null ? `Claude Opus 5.5 ${pct(rd.opus_exact_match, 0)}` : "")}
+        ${kpi("Parameters", budget.used_b != null ? fix(budget.used_b, 1) + "B" : "–", budget.limit_b ? `of ${budget.limit_b}B allowed` : "")}
+      </div>
+      ${heldout}${reader}${serving}${budgetSec}
+    </div>`;
+  $("#model-refresh").onclick = () => renderModel(true);
+}
+
+// ------------------------------------------------------------------ boot
+async function tick() {
+  await pollStatus();
+  await pollLive();
+  if (S.tab === "inbox") await refreshThread();
+  if (S.tab === "assistant") {
+    const active = S.status?.active_run;
+    if (active && active !== S.run && !["stopped", "error"].includes(S.status?.run_status)) attachRun(active);
+    await pollRunView();
+    renderChat();
+  }
+  if (S.tab === "model" && S.modelAt && Date.now() - S.modelAt > 60000) renderModel(true);
+}
+(async function boot() {
+  await pollStatus();
+  route();
+  await tick();
+  setInterval(tick, 2500);
+})();

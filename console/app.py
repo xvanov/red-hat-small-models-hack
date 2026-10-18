@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import integration as integ
+from . import live as livemod
 from . import panels
 from .demo import DEMO_PATCH, Director
 from .events import Tail, utc_now
@@ -188,7 +189,8 @@ def start_run(body: dict = Body(default={})):
     run = None
     if mode in ("operator", "operator-stub"):
         try:
-            run = OperatorRun(run_id, run_dir, goal, scenario, speed, live=mode == "operator", badge=badge)
+            kw = {"seed_renters": False} if body.get("seed_renters") is False and not scenario else {}
+            run = OperatorRun(run_id, run_dir, goal, scenario, speed, live=mode == "operator", badge=badge, **kw)
         except Exception as e:
             _console_note(run_id, "fallback", {"from": "rentus_operator", "to": "console stub driver",
                                                "reason": f"{type(e).__name__}: {e}"})
@@ -400,6 +402,128 @@ def set_speed(run_id: str, body: dict = Body(...)):
 def stop_run(run_id: str):
     _live_run(run_id).stop()
     return {"ok": True}
+
+
+# ------------------------------------------------------------------ live channels (channels/live/api.py)
+def _live(fn: str, *args, default=None, **kw):
+    try:
+        return livemod.call(fn, *args, **kw), None
+    except livemod.Unavailable as e:
+        return default, str(e)
+    except Exception as e:  # the live module raised: show it as a degraded state, never a 500
+        return default, f"{type(e).__name__}: {e}"
+
+
+@app.get("/api/live/status")
+def live_status():
+    st, err = _live("status")
+    if not isinstance(st, dict):
+        return {"available": False, "error": err, "channels": [], "send_enabled": False, "allowlist_size": 0}
+    chans = st.get("channels")
+    if chans is None:  # per-channel dicts keyed by name, or a list
+        chans = [dict(v, channel=v.get("channel") or k) for k, v in st.items() if isinstance(v, dict)]
+    elif isinstance(chans, dict):
+        chans = [dict(v, channel=v.get("channel") or k) for k, v in chans.items() if isinstance(v, dict)]
+    return {"available": True, "error": None, "channels": chans, "send_enabled": bool(st.get("send_enabled")),
+            "allowlist_size": st.get("allowlist_size") or 0}
+
+
+@app.get("/api/live/threads")
+def live_threads():
+    ts, err = _live("list_threads", default=[])
+    items = [livemod.norm_thread(t) for t in (ts or []) if isinstance(t, dict)]
+    items.sort(key=lambda t: str(t.get("last_ts") or ""), reverse=True)
+    return {"available": err is None, "error": err, "items": items}
+
+
+@app.get("/api/live/threads/{thread_id}")
+def live_thread(thread_id: str):
+    t, err = _live("get_thread", thread_id)
+    if err:
+        raise HTTPException(503, err)
+    if not t:
+        raise HTTPException(404, f"no thread {thread_id}")
+    t = livemod.norm_thread(t)
+    t["messages"] = [m for m in (t.get("messages") or []) if isinstance(m, dict)]
+    t["trace"] = [x for x in (t.get("trace") or []) if isinstance(x, dict)]
+    return t
+
+
+@app.post("/api/live/threads/{thread_id}/reply")
+def live_reply(thread_id: str, body: dict = Body(...)):
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "text required")
+    r, err = _live("send_owner_message", thread_id, text)
+    if err:
+        raise HTTPException(503, err)
+    return {"ok": True, "result": r}
+
+
+@app.post("/api/live/conversations")
+def live_start(body: dict = Body(...)):
+    ch, to, text = (body.get("channel") or "").strip(), (body.get("to") or "").strip(), (body.get("text") or "").strip()
+    if not (ch and to and text):
+        raise HTTPException(400, "channel, to and text are required")
+    r, err = _live("start_conversation", ch, to, text)
+    if err:
+        raise HTTPException(503, err)
+    return {"ok": True, "result": r}
+
+
+def _run_approvals() -> list[dict]:
+    """Open escalations of the Assistant's active run, in the same shape as live approvals."""
+    try:
+        a = approvals()
+    except Exception:
+        return []
+    out = []
+    for i in a.get("items") or []:
+        if i.get("status") != "open":
+            continue
+        out.append({"id": f"run:{a['run_id']}:{i['esc_id']}", "source": "assistant", "thread_id": i.get("ref"),
+                    "who": i.get("who") or (i.get("job") or {}).get("property") or "Assistant",
+                    "channel": i.get("channel"), "reason": i.get("reason"), "draft_text": i.get("draft"),
+                    "last_message": i.get("last_renter_message"), "created": i.get("created_at")})
+    return out
+
+
+@app.get("/api/live/approvals")
+def live_approvals():
+    ap, err = _live("list_approvals", default=[])
+    names = {}
+    if ap:
+        ts, _ = _live("list_threads", default=[])
+        names = {t.get("thread_id"): t for t in ts or [] if isinstance(t, dict)}
+    items = []
+    for a in ap or []:
+        if not isinstance(a, dict):
+            continue
+        t = names.get(a.get("thread_id")) or {}
+        items.append({**a, "source": "live", "who": a.get("who") or t.get("contact_display") or t.get("renter_name"),
+                      "channel": a.get("channel") or t.get("channel"), "last_message": a.get("last_message") or t.get("last_text")})
+    items += _run_approvals()
+    return {"available": err is None, "error": err, "items": items}
+
+
+@app.post("/api/live/approvals/{approval_id:path}")
+def live_decide(approval_id: str, body: dict = Body(...)):
+    decision = body.get("decision")
+    if decision not in ("approve", "edit", "deny"):
+        raise HTTPException(400, "decision must be approve, edit or deny")
+    text = (body.get("text") or "").strip() or None
+    if decision == "edit" and not text:
+        raise HTTPException(400, "edit needs text")
+    if approval_id.startswith("run:"):
+        _, run_id, esc_id = approval_id.split(":", 2)
+        return decide(run_id, esc_id, {"decision": "deny" if decision == "deny" else "approve", "text": text,
+                                       "source": (body.get("source") or "console")})
+    r, err = _live("decide", approval_id, decision, text=text)
+    if err and decision == "edit":  # an api that only knows approve/deny takes the edited text with approve
+        r, err = _live("decide", approval_id, "approve", text=text)
+    if err:
+        raise HTTPException(503, err)
+    return {"ok": True, "result": r}
 
 
 @app.get("/api/file")

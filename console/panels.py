@@ -200,12 +200,13 @@ def trust() -> dict:
 # ------------------------------------------------------------------ v2 held-out results with CIs
 _STATS = {"mod": None}
 _RESULTS_CACHE: dict = {"key": None, "value": None}
-V2_RE = re.compile(r"^v2-heldout-(?P<name>.+?)(?:-s(?P<seed>\d+))?$")
+V2_RE = re.compile(r"^v(?P<ver>[2-9])-heldout-(?P<name>.+?)(?:-s(?P<seed>\d+))?$")
 V2_LABELS = {  # run-name stem -> (label, kind); unknown stems are shown by name
     "baseline": ("Baseline", "baseline"),
     "final": ("Final", "final"),
     "final-router": ("Final + router", "variant"),
     "final-nemo": ("Final on NeMo Gym simple_agent", "variant"),
+    "frontier-cc-guard+prompt3+style+rhist+readermodel": ("Claude Opus 5.5, same harness (reference)", "reference"),
 }
 
 
@@ -223,18 +224,24 @@ def _stats():
 
 
 def _v2_groups() -> dict[str, list[Path]]:
-    groups: dict[str, list[Path]] = {}
+    """Held-out run groups of the newest protocol version that has both a baseline and a final run
+    (v3 once its runs land, v2 until then). Runs still in progress (no summary.json yet) are skipped."""
+    by_ver: dict[str, dict[str, list[Path]]] = {}
     if not GYM.is_dir():
-        return groups
+        return {}
     for d in sorted(GYM.iterdir()):
         m = V2_RE.match(d.name)
-        if not (m and d.is_dir() and (d / "per_task.jsonl").exists()):
+        if not (m and d.is_dir() and (d / "per_task.jsonl").exists() and (d / "summary.json").exists()):
             continue
         s = _json(d / "summary.json") or {}
-        if s.get("invalid") or s.get("stub"):
+        if s.get("invalid") or s.get("stub") or s.get("void") or s.get("still_failed"):
             continue
-        groups.setdefault(m.group("name"), []).append(d)
-    return groups
+        by_ver.setdefault(m.group("ver"), {}).setdefault(m.group("name"), []).append(d)
+    for ver in sorted(by_ver, reverse=True):
+        if {"baseline", "final"} <= set(by_ver[ver]):
+            _RESULTS_CACHE["ver"] = ver
+            return by_ver[ver]
+    return {}
 
 
 def results_v2() -> dict:
@@ -243,8 +250,9 @@ def results_v2() -> dict:
     key = tuple((n, tuple((p.name, (p / "per_task.jsonl").stat().st_mtime) for p in ps)) for n, ps in sorted(groups.items()))
     if key == _RESULTS_CACHE["key"]:
         return _RESULTS_CACHE["value"]
-    out = {"configs": [], "compare": [], "categories": {}, "source": "gym/results/v2-heldout-*/per_task.jsonl via gym/stats.py",
-           "doc": "docs/results.md"}
+    ver = _RESULTS_CACHE.get("ver") or "2"
+    out = {"configs": [], "compare": [], "categories": {}, "version": f"v{ver}",
+           "source": f"gym/results/v{ver}-heldout-*/per_task.jsonl via gym/stats.py", "doc": "docs/results.md"}
     if not groups:
         _RESULTS_CACHE.update(key=key, value=out)
         return out
@@ -265,7 +273,8 @@ def results_v2() -> dict:
         secs = [r["seconds"] for r in rows if isinstance(r.get("seconds"), (int, float))]
         calls = [r["model_calls"] for r in rows if isinstance(r.get("model_calls"), (int, float))]
         cost = [r["cost_usd"] for r in rows if isinstance(r.get("cost_usd"), (int, float))]
-        label, kind = V2_LABELS.get(name, (name.replace("-", " "), "reference" if "frontier" in name else "variant"))
+        label, kind = V2_LABELS.get(name, ("Claude Opus 5.5, same harness (reference)", "reference") if name.startswith("frontier")
+                                    else (name.replace("-", " "), "variant"))
         k = s["k"]
         cfgs[name] = cfg
         out["configs"].append({
